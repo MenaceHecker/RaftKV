@@ -1,0 +1,18 @@
+# Binaries
+/bin/
+raftkv-server
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+
+# Runtime data produced by a local cluster
+/data/
+*.wal
+*.snap
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp
