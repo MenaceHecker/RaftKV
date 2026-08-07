@@ -89,6 +89,12 @@ type Options struct {
 
 	// SegmentSize is the rollover threshold in bytes. Zero means
 	// DefaultSegmentSize.
+	//
+	// It is a soft threshold, not a cap. Rollover is considered only after a
+	// write completes, so a batch is never split across two files and a
+	// single large append can overshoot it. Keeping a batch whole means a
+	// crash can never leave half of one append in a segment that survives
+	// compaction and half in one that does not.
 	SegmentSize int64
 }
 
