@@ -103,12 +103,29 @@ const (
 	MsgAppendRequest
 	// MsgAppendResponse answers a MsgAppendRequest.
 	MsgAppendResponse
+	// MsgHeartbeat is a leader asking its followers to confirm, right now,
+	// that they still recognize it. It carries no entries and replicates
+	// nothing.
+	//
+	// This is deliberately separate from MsgAppendRequest even though an
+	// empty append also serves as a heartbeat. A linearizable read has to
+	// know that a majority acknowledged leadership *after* the read was
+	// registered, and an append response cannot prove that: it may have been
+	// sent before the read arrived and merely be slow, during which time
+	// another leader could have been elected. The echoed Context is what
+	// makes an acknowledgement attributable to a specific round.
+	MsgHeartbeat
+	// MsgHeartbeatResponse answers a MsgHeartbeat, echoing its Context.
+	MsgHeartbeatResponse
 	// MsgCampaign is a local signal telling a node to start an election now
 	// rather than waiting out its election timeout.
 	MsgCampaign
 	// MsgPropose is a local signal carrying a client command for a leader to
 	// append to its log.
 	MsgPropose
+	// MsgReadIndex is a local signal asking the leader to establish a read
+	// index for a linearizable read (§6.4).
+	MsgReadIndex
 )
 
 // String renders the message type for logs and test failure messages.
@@ -122,10 +139,16 @@ func (t MessageType) String() string {
 		return "AppendRequest"
 	case MsgAppendResponse:
 		return "AppendResponse"
+	case MsgHeartbeat:
+		return "Heartbeat"
+	case MsgHeartbeatResponse:
+		return "HeartbeatResponse"
 	case MsgCampaign:
 		return "Campaign"
 	case MsgPropose:
 		return "Propose"
+	case MsgReadIndex:
+		return "ReadIndex"
 	default:
 		return "Unknown"
 	}
@@ -185,4 +208,13 @@ type Message struct {
 	// entry.
 	ConflictIndex Index
 	ConflictTerm  Term
+
+	// Context is an opaque token carried by MsgReadIndex, MsgHeartbeat, and
+	// MsgHeartbeatResponse. The leader mints one per read-index round and
+	// followers echo it back unchanged, which is what lets the leader count
+	// only the acknowledgements belonging to that round.
+	//
+	// The Raft core never interprets it; the layer above uses it to match a
+	// completed read index back to the client request that asked for it.
+	Context []byte
 }
