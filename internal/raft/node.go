@@ -444,6 +444,16 @@ func (n *Node) becomeLeader() error {
 	n.progress[n.id].match = n.log.lastIndex()
 	n.progress[n.id].next = n.log.lastIndex() + 1
 
+	// Reconsider the commit index before sending anything. In a single-node
+	// cluster the leader's own append is already a majority, and no response
+	// will ever arrive to trigger this later — without it such a cluster
+	// elects a leader that can never commit its own no-op, and therefore
+	// never commits anything at all.
+	//
+	// In a larger cluster this is a no-op: the followers' match indexes are
+	// still zero, so no majority exists yet.
+	n.maybeCommit()
+
 	n.broadcastAppend()
 	return nil
 }

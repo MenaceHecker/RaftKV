@@ -26,6 +26,23 @@ func TestSingleNodeElectsItself(t *testing.T) {
 	if got := c.node(1).Term(); got != 1 {
 		t.Fatalf("term = %d, want 1", got)
 	}
+
+	// Becoming leader is not enough: with no peers, no acknowledgement will
+	// ever arrive to advance the commit index, so the leader must recognize
+	// its own append as a majority immediately. Otherwise the cluster elects a
+	// leader that can never commit anything.
+	if got := c.node(1).CommitIndex(); got != c.node(1).LastIndex() {
+		t.Fatalf("commit index = %d, last index = %d; a single-node leader must commit "+
+			"its own entries without waiting for anyone\n%s",
+			got, c.node(1).LastIndex(), c.dump())
+	}
+
+	if err := c.propose(1, "set x=1"); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	if got := c.commands(1); len(got) != 1 || got[0] != "set x=1" {
+		t.Fatalf("applied %v, want [set x=1]\n%s", got, c.dump())
+	}
 }
 
 func TestElectionTimeoutProducesLeader(t *testing.T) {
