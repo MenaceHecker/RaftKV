@@ -129,6 +129,14 @@ type Node struct {
 	// Leader; rebuilt from scratch on election.
 	progress map[NodeID]*progress
 
+	// readOnly tracks in-flight read-index confirmations. Only meaningful
+	// while Leader; abandoned on any state change.
+	readOnly *readOnly
+
+	// readStates accumulates completed read indexes until Ready collects
+	// them, mirroring how msgs accumulates outbound messages.
+	readStates []ReadState
+
 	electionElapsed  int
 	heartbeatElapsed int
 	electionTick     int
@@ -176,6 +184,7 @@ func NewNode(cfg Config) (*Node, error) {
 		log:           newRaftLog(cfg.Storage),
 		votes:         make(map[NodeID]bool),
 		progress:      make(map[NodeID]*progress),
+		readOnly:      newReadOnly(),
 		electionTick:  cfg.ElectionTick,
 		heartbeatTick: cfg.HeartbeatTick,
 		rand:          rng,
@@ -220,11 +229,16 @@ type Ready struct {
 	// CommittedEntries are the entries newly known to be committed, in index
 	// order, ready for the state machine.
 	CommittedEntries []Entry
+
+	// ReadStates are read indexes whose leadership has been confirmed. The
+	// caller must wait until the state machine has applied through each
+	// Index before serving the corresponding read.
+	ReadStates []ReadState
 }
 
 // IsEmpty reports whether there is nothing for the caller to do.
 func (r Ready) IsEmpty() bool {
-	return len(r.Messages) == 0 && len(r.CommittedEntries) == 0
+	return len(r.Messages) == 0 && len(r.CommittedEntries) == 0 && len(r.ReadStates) == 0
 }
 
 // Ready drains the pending effects.
@@ -234,8 +248,9 @@ func (r Ready) IsEmpty() bool {
 // crash part-way through applying replays those entries rather than skipping
 // them.
 func (n *Node) Ready() Ready {
-	rd := Ready{Messages: n.msgs}
+	rd := Ready{Messages: n.msgs, ReadStates: n.readStates}
 	n.msgs = nil
+	n.readStates = nil
 
 	committed, err := n.log.nextCommitted()
 	if err != nil {
@@ -290,6 +305,9 @@ func (n *Node) Step(m Message) error {
 	case m.Type == MsgPropose:
 		return n.propose(m.Entries)
 
+	case m.Type == MsgReadIndex:
+		return n.handleReadIndex(m)
+
 	case m.Term > n.term:
 		// A newer term means this node's information is out of date,
 		// whatever its role. Step down, then handle the message as a
@@ -330,6 +348,10 @@ func (n *Node) Step(m Message) error {
 		return n.handleAppendRequest(m)
 	case MsgAppendResponse:
 		return n.handleAppendResponse(m)
+	case MsgHeartbeat:
+		return n.handleHeartbeat(m)
+	case MsgHeartbeatResponse:
+		return n.handleHeartbeatResponse(m)
 	default:
 		return fmt.Errorf("raft: unhandled message type %s", m.Type)
 	}
@@ -443,6 +465,13 @@ func (n *Node) reset() {
 	n.electionElapsed = 0
 	n.heartbeatElapsed = 0
 	n.votes = make(map[NodeID]bool)
+
+	// In-flight read confirmations belong to the role being left. A node that
+	// is no longer leader cannot confirm anything, and one that has just
+	// become leader must not inherit acknowledgements collected under a
+	// previous term.
+	n.readOnly.reset()
+
 	n.resetElectionTimeout()
 }
 

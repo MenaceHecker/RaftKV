@@ -42,6 +42,9 @@ type cluster struct {
 	// the same order.
 	applied map[NodeID][]Entry
 
+	// readStates records the completed read indexes each node has reported.
+	readStates map[NodeID][]ReadState
+
 	// inflight holds messages produced but not yet delivered.
 	inflight []Message
 
@@ -77,11 +80,12 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 	}
 
 	c := &cluster{
-		t:        t,
-		ids:      ids,
-		nodes:    make(map[NodeID]*Node, size),
-		storages: make(map[NodeID]*MemoryStorage, size),
-		applied:  make(map[NodeID][]Entry, size),
+		t:          t,
+		ids:        ids,
+		nodes:      make(map[NodeID]*Node, size),
+		storages:   make(map[NodeID]*MemoryStorage, size),
+		applied:    make(map[NodeID][]Entry, size),
+		readStates: make(map[NodeID][]ReadState, size),
 	}
 
 	for _, id := range ids {
@@ -174,6 +178,7 @@ func (c *cluster) collect() {
 		}
 		c.inflight = append(c.inflight, rd.Messages...)
 		c.applied[id] = append(c.applied[id], rd.CommittedEntries...)
+		c.readStates[id] = append(c.readStates[id], rd.ReadStates...)
 		// Acknowledging only after recording mirrors the real contract: a
 		// caller advances once the entries are safely applied.
 		n.Advance(rd)
