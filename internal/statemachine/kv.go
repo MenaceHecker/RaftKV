@@ -71,6 +71,13 @@ const maxFieldSize = 64 << 20 // 64 MiB
 // Command is a single mutation of the store, the thing carried in an entry's
 // opaque Data field.
 type Command struct {
+	// ClientID identifies the client session this request belongs to, or
+	// NoClient for a request that is not deduplicated.
+	ClientID uint64
+	// Seq is the client's strictly increasing sequence number. Together with
+	// ClientID it lets the state machine recognize a retry and ignore it.
+	Seq uint64
+
 	Op    Op
 	Key   string
 	Value []byte // ignored for OpDelete
@@ -84,8 +91,10 @@ type Command struct {
 // differently on different nodes or Go versions, and the whole point of the
 // state machine is that every replica does exactly the same thing.
 func (c Command) Encode() []byte {
-	buf := make([]byte, 0, 1+8+len(c.Key)+8+len(c.Value))
+	buf := make([]byte, 0, 1+16+8+len(c.Key)+8+len(c.Value))
 	buf = append(buf, byte(c.Op))
+	buf = appendUint64(buf, c.ClientID)
+	buf = appendUint64(buf, c.Seq)
 	buf = appendBytes(buf, []byte(c.Key))
 	buf = appendBytes(buf, c.Value)
 	return buf
@@ -106,6 +115,14 @@ func DecodeCommand(b []byte) (Command, error) {
 
 	r := &reader{b: b, pos: 1}
 
+	clientID, err := r.uint64()
+	if err != nil {
+		return Command{}, fmt.Errorf("%w: reading client ID: %w", ErrMalformedCommand, err)
+	}
+	seq, err := r.uint64()
+	if err != nil {
+		return Command{}, fmt.Errorf("%w: reading sequence: %w", ErrMalformedCommand, err)
+	}
 	key, err := r.bytes()
 	if err != nil {
 		return Command{}, fmt.Errorf("%w: reading key: %w", ErrMalformedCommand, err)
@@ -115,7 +132,13 @@ func DecodeCommand(b []byte) (Command, error) {
 		return Command{}, fmt.Errorf("%w: reading value: %w", ErrMalformedCommand, err)
 	}
 
-	return Command{Op: op, Key: string(key), Value: value}, nil
+	return Command{
+		ClientID: clientID,
+		Seq:      seq,
+		Op:       op,
+		Key:      string(key),
+		Value:    value,
+	}, nil
 }
 
 // KV is the replicated key-value store.
@@ -126,6 +149,11 @@ type KV struct {
 	mu   sync.RWMutex
 	data map[string][]byte
 
+	// sessions deduplicates client retries. It is part of the state machine,
+	// not a server-side cache, so every replica reaches the same conclusion
+	// about which requests are duplicates.
+	sessions *sessions
+
 	// applied is the index of the last entry incorporated into this state.
 	// It travels with the snapshot, so a restored replica knows where in the
 	// log to resume.
@@ -134,7 +162,17 @@ type KV struct {
 
 // New returns an empty store, as a node with no snapshot and no log starts.
 func New() *KV {
-	return &KV{data: make(map[string][]byte)}
+	return NewWithMaxSessions(DefaultMaxSessions)
+}
+
+// NewWithMaxSessions returns an empty store that remembers at most max client
+// sessions. Tests use it to exercise eviction without generating thousands of
+// clients.
+func NewWithMaxSessions(max int) *KV {
+	return &KV{
+		data:     make(map[string][]byte),
+		sessions: newSessions(max),
+	}
 }
 
 // Apply incorporates one committed entry.
@@ -164,7 +202,12 @@ func (kv *KV) Apply(e raft.Entry) error {
 		if err != nil {
 			return fmt.Errorf("applying entry %d: %w", e.Index, err)
 		}
-		kv.applyCommand(cmd)
+		// A duplicate still consumes its index: the entry is committed and
+		// every replica must move its applied cursor past it, whether or not
+		// the command takes effect.
+		if kv.sessions.shouldApply(cmd.ClientID, cmd.Seq, e.Index) {
+			kv.applyCommand(cmd)
+		}
 
 	case raft.EntryNoOp, raft.EntryConfChange:
 		// Not state machine commands. They still occupy an index, so the
@@ -214,6 +257,22 @@ func (kv *KV) Get(key string) ([]byte, bool) {
 	out := make([]byte, len(v))
 	copy(out, v)
 	return out, true
+}
+
+// LastSeq returns the highest sequence number applied for a client, and
+// whether that client is tracked at all. A client that is not tracked has
+// either never been seen or has been evicted, and cannot be told apart.
+func (kv *KV) LastSeq(clientID uint64) (uint64, bool) {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+	return kv.sessions.lastSeq(clientID)
+}
+
+// Sessions returns how many client sessions are currently tracked.
+func (kv *KV) Sessions() int {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+	return kv.sessions.len()
 }
 
 // Applied returns the index of the last entry applied.
@@ -267,6 +326,12 @@ func (kv *KV) Snapshot() ([]byte, error) {
 		buf = appendBytes(buf, []byte(k))
 		buf = appendBytes(buf, kv.data[k])
 	}
+
+	// The session table travels with the snapshot. A replica that restored
+	// without it would have forgotten every client's progress and would
+	// re-apply the next retry it saw, which is exactly the reordering hazard
+	// the table exists to prevent.
+	buf = kv.sessions.encode(buf)
 	return buf, nil
 }
 
@@ -303,6 +368,11 @@ func (kv *KV) Restore(b []byte) error {
 		data[string(key)] = value
 	}
 
+	restored, err := decodeSessions(r, kv.sessions.max)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrMalformedSnapshot, err)
+	}
+
 	if r.pos != len(r.b) {
 		return fmt.Errorf("%w: %d trailing bytes after %d keys",
 			ErrMalformedSnapshot, len(r.b)-r.pos, count)
@@ -312,6 +382,7 @@ func (kv *KV) Restore(b []byte) error {
 	defer kv.mu.Unlock()
 	kv.data = data
 	kv.applied = raft.Index(applied)
+	kv.sessions = restored
 	return nil
 }
 
