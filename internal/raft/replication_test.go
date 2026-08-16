@@ -478,3 +478,100 @@ func TestLogSurvivesRestart(t *testing.T) {
 	c.assertCommitted(follower, c.node(leader).CommitIndex())
 	c.assertAppliedConsistent()
 }
+
+// compactedStorage is a Storage whose log begins above index 1, as a real one
+// does after a snapshot has compacted the entries below that point.
+//
+// MemoryStorage cannot be compacted, so this stands in for the disk-backed
+// storage the raft package deliberately does not depend on. It exists to cover
+// a gap the package's own tests could not reach: every other test here runs
+// against an uncompacted log, so the behaviour of a restarting node whose
+// storage starts part-way through the log was never exercised.
+type compactedStorage struct {
+	*MemoryStorage
+	// boundary is the last compacted index. Entries at or below it are gone;
+	// its own term is still answerable, as a snapshot point must be.
+	boundary     Index
+	boundaryTerm Term
+}
+
+func (s *compactedStorage) FirstIndex() Index { return s.boundary + 1 }
+
+func (s *compactedStorage) Term(i Index) (Term, error) {
+	if i == s.boundary {
+		return s.boundaryTerm, nil
+	}
+	if i < s.boundary {
+		return 0, ErrCompacted
+	}
+	return s.MemoryStorage.Term(i)
+}
+
+func (s *compactedStorage) Entries(lo, hi Index) ([]Entry, error) {
+	if lo <= s.boundary && lo < hi {
+		return nil, ErrCompacted
+	}
+	return s.MemoryStorage.Entries(lo, hi)
+}
+
+func TestRestartOnCompactedStorageDoesNotRereadCompactedEntries(t *testing.T) {
+	// A node restarting on compacted storage must not start its committed and
+	// applied cursors at zero. Everything a snapshot covers is committed and
+	// applied by definition, and the entries are gone — so a cursor left at
+	// zero sends the log looking for entries that no longer exist as soon as
+	// it reports what is newly committed.
+	//
+	// This was found through the node driver, where a snapshot and a restart
+	// meet. Neither this package's tests nor the storage package's could see
+	// it alone: these run on an uncompacted log, and those never run the
+	// consensus core.
+	const boundary = 50
+
+	mem := NewMemoryStorage()
+	storage := &compactedStorage{MemoryStorage: mem, boundary: boundary, boundaryTerm: 3}
+
+	// Seed the whole log, then let the wrapper hide everything at or below the
+	// boundary. Hiding rather than deleting is what compaction looks like from
+	// the core's side: the entries are simply no longer answerable.
+	all := make([]Entry, 0, boundary+5)
+	for i := range boundary + 5 {
+		all = append(all, Entry{Term: 3, Index: Index(i + 1), Type: EntryNormal})
+	}
+	if err := mem.Append(all); err != nil {
+		t.Fatalf("seeding the log: %v", err)
+	}
+	if err := mem.SetHardState(HardState{Term: 3}); err != nil {
+		t.Fatalf("seeding hard state: %v", err)
+	}
+
+	n, err := NewNode(Config{
+		ID:            1,
+		Peers:         []NodeID{1},
+		ElectionTick:  defaultElectionTick,
+		HeartbeatTick: defaultHeartbeatTick,
+		Storage:       storage,
+	})
+	if err != nil {
+		t.Fatalf("creating node: %v", err)
+	}
+
+	if got := n.CommitIndex(); got < boundary {
+		t.Fatalf("commit index = %d after restarting on storage compacted through %d; "+
+			"everything a snapshot covers is already committed", got, boundary)
+	}
+
+	// A single-node cluster commits immediately on election, so this is where
+	// the log would go looking for compacted entries.
+	if err := n.Step(Message{Type: MsgCampaign}); err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+
+	rd := n.Ready()
+	for _, e := range rd.CommittedEntries {
+		if e.Index <= boundary {
+			t.Fatalf("Ready reported committed entry %d, which is below the compaction "+
+				"boundary %d and no longer exists", e.Index, boundary)
+		}
+	}
+	n.Advance(rd)
+}

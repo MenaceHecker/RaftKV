@@ -22,14 +22,27 @@ type raftLog struct {
 	applied Index
 }
 
-// newRaftLog builds a log over storage with an empty committed prefix.
+// newRaftLog builds a log over storage.
 //
-// A restarting node relearns its commit index from the leader's next
-// AppendEntries rather than reading it back from disk. Re-applying entries the
-// state machine has already seen is harmless because application is
-// deterministic, so there is nothing to recover here.
+// The committed and applied cursors start at the storage's compaction
+// boundary, not at zero. A snapshot is only ever taken over entries that were
+// already committed and applied, so everything below that boundary is both by
+// definition — and the entries themselves are gone, so a cursor left at zero
+// would send the log looking for entries that no longer exist the moment it
+// tried to report what was newly committed.
+//
+// Above the boundary a restarting node relearns its commit index from the
+// leader's next AppendEntries rather than reading it back from disk.
+// Re-applying entries the state machine has already seen is harmless, because
+// application is deterministic and the state machine ignores anything at or
+// below its own applied index.
 func newRaftLog(storage Storage) *raftLog {
-	return &raftLog{storage: storage}
+	boundary := storage.FirstIndex() - 1
+	return &raftLog{
+		storage:   storage,
+		committed: boundary,
+		applied:   boundary,
+	}
 }
 
 // firstIndex is the oldest index still retained.
