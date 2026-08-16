@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package raftkv.v1;
+
+option go_package = "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1;raftkvv1";
+
+// RaftKV's wire protocol.
+//
+// Two services live here, and the split is deliberate. Raft carries consensus
+// traffic between nodes; KV carries client requests. They have different
+// audiences, different trust assumptions, and different failure semantics — a
+// client that cannot reach a node should be redirected, while a node that
+// cannot reach a peer should simply retry on its next heartbeat. Keeping them
+// as separate services means they can later be given separate ports,
+// credentials, or rate limits without reshaping the protocol.
+
+// Raft is the consensus transport between cluster members. It is not intended
+// for clients.
+service RaftService {
+  // Deliver hands one Raft message to a peer.
+  //
+  // It returns nothing. Raft already treats the network as unreliable: every
+  // message is retried by the next heartbeat and correctness never depends on
+  // a particular one arriving, so a delivery receipt would carry no
+  // information the protocol acts on. Responses travel as their own Deliver
+  // calls in the opposite direction rather than as return values, which keeps
+  // the transport symmetric and stops a slow peer from blocking the sender.
+  rpc Deliver(DeliverRequest) returns (DeliverResponse);
+}
+
+// KV is the client-facing key-value API.
+service KVService {
+  // Get reads a key linearizably: the serving node confirms it is still
+  // leader with a majority before answering, so the value reflects everything
+  // committed when the request arrived.
+  rpc Get(GetRequest) returns (GetResponse);
+
+  // Put sets a key.
+  rpc Put(PutRequest) returns (PutResponse);
+
+  // Delete removes a key. Removing a key that does not exist succeeds.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+
+  // Status reports what this node believes about the cluster. Clients use it
+  // to find the leader; operators use it to see whether a node is healthy.
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+// MessageType mirrors the Raft core's message types.
+//
+// The zero value is UNSPECIFIED rather than a real type. Proto3 cannot
+// distinguish an unset field from one explicitly set to zero, so making zero
+// meaningful would let a malformed or truncated message silently decode as a
+// valid vote request.
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  MESSAGE_TYPE_VOTE_REQUEST = 1;
+  MESSAGE_TYPE_VOTE_RESPONSE = 2;
+  MESSAGE_TYPE_APPEND_REQUEST = 3;
+  MESSAGE_TYPE_APPEND_RESPONSE = 4;
+  MESSAGE_TYPE_HEARTBEAT = 5;
+  MESSAGE_TYPE_HEARTBEAT_RESPONSE = 6;
+}
+
+// EntryType mirrors the Raft core's entry types.
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  ENTRY_TYPE_NORMAL = 1;
+  ENTRY_TYPE_NO_OP = 2;
+  ENTRY_TYPE_CONF_CHANGE = 3;
+}
+
+// Entry is one record in the replicated log. The pair (term, index) identifies
+// it uniquely across the cluster.
+message Entry {
+  uint64 term = 1;
+  uint64 index = 2;
+  EntryType type = 3;
+  // Opaque to the consensus layer; only the state machine interprets it.
+  bytes data = 4;
+}
+
+// Message is one Raft message. It mirrors the core's single flat envelope, so
+// the transport has exactly one shape to encode and the chaos harness one
+// shape to delay, drop, and reorder.
+message Message {
+  MessageType type = 1;
+  uint64 from = 2;
+  uint64 to = 3;
+  uint64 term = 4;
+
+  // Candidate log position, for a vote request.
+  uint64 last_log_index = 5;
+  uint64 last_log_term = 6;
+
+  // The entry immediately preceding entries, for an append.
+  uint64 prev_log_index = 7;
+  uint64 prev_log_term = 8;
+
+  repeated Entry entries = 9;
+  uint64 commit_index = 10;
+
+  bool granted = 11;
+  bool success = 12;
+  uint64 match_index = 13;
+
+  // Backup hint from a rejected append, letting the leader skip a whole term
+  // rather than one index per round trip.
+  uint64 conflict_index = 14;
+  uint64 conflict_term = 15;
+
+  // Opaque token echoed by heartbeat responses, identifying a read-index
+  // round.
+  bytes context = 16;
+}
+
+// DeliverRequest wraps the message being delivered.
+//
+// The wrapper is not ceremony: an RPC whose request type is a bare domain
+// object has nowhere to put anything else later. Adding a field here — a
+// sender epoch, a trace identifier, a batch of messages — is a compatible
+// change, whereas changing the request type is not.
+message DeliverRequest {
+  Message message = 1;
+}
+
+message DeliverResponse {}
+
+// ClientRequest carries the session information that makes a retry safe.
+//
+// A client that does not hear back cannot tell whether its write was lost on
+// the way in, applied and lost on the way out, or merely slow, so it must
+// retry. The client ID and sequence number let the state machine recognize the
+// retry and ignore it — without them, a retried write could be applied after a
+// newer one and silently undo it.
+message ClientRequest {
+  // Stable for the lifetime of a client connection. Zero means the request is
+  // not part of a session and will not be deduplicated.
+  uint64 client_id = 1;
+  // Strictly increasing per client. Gaps are allowed; going backwards is what
+  // marks a request as a duplicate.
+  uint64 sequence = 2;
+}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bytes value = 1;
+  // Whether the key exists. An empty value is a legitimate value, so this
+  // cannot be inferred from the bytes.
+  bool found = 2;
+}
+
+message PutRequest {
+  ClientRequest client = 1;
+  string key = 2;
+  bytes value = 3;
+}
+
+message PutResponse {}
+
+message DeleteRequest {
+  ClientRequest client = 1;
+  string key = 2;
+}
+
+message DeleteResponse {}
+
+message StatusRequest {}
+
+// NodeState mirrors the Raft core's roles.
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_FOLLOWER = 1;
+  NODE_STATE_CANDIDATE = 2;
+  NODE_STATE_LEADER = 3;
+}
+
+message StatusResponse {
+  uint64 node_id = 1;
+  // The leader this node recognizes, or zero if it knows of none.
+  uint64 leader_id = 2;
+  // The leader's address, so a client can redirect itself without consulting
+  // configuration. Empty when the leader is unknown.
+  string leader_address = 3;
+  uint64 term = 4;
+  NodeState state = 5;
+  uint64 commit_index = 6;
+  uint64 applied_index = 7;
+}
