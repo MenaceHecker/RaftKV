@@ -93,8 +93,14 @@ type peer struct {
 	client raftkvv1.RaftServiceClient
 
 	queue chan *raftkvv1.Message
-	stop  chan struct{}
 	done  chan struct{}
+
+	// ctx is cancelled on close. Deliveries derive from it, so shutting down
+	// aborts whatever is in flight instead of waiting for it: a peer that has
+	// vanished would otherwise hold the whole process open for a full send
+	// timeout, and that is exactly the peer most likely to be gone.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	timeout time.Duration
 
@@ -194,14 +200,16 @@ func NewPeerTransport(cfg PeerConfig) (*PeerTransport, error) {
 			return nil, fmt.Errorf("transport: creating client for node %d at %s: %w", id, addr, err)
 		}
 
+		pctx, pcancel := context.WithCancel(context.Background())
 		p := &peer{
 			id:      id,
 			addr:    addr,
 			conn:    conn,
 			client:  raftkvv1.NewRaftServiceClient(conn),
 			queue:   make(chan *raftkvv1.Message, cfg.QueueSize),
-			stop:    make(chan struct{}),
 			done:    make(chan struct{}),
+			ctx:     pctx,
+			cancel:  pcancel,
 			timeout: cfg.SendTimeout,
 		}
 		t.peers[id] = p
@@ -262,7 +270,7 @@ func (p *peer) run() {
 
 	for {
 		select {
-		case <-p.stop:
+		case <-p.ctx.Done():
 			return
 		case msg := <-p.queue:
 			p.deliver(msg)
@@ -278,7 +286,7 @@ func (p *peer) run() {
 // usually has a newer message that supersedes the failed one. Retrying here
 // would send stale state and compete with the correct mechanism.
 func (p *peer) deliver(msg *raftkvv1.Message) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.timeout)
+	ctx, cancel := context.WithTimeout(p.ctx, p.timeout)
 	defer cancel()
 
 	if _, err := p.client.Deliver(ctx, &raftkvv1.DeliverRequest{Message: msg}); err != nil {
@@ -289,8 +297,11 @@ func (p *peer) deliver(msg *raftkvv1.Message) {
 }
 
 // close shuts down one peer's goroutine and connection.
+//
+// Cancelling before waiting is what keeps shutdown prompt: it aborts any
+// delivery already in flight rather than letting it run out its timeout.
 func (p *peer) close() {
-	close(p.stop)
+	p.cancel()
 	<-p.done
 	p.conn.Close()
 }
