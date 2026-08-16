@@ -1,0 +1,27 @@
+# Code generation for the RaftKV wire protocol.
+#
+# buf is used instead of protoc because it carries its own protobuf compiler
+# written in Go, so the whole toolchain installs with `go install` and a
+# contributor needs nothing but a Go toolchain:
+#
+#   go install github.com/bufbuild/buf/cmd/buf@latest
+#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+#   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+#   buf generate
+#
+# The generated files are committed to the repository. That is deliberate: it
+# keeps `go build ./...` working straight after a clone, and it makes changes
+# to the wire format visible in review rather than hidden behind a build step.
+version: v2
+
+managed:
+  enabled: true
+
+plugins:
+  - local: protoc-gen-go
+    out: internal/transport
+    opt: paths=source_relative
+
+  - local: protoc-gen-go-grpc
+    out: internal/transport
+    opt: paths=source_relative
