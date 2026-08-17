@@ -10,6 +10,11 @@
 // are built on.
 package raft
 
+import (
+	"encoding/binary"
+	"fmt"
+)
+
 // NodeID identifies a single member of the cluster. IDs are stable for the
 // lifetime of a node and must be non-zero; zero is reserved to mean "no node",
 // for example a vote that has not been cast.
@@ -217,4 +222,68 @@ type Message struct {
 	// The Raft core never interprets it; the layer above uses it to match a
 	// completed read index back to the client request that asked for it.
 	Context []byte
+}
+
+// ConfChangeType describes what a membership change does.
+type ConfChangeType uint8
+
+const (
+	// ConfChangeAddNode adds a new voting member to the cluster.
+	ConfChangeAddNode ConfChangeType = iota
+	// ConfChangeRemoveNode removes an existing voting member.
+	ConfChangeRemoveNode
+	// ConfChangeLeaveJoint is the second half of a joint-consensus transition.
+	// It carries no NodeID; the leader proposes it automatically once the
+	// enter-joint entry commits. Its commit finalises the move from C_joint to
+	// C_new.
+	ConfChangeLeaveJoint
+)
+
+// ConfChange is the payload stored in an EntryConfChange log entry. Every
+// cluster reconfiguration — add, remove, or finalise — travels through the
+// log as a ConfChange so the transition is replicated and durable before
+// taking effect.
+type ConfChange struct {
+	// Type describes the operation.
+	Type ConfChangeType
+	// NodeID is the node being added or removed. It is zero for a
+	// ConfChangeLeaveJoint, which carries no target node.
+	NodeID NodeID
+	// Addr is the network address of the node being added (e.g. "host:port").
+	// It is empty for removals and leave-joint entries. The transport uses it
+	// to open a connection to the new peer once the entry is applied.
+	Addr string
+}
+
+// Encode serialises cc into a compact binary form for storage in a log
+// entry's Data field. The layout is:
+//
+//	[type: 1 byte] [nodeID: 8 bytes, big-endian uint64]
+//	[addrLen: 4 bytes, big-endian uint32] [addr: addrLen bytes]
+func (cc ConfChange) Encode() []byte {
+	addr := []byte(cc.Addr)
+	b := make([]byte, 1+8+4+len(addr))
+	b[0] = byte(cc.Type)
+	binary.BigEndian.PutUint64(b[1:], uint64(cc.NodeID))
+	binary.BigEndian.PutUint32(b[9:], uint32(len(addr)))
+	copy(b[13:], addr)
+	return b
+}
+
+// DecodeConfChange deserialises a ConfChange from bytes written by Encode.
+func DecodeConfChange(b []byte) (ConfChange, error) {
+	const minLen = 1 + 8 + 4
+	if len(b) < minLen {
+		return ConfChange{}, fmt.Errorf("raft: conf change payload too short (%d bytes)", len(b))
+	}
+	addrLen := int(binary.BigEndian.Uint32(b[9:13]))
+	if len(b) < minLen+addrLen {
+		return ConfChange{}, fmt.Errorf("raft: conf change payload truncated: have %d bytes, need %d",
+			len(b), minLen+addrLen)
+	}
+	return ConfChange{
+		Type:   ConfChangeType(b[0]),
+		NodeID: NodeID(binary.BigEndian.Uint64(b[1:9])),
+		Addr:   string(b[13 : 13+addrLen]),
+	}, nil
 }
