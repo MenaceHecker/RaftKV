@@ -128,9 +128,9 @@ func (n *Node) handleReadIndex(m Message) error {
 		return ErrLeaderNotReady
 	}
 
-	// A single-node cluster is its own majority. There is nobody to hear
-	// from, so the read is confirmed the moment it is asked for.
-	if n.quorum() == 1 {
+	// A node that is the whole cluster is its own majority. There is nobody
+	// to hear from, so the read is confirmed the moment it is asked for.
+	if n.isSoleVoter() {
 		n.readStates = append(n.readStates, ReadState{
 			Index:   n.log.committed,
 			Context: cloneBytes(m.Context),
@@ -151,8 +151,9 @@ func (n *Node) handleReadIndex(m Message) error {
 	n.readOnly.rounds[key] = round
 	n.readOnly.order = append(n.readOnly.order, key)
 
-	// Ask every follower to confirm leadership for this round specifically.
-	for _, p := range n.peers {
+	// Ask every member of every active configuration to confirm leadership for
+	// this round specifically.
+	for _, p := range n.conf.members() {
 		if p == n.id {
 			continue
 		}
@@ -226,7 +227,12 @@ func (n *Node) handleHeartbeatResponse(m Message) error {
 	}
 
 	round.acks[m.From] = true
-	if len(round.acks) < n.quorum() {
+
+	// Leadership is confirmed by the configuration, not by a count. During a
+	// joint transition a majority of one voter set is not proof of
+	// leadership, so a read confirmed that way could be served by a node the
+	// other set has already replaced.
+	if !n.conf.voteGranted(round.acks) {
 		return nil
 	}
 

@@ -603,3 +603,195 @@ func TestSequentialChangesGrowAndShrinkACluster(t *testing.T) {
 		t.Fatalf("members = %s, want [1 3 4 5]", got)
 	}
 }
+
+// --- Tests that the configuration is actually consulted by the core ---
+//
+// Everything above tests the config type on its own. These drive a real node
+// and check that its commit and election paths ask the configuration rather
+// than counting peers. That distinction is the whole point of the wiring: a
+// correct config type that nothing consults would leave the cluster deciding
+// on a single majority during a transition.
+
+// enterJointOn puts a node into a joint configuration for testing, adding the
+// listed nodes and giving each a progress entry.
+//
+// It reaches past the log to set the configuration directly. Membership
+// changes will travel through the log once conf-change entries are applied on
+// commit; until then this is how the joint state is reached.
+func enterJointOn(t *testing.T, n *Node, add ...NodeID) {
+	t.Helper()
+
+	// Complete a transition for every addition but the last, so those nodes
+	// end up as ordinary voters.
+	c := n.conf
+	for _, id := range add[:len(add)-1] {
+		joint, err := c.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: id})
+		if err != nil {
+			t.Fatalf("entering joint for node %d: %v", id, err)
+		}
+		if c, err = joint.leaveJoint(); err != nil {
+			t.Fatalf("leaving joint for node %d: %v", id, err)
+		}
+	}
+
+	// Leave the last one open, so the node is mid-transition.
+	last := add[len(add)-1]
+	joint, err := c.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: last})
+	if err != nil {
+		t.Fatalf("entering joint for node %d: %v", last, err)
+	}
+	n.conf = joint
+
+	for _, id := range n.conf.members() {
+		if n.progress[id] == nil {
+			n.progress[id] = &progress{next: n.log.lastIndex() + 1}
+		}
+	}
+}
+
+func TestLeaderCommitsByConfigurationNotPeerCount(t *testing.T) {
+	// The wiring test. A leader in a joint configuration must require a
+	// majority of both voter sets before advancing its commit index. If it
+	// still counted peers, a majority of the combined set would be enough and
+	// the two configurations could commit different entries.
+	c := newCluster(t, 3, clusterOpts{seed: 700})
+	n := c.node(1)
+
+	if err := n.Step(Message{Type: MsgCampaign}); err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	c.deliverAll()
+	if n.State() != Leader {
+		t.Fatalf("node 1 is %s, want Leader", n.State())
+	}
+
+	// C_old = {1,2,3,4}, C_new = {1,2,3,4,5}.
+	enterJointOn(t, n, 4, 5)
+	if !n.InJointConfiguration() {
+		t.Fatal("the node is not in a joint configuration")
+	}
+
+	if err := n.propose([]Entry{{Type: EntryNormal, Data: []byte("x")}}); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	idx := n.log.lastIndex()
+	before := n.CommitIndex()
+
+	// Two nodes is a majority of neither set.
+	n.progress[1].match = idx
+	n.progress[2].match = idx
+	if n.maybeCommit() {
+		t.Fatalf("commit advanced from %d to %d on a majority of neither configuration",
+			before, n.CommitIndex())
+	}
+
+	// Three is a majority of both (3 of 4, and 3 of 5).
+	n.progress[3].match = idx
+	if !n.maybeCommit() {
+		t.Fatalf("a majority of both configurations failed to commit; commit is still %d, entry is at %d",
+			n.CommitIndex(), idx)
+	}
+	if n.CommitIndex() != idx {
+		t.Fatalf("commit index = %d, want %d", n.CommitIndex(), idx)
+	}
+}
+
+func TestCandidateWinsByConfigurationNotVoteCount(t *testing.T) {
+	// The same wiring on the election path. During a transition a candidate
+	// must carry both voter sets; a raw count of granted votes would let it
+	// win on one alone.
+	c := newCluster(t, 3, clusterOpts{seed: 701})
+	n := c.node(1)
+
+	enterJointOn(t, n, 4, 5)
+	// C_old = {1,2,3,4}, C_new = {1,2,3,4,5}.
+
+	if err := n.becomeCandidate(); err != nil {
+		t.Fatalf("becomeCandidate: %v", err)
+	}
+
+	// Two votes: a majority of neither set, so no win.
+	n.votes = grants(1, 2)
+	if n.conf.voteGranted(n.votes) {
+		t.Fatal("two votes carried a four- and five-node joint configuration")
+	}
+
+	// Three votes: a majority of both.
+	n.votes = grants(1, 2, 3)
+	if !n.conf.voteGranted(n.votes) {
+		t.Fatal("three votes did not carry a majority of both configurations")
+	}
+}
+
+func TestBroadcastReachesNodesOnlyInTheIncomingConfiguration(t *testing.T) {
+	// A node that belongs only to C_new still needs entries. Until its log
+	// catches up it cannot contribute to the new majority, so a leader that
+	// skipped it could never complete the transition.
+	c := newCluster(t, 3, clusterOpts{seed: 702})
+	n := c.node(1)
+
+	if err := n.Step(Message{Type: MsgCampaign}); err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	c.deliverAll()
+	n.Ready() // discard election traffic
+
+	enterJointOn(t, n, 4)
+	// C_old = {1,2,3}, C_new = {1,2,3,4}: node 4 exists only in C_new.
+
+	n.broadcastAppend()
+
+	rd := n.Ready()
+	sawNewMember := false
+	for _, m := range rd.Messages {
+		if m.To == 4 {
+			sawNewMember = true
+		}
+	}
+	if !sawNewMember {
+		t.Fatalf("the leader did not replicate to a node present only in the incoming "+
+			"configuration; it could never catch up\nmessages: %d", len(rd.Messages))
+	}
+}
+
+func TestSoleVoterCommitsWithoutAcknowledgement(t *testing.T) {
+	// The single-node case now asks the configuration rather than comparing a
+	// peer count to one. It must still settle immediately, since no
+	// acknowledgement will ever arrive.
+	c := newCluster(t, 1, clusterOpts{seed: 703})
+	n := c.node(1)
+
+	if !n.isSoleVoter() {
+		t.Fatal("a one-node cluster does not report itself as the sole voter")
+	}
+
+	if err := n.Step(Message{Type: MsgCampaign}); err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	if n.State() != Leader {
+		t.Fatalf("state = %s, want Leader", n.State())
+	}
+	if n.CommitIndex() != n.LastIndex() {
+		t.Fatalf("commit = %d, last = %d; a sole voter must commit its own entries",
+			n.CommitIndex(), n.LastIndex())
+	}
+}
+
+func TestSoleVoterIsNotJustAOneElementPeerList(t *testing.T) {
+	// A node can be the only member of one voter set while a transition is
+	// bringing in others. It is not the sole voter then, and treating it as
+	// one would let it decide alone.
+	c := newCluster(t, 1, clusterOpts{seed: 704})
+	n := c.node(1)
+
+	joint, err := n.conf.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 2})
+	if err != nil {
+		t.Fatalf("enterJoint: %v", err)
+	}
+	n.conf = joint
+
+	if n.isSoleVoter() {
+		t.Fatal("a node mid-transition to a two-node cluster still reports as the " +
+			"sole voter; it would commit without the incoming member")
+	}
+}
