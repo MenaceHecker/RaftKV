@@ -40,9 +40,9 @@ func (n *Node) propose(entries []Entry) error {
 	n.progress[n.id].match = n.log.lastIndex()
 	n.progress[n.id].next = n.log.lastIndex() + 1
 
-	// In a single-node cluster the leader's own append is already a majority,
-	// and no response will ever arrive to advance the commit index.
-	if n.quorum() == 1 {
+	// When this node is the whole cluster its own append is already a
+	// majority, and no response will ever arrive to advance the commit index.
+	if n.isSoleVoter() {
 		n.maybeCommit()
 		return nil
 	}
@@ -52,8 +52,13 @@ func (n *Node) propose(entries []Entry) error {
 }
 
 // broadcastAppend sends every follower whatever it is missing.
+//
+// The set is drawn from the configuration, so during a joint transition a node
+// that belongs to only the incoming configuration is replicated to as well. It
+// has to be: it cannot contribute to the new majority until its log has caught
+// up.
 func (n *Node) broadcastAppend() {
-	for _, p := range n.peers {
+	for _, p := range n.conf.members() {
 		if p == n.id {
 			continue
 		}
@@ -262,30 +267,50 @@ func (n *Node) lastIndexInTerm(term Term) (Index, bool) {
 // becomeLeader appends a no-op: it gives every new leader something in its own
 // term to commit immediately.
 func (n *Node) maybeCommit() bool {
-	matches := make([]Index, 0, len(n.peers))
-	for _, p := range n.peers {
-		if pr := n.progress[p]; pr != nil {
-			matches = append(matches, pr.match)
+	matchFor := func(id NodeID) Index {
+		if pr := n.progress[id]; pr != nil {
+			return pr.match
+		}
+		return 0
+	}
+
+	// The commit index can only ever be an index some member has actually
+	// reached, so those are the only candidates worth testing. Trying every
+	// index between the current commit point and the highest match would be
+	// unbounded work after an election with a backlog, and would test indexes
+	// no majority could possibly hold.
+	//
+	// They are tested highest first, and the configuration decides whether
+	// each is held by a majority — which during a joint transition means a
+	// majority of both voter sets. Asking the configuration is what makes the
+	// two-set rule expressible: there is no single position in one sorted
+	// ordering that answers a double-majority question, which is why the
+	// previous sort-and-index approach could not be extended.
+	members := n.conf.members()
+	candidates := make([]Index, 0, len(members))
+	for _, p := range members {
+		if m := matchFor(p); m > n.log.committed {
+			candidates = append(candidates, m)
 		}
 	}
-	if len(matches) == 0 {
-		return false
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i] > candidates[j] })
+
+	for _, candidate := range candidates {
+		if !n.conf.commitReady(candidate, matchFor) {
+			continue
+		}
+
+		// §5.4.2: replica count alone does not commit. An entry from an
+		// earlier term can sit on a majority and still be overwritten, so
+		// only an entry from the leader's own term may advance the commit
+		// index — and it carries the whole inherited prefix with it.
+		t, err := n.log.term(candidate)
+		if err != nil || t != n.term {
+			return false
+		}
+
+		n.log.commitTo(candidate)
+		return true
 	}
-
-	// Sort descending. The value at quorum-1 is then the highest index that
-	// at least a majority of nodes hold.
-	sort.Slice(matches, func(i, j int) bool { return matches[i] > matches[j] })
-	candidate := matches[n.quorum()-1]
-
-	if candidate <= n.log.committed {
-		return false
-	}
-
-	t, err := n.log.term(candidate)
-	if err != nil || t != n.term {
-		return false
-	}
-
-	n.log.commitTo(candidate)
-	return true
+	return false
 }
