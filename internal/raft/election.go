@@ -27,9 +27,9 @@ func (n *Node) campaign() error {
 		return err
 	}
 
-	// A single-node cluster is its own majority, so the self-vote has already
-	// decided this election.
-	if n.quorum() == 1 {
+	// A node that is the whole cluster is its own majority, so the self-vote
+	// has already decided this election.
+	if n.isSoleVoter() {
 		return n.becomeLeader()
 	}
 
@@ -38,7 +38,10 @@ func (n *Node) campaign() error {
 	lastIdx := n.log.lastIndex()
 	lastTerm := n.log.lastTerm()
 
-	for _, p := range n.peers {
+	// Every member of every active configuration is asked. During a joint
+	// transition that includes nodes present in only one of the two sets:
+	// their votes are needed for that set's majority.
+	for _, p := range n.conf.members() {
 		if p == n.id {
 			continue
 		}
@@ -106,24 +109,19 @@ func (n *Node) handleVoteResponse(m Message) error {
 		n.votes[m.From] = m.Granted
 	}
 
-	granted, rejected := 0, 0
-	for _, ok := range n.votes {
-		if ok {
-			granted++
-		} else {
-			rejected++
-		}
-	}
-
+	// The tally is judged by the configuration, not by a raw count. During a
+	// joint transition a candidate must carry a majority of both voter sets:
+	// winning on one alone would let the other set elect a different leader in
+	// the same term, which is exactly the split joint consensus prevents.
 	switch {
-	case granted >= n.quorum():
+	case n.conf.voteGranted(n.votes):
 		return n.becomeLeader()
 
-	case rejected+n.quorum() > len(n.peers):
-		// Enough nodes have refused that a majority is no longer reachable
-		// in this term. Standing down now, rather than waiting out the
-		// election timeout, gets this node back to accepting a real leader's
-		// heartbeats sooner.
+	case n.conf.voteLost(n.votes):
+		// A majority has become unreachable in at least one active
+		// configuration, so this election cannot be won. Standing down now,
+		// rather than waiting out the election timeout, gets this node back
+		// to accepting a real leader's heartbeats sooner.
 		return n.becomeFollower(n.term, None)
 	}
 	return nil
