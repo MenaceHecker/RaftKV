@@ -1,6 +1,10 @@
 package raft
 
-import "sort"
+import (
+	"errors"
+	"fmt"
+	"sort"
+)
 
 // config holds the current cluster membership as the Raft core sees it.
 //
@@ -19,6 +23,15 @@ type config struct {
 	voters map[NodeID]struct{}
 	// incoming is C_new during a joint transition, nil otherwise.
 	incoming map[NodeID]struct{}
+	// joint records whether a transition is in progress.
+	//
+	// It is a field rather than something derived from len(incoming), because
+	// a legitimate C_new can be smaller than C_old and, at the degenerate
+	// limit, empty. Inferring the phase from the set's size would make such a
+	// transition report itself as finished and quietly fall back to consulting
+	// C_old alone, which is precisely the single-majority decision joint
+	// consensus exists to prevent.
+	joint bool
 	// addrs maps every known node ID to its network address. The transport
 	// layer reads this when opening a connection to a newly added peer.
 	addrs map[NodeID]string
@@ -37,7 +50,7 @@ func newConfig(peers []NodeID) config {
 
 // inJoint reports whether the cluster is currently in the joint phase of a
 // membership transition.
-func (c *config) inJoint() bool { return len(c.incoming) > 0 }
+func (c *config) inJoint() bool { return c.joint }
 
 // hasVoter reports whether id is a voter in any currently active config. A
 // node in only the incoming set counts: it participates in the double-majority
@@ -69,36 +82,93 @@ func (c *config) members() []NodeID {
 	return ids
 }
 
+// Errors returned when a membership change cannot be applied.
+var (
+	// ErrConfChangeInFlight means a transition is already under way. Raft
+	// permits only one at a time: overlapping changes could produce two
+	// configurations neither of which is a superset of the other, and the
+	// quorum-intersection argument would no longer hold.
+	ErrConfChangeInFlight = errors.New("raft: a configuration change is already in progress")
+
+	// ErrNotInJoint means a leave-joint entry arrived with no transition open.
+	ErrNotInJoint = errors.New("raft: no configuration change is in progress")
+
+	// ErrEmptyConfiguration means a change would leave the cluster with no
+	// voters, which can never commit anything again.
+	ErrEmptyConfiguration = errors.New("raft: configuration change would leave no voters")
+
+	// ErrNoChange means the change would leave membership exactly as it is,
+	// which would cost a full joint transition for nothing.
+	ErrNoChange = errors.New("raft: configuration change has no effect")
+)
+
 // enterJoint produces the joint configuration for a membership change.
 // voters stays unchanged as C_old; incoming is derived by applying cc to a
 // copy of voters to form C_new.
 //
-// Precondition: c must not already be in joint.
-func (c config) enterJoint(cc ConfChange) config {
+// Every precondition is checked rather than documented. A caller that entered
+// a second transition on top of an open one would silently discard the first,
+// leaving some nodes believing in a configuration that no longer exists, and
+// the resulting quorums would not be guaranteed to intersect.
+func (c config) enterJoint(cc ConfChange) (config, error) {
+	if c.inJoint() {
+		return config{}, ErrConfChangeInFlight
+	}
+
 	next := config{
 		voters:   copySet(c.voters),
 		incoming: copySet(c.voters), // C_new starts as a copy of C_old
 		addrs:    copyAddrs(c.addrs),
+		joint:    true,
 	}
+
 	switch cc.Type {
 	case ConfChangeAddNode:
+		if cc.NodeID == None {
+			return config{}, fmt.Errorf("raft: cannot add the zero node ID")
+		}
+		if _, exists := next.incoming[cc.NodeID]; exists {
+			return config{}, fmt.Errorf("%w: node %d is already a voter", ErrNoChange, cc.NodeID)
+		}
 		next.incoming[cc.NodeID] = struct{}{}
 		if cc.Addr != "" {
 			next.addrs[cc.NodeID] = cc.Addr
 		}
+
 	case ConfChangeRemoveNode:
+		if _, exists := next.incoming[cc.NodeID]; !exists {
+			return config{}, fmt.Errorf("%w: node %d is not a voter", ErrNoChange, cc.NodeID)
+		}
 		delete(next.incoming, cc.NodeID)
+		if len(next.incoming) == 0 {
+			// A cluster with no voters can never reach a majority again, so
+			// there would be no way to configure its way back out.
+			return config{}, ErrEmptyConfiguration
+		}
+
+	case ConfChangeLeaveJoint:
+		// Finalising is not something to enter a transition for; it is what
+		// ends one. Accepting it here produced a joint config whose two sets
+		// were identical, which is a transition that can never mean anything.
+		return config{}, fmt.Errorf("raft: leave-joint is not a membership change")
+
+	default:
+		return config{}, fmt.Errorf("raft: unknown configuration change type %d", cc.Type)
 	}
-	return next
+
+	return next, nil
 }
 
 // leaveJoint produces the final configuration after the leave-joint entry
 // commits. incoming becomes the new authoritative voters; the joint phase ends.
-func (c config) leaveJoint() config {
+func (c config) leaveJoint() (config, error) {
+	if !c.inJoint() {
+		return config{}, ErrNotInJoint
+	}
 	return config{
 		voters: copySet(c.incoming),
 		addrs:  copyAddrs(c.addrs),
-	}
+	}, nil
 }
 
 // commitReady reports whether idx is safe to commit given the supplied match
@@ -141,6 +211,12 @@ func (c *config) voteLost(votes map[NodeID]bool) bool {
 // majorityHas reports whether a majority of the given voter set has a match
 // index at or above idx.
 func majorityHas(voters map[NodeID]struct{}, idx Index, matchFor func(NodeID) Index) bool {
+	if len(voters) == 0 {
+		// An empty set has no majority to reach. Reporting false is the safe
+		// direction: nothing commits, rather than everything committing on the
+		// strength of no votes at all.
+		return false
+	}
 	need := len(voters)/2 + 1
 	have := 0
 	for id := range voters {
@@ -154,6 +230,9 @@ func majorityHas(voters map[NodeID]struct{}, idx Index, matchFor func(NodeID) In
 // majorityGranted reports whether a majority of the given voter set has voted
 // yes in votes.
 func majorityGranted(voters map[NodeID]struct{}, votes map[NodeID]bool) bool {
+	if len(voters) == 0 {
+		return false
+	}
 	need := len(voters)/2 + 1
 	have := 0
 	for id := range voters {
