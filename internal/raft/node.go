@@ -107,8 +107,13 @@ type progress struct {
 // A Node is not safe for concurrent use. The intended pattern is one goroutine
 // per node owning all of Tick, Step, Ready, and Advance.
 type Node struct {
-	id    NodeID
-	peers []NodeID
+	id NodeID
+
+	// conf is the cluster membership. Every quorum decision — commit,
+	// election, read-index confirmation — is asked of it rather than computed
+	// from a peer count, because during a joint transition there are two
+	// voter sets and a majority of one is not a decision.
+	conf config
 
 	state State
 	// term is the node's current term, mirroring the persisted hard state.
@@ -171,12 +176,9 @@ func NewNode(cfg Config) (*Node, error) {
 		rng = rand.New(rand.NewSource(int64(cfg.ID)))
 	}
 
-	peers := make([]NodeID, len(cfg.Peers))
-	copy(peers, cfg.Peers)
-
 	n := &Node{
 		id:            cfg.ID,
-		peers:         peers,
+		conf:          newConfig(cfg.Peers),
 		state:         Follower,
 		term:          hs.Term,
 		vote:          hs.VotedFor,
@@ -214,9 +216,23 @@ func (n *Node) LastIndex() Index { return n.log.lastIndex() }
 // CommitIndex returns the highest index this node knows to be committed.
 func (n *Node) CommitIndex() Index { return n.log.committed }
 
-// quorum is the number of nodes making up a majority of the cluster. Any two
-// quorums intersect, which is the property every Raft safety argument rests on.
-func (n *Node) quorum() int { return len(n.peers)/2 + 1 }
+// Members returns every node in any currently active configuration, sorted.
+func (n *Node) Members() []NodeID { return n.conf.members() }
+
+// InJointConfiguration reports whether a membership change is in progress.
+func (n *Node) InJointConfiguration() bool { return n.conf.inJoint() }
+
+// isSoleVoter reports whether this node alone constitutes every majority the
+// cluster needs.
+//
+// A single-node cluster has nobody to hear from, so decisions that would
+// otherwise wait for acknowledgements are settled immediately. Asking the
+// configuration rather than counting peers keeps that true during a joint
+// transition, where being the only member of one set is not enough.
+func (n *Node) isSoleVoter() bool {
+	members := n.conf.members()
+	return len(members) == 1 && members[0] == n.id
+}
 
 // Ready is the batch of effects produced since the previous Ready. The caller
 // sends Messages, applies CommittedEntries in order, then calls Advance.
@@ -427,8 +443,9 @@ func (n *Node) becomeLeader() error {
 
 	// Reset replication state: next is optimistic, match is empty. A new
 	// leader knows nothing about its followers' logs until they respond.
-	n.progress = make(map[NodeID]*progress, len(n.peers))
-	for _, p := range n.peers {
+	members := n.conf.members()
+	n.progress = make(map[NodeID]*progress, len(members))
+	for _, p := range members {
 		n.progress[p] = &progress{next: n.log.lastIndex() + 1}
 	}
 
