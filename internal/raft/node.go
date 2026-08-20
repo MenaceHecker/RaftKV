@@ -115,6 +115,18 @@ type Node struct {
 	// voter sets and a majority of one is not a decision.
 	conf config
 
+	// baseConf is the membership as of the point the log begins: the
+	// configuration every conf-change entry still in the log is applied on top
+	// of. conf is always baseConf plus those entries, which is what lets a
+	// truncation that removes a change be undone by simply deriving conf
+	// again.
+	//
+	// It is currently the statically configured peer set. Once a snapshot can
+	// carry a configuration, it will come from there instead; until then a log
+	// compacted past a conf-change entry would lose that change on restart,
+	// which is why compaction and membership have not yet been combined.
+	baseConf config
+
 	state State
 	// term is the node's current term, mirroring the persisted hard state.
 	term Term
@@ -179,6 +191,7 @@ func NewNode(cfg Config) (*Node, error) {
 	n := &Node{
 		id:            cfg.ID,
 		conf:          newConfig(cfg.Peers),
+		baseConf:      newConfig(cfg.Peers),
 		state:         Follower,
 		term:          hs.Term,
 		vote:          hs.VotedFor,
@@ -193,6 +206,15 @@ func NewNode(cfg Config) (*Node, error) {
 		storage:       cfg.Storage,
 	}
 	n.resetElectionTimeout()
+
+	// A restarting node's membership lives in its log, not in the peer list it
+	// was started with. Deriving it here means a node that crashed part-way
+	// through a membership change comes back believing whatever its log says,
+	// which is the same thing every other node derives from the same entries.
+	if err := n.rebuildConfig(); err != nil {
+		return nil, err
+	}
+
 	return n, nil
 }
 

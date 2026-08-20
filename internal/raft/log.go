@@ -125,19 +125,37 @@ func (l *raftLog) append(entries []Entry) (Index, error) {
 	return l.lastIndex(), nil
 }
 
+// appendResult describes what an accepted AppendEntries actually did to the
+// log.
+//
+// The detail matters because a configuration change takes effect as soon as it
+// is appended, not when it commits (§6). An append that overwrites entries can
+// therefore remove a configuration this node is already using, so the caller
+// has to know whether anything was discarded.
+type appendResult struct {
+	// lastIndex is the index of the last entry now agreed with.
+	lastIndex Index
+	// firstWritten is the index of the first entry actually written, or zero
+	// if the payload was already present in full.
+	firstWritten Index
+	// truncated reports that entries this node already held were discarded,
+	// which can revert a configuration change.
+	truncated bool
+}
+
 // maybeAppend is the follower's side of AppendEntries. It checks that the log
 // agrees at (prevIdx, prevTerm) and, if so, merges entries in and advances the
 // commit index to min(leaderCommit, last index now held).
 //
-// On success it returns the index of the last entry now agreed with. On failure
-// it returns ok=false, and the caller replies with a conflict hint so the
-// leader can back up efficiently.
-func (l *raftLog) maybeAppend(prevIdx Index, prevTerm Term, leaderCommit Index, entries []Entry) (Index, bool, error) {
+// On failure it returns ok=false, and the caller replies with a conflict hint
+// so the leader can back up efficiently.
+func (l *raftLog) maybeAppend(prevIdx Index, prevTerm Term, leaderCommit Index, entries []Entry) (appendResult, bool, error) {
 	if !l.matches(prevIdx, prevTerm) {
-		return 0, false, nil
+		return appendResult{}, false, nil
 	}
 
 	lastNewIdx := prevIdx + Index(len(entries))
+	res := appendResult{lastIndex: lastNewIdx}
 
 	// Write only the suffix that actually differs. This is a correctness
 	// requirement, not an optimization: a delayed or duplicated AppendEntries
@@ -155,16 +173,21 @@ func (l *raftLog) maybeAppend(prevIdx Index, prevTerm Term, leaderCommit Index, 
 		// left to do, so fail loudly rather than corrupt the log.
 		panic(fmt.Sprintf("raft: entry %d conflicts with committed index %d", conflict, l.committed))
 	default:
+		// Anything at or after the conflict that this node already held is
+		// about to be replaced.
+		res.truncated = conflict <= l.lastIndex()
+		res.firstWritten = conflict
+
 		offset := conflict - (prevIdx + 1)
 		if err := l.storage.Append(entries[offset:]); err != nil {
-			return 0, false, err
+			return appendResult{}, false, err
 		}
 	}
 
 	// The leader's commit index can run ahead of what this follower has
 	// received, so clamp it to the entries actually in hand.
 	l.commitTo(min(leaderCommit, lastNewIdx))
-	return lastNewIdx, true, nil
+	return res, true, nil
 }
 
 // findConflict returns the index of the first entry in entries that this log

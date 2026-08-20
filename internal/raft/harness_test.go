@@ -45,6 +45,10 @@ type cluster struct {
 	// readStates records the completed read indexes each node has reported.
 	readStates map[NodeID][]ReadState
 
+	// undeliverable counts messages addressed to nodes this harness does not
+	// run, which happens while a member is being added.
+	undeliverable int
+
 	// inflight holds messages produced but not yet delivered.
 	inflight []Message
 
@@ -218,7 +222,13 @@ func (c *cluster) deliverAll() {
 			}
 			dst, ok := c.nodes[m.To]
 			if !ok {
-				c.t.Fatalf("message addressed to unknown node %d", m.To)
+				// A node the cluster knows of but which does not exist here.
+				// This is the normal situation while a member is being added:
+				// the leader replicates to it before it has been started. The
+				// real transport simply fails to deliver, so the harness drops
+				// it too rather than treating it as a bug.
+				c.undeliverable++
+				continue
 			}
 			if err := dst.Step(m); err != nil {
 				c.t.Fatalf("node %d stepping %s from %d: %v", m.To, m.Type, m.From, err)

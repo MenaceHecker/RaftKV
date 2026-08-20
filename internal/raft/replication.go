@@ -134,7 +134,7 @@ func (n *Node) handleAppendRequest(m Message) error {
 	n.leader = m.From
 	n.electionElapsed = 0
 
-	lastNewIdx, ok, err := n.log.maybeAppend(m.PrevLogIndex, m.PrevLogTerm, m.CommitIndex, m.Entries)
+	res, ok, err := n.log.maybeAppend(m.PrevLogIndex, m.PrevLogTerm, m.CommitIndex, m.Entries)
 	if err != nil {
 		return err
 	}
@@ -152,12 +152,21 @@ func (n *Node) handleAppendRequest(m Message) error {
 		return nil
 	}
 
+	// A configuration change takes effect on append, so accepting entries can
+	// change this node's membership — and truncating can revert one it was
+	// already using.
+	if res.truncated || containsConfChange(m.Entries) {
+		if err := n.rebuildConfig(); err != nil {
+			return err
+		}
+	}
+
 	n.send(Message{
 		Type:       MsgAppendResponse,
 		To:         m.From,
 		Term:       n.term,
 		Success:    true,
-		MatchIndex: lastNewIdx,
+		MatchIndex: res.lastIndex,
 	})
 	return nil
 }
