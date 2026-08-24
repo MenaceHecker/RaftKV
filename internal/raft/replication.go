@@ -201,6 +201,13 @@ func (n *Node) handleAppendResponse(m Message) error {
 	}
 
 	if n.maybeCommit() {
+		// A membership transition may now be finishable, and the entry that
+		// finishes it should go out with everything else rather than waiting
+		// for another round.
+		if err := n.maybeFinishConfChange(); err != nil {
+			return err
+		}
+
 		// Tell the followers about the new commit index now rather than
 		// waiting for the next heartbeat, so they can apply without that
 		// extra delay.

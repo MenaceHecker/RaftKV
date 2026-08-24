@@ -148,6 +148,11 @@ type Node struct {
 	// voter sets and a majority of one is not a decision.
 	conf config
 
+	// jointEntryIndex is the log index of the entry that opened the current
+	// transition, or zero when none is open. The leader waits for it to commit
+	// before finishing the transition.
+	jointEntryIndex Index
+
 	// baseConf is the membership as of the point the log begins: the
 	// configuration every conf-change entry still in the log is applied on top
 	// of. conf is always baseConf plus those entries, which is what lets a

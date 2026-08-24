@@ -100,6 +100,7 @@ func containsConfChange(entries []Entry) bool {
 // lands on exactly the right answer with no bookkeeping.
 func (n *Node) rebuildConfig() error {
 	conf := n.baseConf.clone()
+	jointAt := Index(0)
 
 	first := n.log.firstIndex()
 	last := n.log.lastIndex()
@@ -133,10 +134,57 @@ func (n *Node) rebuildConfig() error {
 			continue
 		}
 		conf = next
+
+		// Remember which entry opened the transition currently in force. The
+		// leader may not finish a transition until the entry that started it
+		// has committed, and this is the only place that index is known
+		// without scanning the log again.
+		if conf.inJoint() {
+			jointAt = e.Index
+		} else {
+			jointAt = 0
+		}
 	}
 
+	n.jointEntryIndex = jointAt
 	n.adoptConfig(conf)
 	return nil
+}
+
+// maybeFinishConfChange completes a membership transition once the entry that
+// began it has committed.
+//
+// Raft describes both halves of a change, but only the first is triggered by
+// anyone: an operator asks to add or remove a node, and nobody asks to leave
+// the joint configuration. If the leader did not propose that second entry
+// itself, a cluster would sit in joint consensus indefinitely — still correct,
+// since a double majority is stricter than a single one, but permanently
+// unable to make any further membership change and needlessly harder to reach
+// a quorum in.
+//
+// Waiting for the enter-joint entry to commit is what makes this safe. Until
+// then the transition could still be undone by a new leader overwriting it,
+// and finishing on top of an entry that might vanish would leave this node in
+// a configuration no one else ever adopted.
+func (n *Node) maybeFinishConfChange() error {
+	if n.state != Leader || !n.conf.inJoint() {
+		return nil
+	}
+	if n.jointEntryIndex == 0 || n.log.committed < n.jointEntryIndex {
+		return nil
+	}
+
+	// A leader may not commit anything in a term until it has committed an
+	// entry of its own (§5.4.2), and the entry finishing this transition would
+	// be exactly such an entry — proposing it before the leader's no-op has
+	// committed would append something that cannot yet be acted on.
+	if !n.hasCommittedInCurrentTerm() {
+		return nil
+	}
+
+	// Appending the leave-joint entry takes effect immediately, so the
+	// configuration stops being joint and this will not fire again.
+	return n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint})
 }
 
 // applyConfChange folds one change into a configuration.
