@@ -25,6 +25,12 @@ import (
 // the two disagree is a place the consensus core would behave differently on
 // disk than it does in the tests from Phase 1.
 
+// testConf is a stand-in cluster configuration for tests that are about
+// compaction rather than membership. It is non-empty on purpose: a snapshot
+// recording no configuration would be indistinguishable from one written
+// before configurations travelled with snapshots at all.
+var testConf = raft.ConfState{Voters: []raft.NodeID{1, 2, 3}}
+
 // openDisk opens a DiskStorage, failing the test on error.
 func openDisk(t *testing.T, dir string) (*DiskStorage, Snapshot) {
 	t.Helper()
@@ -226,7 +232,7 @@ func TestCompactionRemovesEntriesAndKeepsBoundary(t *testing.T) {
 	if err := s.Append(logEntries(3, 1, 30)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := s.CreateSnapshot(20, []byte("state")); err != nil {
+	if err := s.CreateSnapshot(20, []byte("state"), testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 
@@ -298,7 +304,7 @@ func TestCompactionSurvivesCrash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshotting: %v", err)
 	}
-	if err := s.CreateSnapshot(appliedThrough, data); err != nil {
+	if err := s.CreateSnapshot(appliedThrough, data, testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 	// Crash here.
@@ -352,7 +358,7 @@ func TestRepeatedCompaction(t *testing.T) {
 		}
 
 		at := from + 15
-		if err := s.CreateSnapshot(at, []byte(fmt.Sprintf("state-%d", round))); err != nil {
+		if err := s.CreateSnapshot(at, []byte(fmt.Sprintf("state-%d", round)), testConf); err != nil {
 			t.Fatalf("round %d CreateSnapshot: %v", round, err)
 		}
 
@@ -382,16 +388,16 @@ func TestCompactionRejectsInvalidIndexes(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	if err := s.CreateSnapshot(20, nil); err == nil {
+	if err := s.CreateSnapshot(20, nil, testConf); err == nil {
 		t.Fatal("snapshotting past the end of the log succeeded")
 	}
-	if err := s.CreateSnapshot(5, []byte("first")); err != nil {
+	if err := s.CreateSnapshot(5, []byte("first"), testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
-	if err := s.CreateSnapshot(5, []byte("again")); err == nil {
+	if err := s.CreateSnapshot(5, []byte("again"), testConf); err == nil {
 		t.Fatal("snapshotting at the existing snapshot index succeeded")
 	}
-	if err := s.CreateSnapshot(3, []byte("backwards")); err == nil {
+	if err := s.CreateSnapshot(3, []byte("backwards"), testConf); err == nil {
 		t.Fatal("snapshotting before the existing snapshot index succeeded")
 	}
 }
@@ -405,7 +411,7 @@ func TestAppendBelowSnapshotIsIgnored(t *testing.T) {
 	if err := s.Append(logEntries(1, 1, 20)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := s.CreateSnapshot(15, []byte("state")); err != nil {
+	if err := s.CreateSnapshot(15, []byte("state"), testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 
@@ -450,7 +456,7 @@ func TestMissingSnapshotIsRefused(t *testing.T) {
 	if err := s.Append(logEntries(1, 1, 20)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := s.CreateSnapshot(15, []byte("state")); err != nil {
+	if err := s.CreateSnapshot(15, []byte("state"), testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 	if err := s.Close(); err != nil {
@@ -555,7 +561,7 @@ func TestDiskOperationsAfterCloseAreRejected(t *testing.T) {
 	if err := s.SetHardState(raft.HardState{Term: 1}); err == nil {
 		t.Error("SetHardState succeeded after Close")
 	}
-	if err := s.CreateSnapshot(1, nil); err == nil {
+	if err := s.CreateSnapshot(1, nil, testConf); err == nil {
 		t.Error("CreateSnapshot succeeded after Close")
 	}
 	if err := s.Close(); err != nil {
@@ -583,7 +589,7 @@ func TestHardStateSurvivesCompaction(t *testing.T) {
 			t.Fatalf("Append: %v", err)
 		}
 	}
-	if err := s.CreateSnapshot(90, []byte("state")); err != nil {
+	if err := s.CreateSnapshot(90, []byte("state"), testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 	if err := s.Close(); err != nil {
@@ -614,7 +620,7 @@ func TestDataDirectoryLayout(t *testing.T) {
 	if err := s.Append(logEntries(1, 1, 3)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := s.CreateSnapshot(2, []byte("state")); err != nil {
+	if err := s.CreateSnapshot(2, []byte("state"), testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 
@@ -625,6 +631,153 @@ func TestDataDirectoryLayout(t *testing.T) {
 		}
 		if !info.IsDir() {
 			t.Fatalf("%q is not a directory", sub)
+		}
+	}
+}
+
+func TestConfigurationSurvivesCompaction(t *testing.T) {
+	// The reason snapshots carry a configuration at all.
+	//
+	// Membership lives in the log as conf-change entries, and compaction
+	// deletes them. Without the configuration recorded alongside the snapshot,
+	// a node whose log was compacted past a membership change would come back
+	// with whatever peer list it was started with — a cluster that stopped
+	// existing however long ago the change was made.
+	dir := t.TempDir()
+	s, _ := openDisk(t, dir)
+
+	if err := s.Append(logEntries(1, 1, 30)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// A configuration that could not be guessed from any static peer list.
+	grown := raft.ConfState{
+		Voters: []raft.NodeID{1, 2, 3, 4, 5},
+		Addrs:  map[raft.NodeID]string{4: "host-4:9000", 5: "host-5:9000"},
+	}
+	if err := s.CreateSnapshot(20, []byte("state"), grown); err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("closing: %v", err)
+	}
+
+	_, snap := openDisk(t, dir)
+
+	if snap.Conf.IsEmpty() {
+		t.Fatal("the recovered snapshot carries no configuration; a compacted node " +
+			"would fall back to a stale peer list")
+	}
+	if len(snap.Conf.Voters) != 5 {
+		t.Fatalf("recovered voters = %v, want five", snap.Conf.Voters)
+	}
+	for id, want := range grown.Addrs {
+		if got := snap.Conf.Addrs[id]; got != want {
+			t.Fatalf("address for node %d = %q, want %q", id, got, want)
+		}
+	}
+}
+
+func TestJointConfigurationSurvivesCompaction(t *testing.T) {
+	// A node can be compacted while a membership change is still open. Coming
+	// back believing the transition had finished would let it decide on a
+	// single majority while the rest of the cluster still requires two.
+	dir := t.TempDir()
+	s, _ := openDisk(t, dir)
+
+	if err := s.Append(logEntries(1, 1, 10)); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	mid := raft.ConfState{
+		Voters:   []raft.NodeID{1, 2, 3},
+		Incoming: []raft.NodeID{1, 2, 3, 4},
+		Joint:    true,
+		Addrs:    map[raft.NodeID]string{4: "host-4:9000"},
+	}
+	if err := s.CreateSnapshot(5, []byte("state"), mid); err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("closing: %v", err)
+	}
+
+	_, snap := openDisk(t, dir)
+
+	if !snap.Conf.Joint {
+		t.Fatal("a snapshot taken mid-transition came back reporting it had finished")
+	}
+	if len(snap.Conf.Incoming) != 4 {
+		t.Fatalf("recovered incoming = %v, want four", snap.Conf.Incoming)
+	}
+}
+
+func TestSnapshotWithConfigurationIsDeterministic(t *testing.T) {
+	// Two replicas holding identical membership must write identical bytes, or
+	// comparing snapshots stops being a way to check convergence. Address maps
+	// have no order of their own, so the encoding has to impose one.
+	conf := raft.ConfState{
+		Voters: []raft.NodeID{1, 2, 3},
+		Addrs: map[raft.NodeID]string{
+			3: "c:3", 1: "a:1", 2: "b:2",
+		},
+	}
+
+	reference := func() []byte {
+		t.Helper()
+		dir := t.TempDir()
+		s := newSnapshotter(t, dir)
+		if err := s.Save(Snapshot{
+			Meta: SnapshotMeta{Index: 1, Term: 1},
+			Data: []byte("state"),
+			Conf: conf,
+		}); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, snapshotName(SnapshotMeta{Index: 1, Term: 1})))
+		if err != nil {
+			t.Fatalf("reading snapshot: %v", err)
+		}
+		return data
+	}
+
+	first := reference()
+	for i := range 20 {
+		if got := reference(); !bytes.Equal(first, got) {
+			t.Fatalf("snapshot %d differs; the configuration encoding is not deterministic", i)
+		}
+	}
+}
+
+func TestTruncatedConfigurationIsRejected(t *testing.T) {
+	// The configuration sits at the end of a snapshot's payload, so a file cut
+	// short there would otherwise decode into a snapshot with no membership —
+	// which reads exactly like a legitimate one from before configurations
+	// were carried.
+	dir := t.TempDir()
+	s := newSnapshotter(t, dir)
+
+	meta := SnapshotMeta{Index: 5, Term: 2}
+	if err := s.Save(Snapshot{
+		Meta: meta,
+		Data: []byte("state"),
+		Conf: raft.ConfState{Voters: []raft.NodeID{1, 2, 3}, Addrs: map[raft.NodeID]string{1: "a"}},
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	path := filepath.Join(dir, snapshotName(meta))
+	full, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading snapshot: %v", err)
+	}
+
+	for cut := range len(full) {
+		if err := os.WriteFile(path, full[:cut], fileMode); err != nil {
+			t.Fatalf("writing truncated snapshot: %v", err)
+		}
+		if _, err := s.Load(); err == nil {
+			t.Fatalf("a snapshot truncated to %d of %d bytes was accepted", cut, len(full))
 		}
 	}
 }

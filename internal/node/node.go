@@ -231,12 +231,22 @@ func Start(cfg Config) (*Node, error) {
 		}
 	}
 
+	// A snapshot carries the membership as of the point it was taken, which
+	// may include changes whose log entries have since been compacted away.
+	// When there is one it supersedes the statically configured peer list.
+	var initialConf *raft.ConfState
+	if !snap.Conf.IsEmpty() {
+		conf := snap.Conf
+		initialConf = &conf
+	}
+
 	rn, err := raft.NewNode(raft.Config{
-		ID:            cfg.ID,
-		Peers:         cfg.Peers,
-		ElectionTick:  cfg.ElectionTick,
-		HeartbeatTick: cfg.HeartbeatTick,
-		Storage:       store,
+		ID:               cfg.ID,
+		Peers:            cfg.Peers,
+		InitialConfState: initialConf,
+		ElectionTick:     cfg.ElectionTick,
+		HeartbeatTick:    cfg.HeartbeatTick,
+		Storage:          store,
 	})
 	if err != nil {
 		store.Close()
@@ -588,7 +598,9 @@ func (n *Node) maybeSnapshot() {
 	if err != nil {
 		return
 	}
-	if err := n.storage.CreateSnapshot(applied, data); err != nil {
+	// The configuration travels with the snapshot: compaction is about to
+	// remove the conf-change entries it was derived from.
+	if err := n.storage.CreateSnapshot(applied, data, n.raft.ConfState()); err != nil {
 		return
 	}
 	n.lastSnapshot = applied

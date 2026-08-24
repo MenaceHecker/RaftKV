@@ -304,13 +304,17 @@ func (s *DiskStorage) Append(entries []raft.Entry) error {
 // CreateSnapshot records a snapshot of the state machine at index and compacts
 // everything up to it out of the log.
 //
-// The caller supplies the serialized state and must have applied exactly
-// through index to produce it. Ordering here is deliberate and load-bearing:
+// The caller supplies the serialized state and the cluster configuration as of
+// that index, and must have applied exactly through index to produce them. The
+// configuration has to be recorded here because compaction is about to delete
+// the conf-change entries it was derived from.
+//
+// Ordering is deliberate and load-bearing:
 // the snapshot file is published first, then the log records that it exists,
 // and only then is anything deleted. A crash between any two steps leaves the
 // node recoverable, because nothing is discarded until its replacement is
 // durable.
-func (s *DiskStorage) CreateSnapshot(index raft.Index, data []byte) error {
+func (s *DiskStorage) CreateSnapshot(index raft.Index, data []byte, conf raft.ConfState) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -330,7 +334,7 @@ func (s *DiskStorage) CreateSnapshot(index raft.Index, data []byte) error {
 	meta := SnapshotMeta{Index: index, Term: term}
 
 	// 1. Publish the snapshot. Until this succeeds nothing else may change.
-	if err := s.snapshots.Save(Snapshot{Meta: meta, Data: data}); err != nil {
+	if err := s.snapshots.Save(Snapshot{Meta: meta, Data: data, Conf: conf}); err != nil {
 		return err
 	}
 

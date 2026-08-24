@@ -18,10 +18,23 @@ type Config struct {
 	// Peers.
 	ID NodeID
 
-	// Peers is the full membership of the cluster, including this node.
-	// Membership is fixed for now; Phase 4 replaces it with a reconfigurable
-	// set driven by joint consensus.
+	// Peers is the cluster membership this node is started with. It is used
+	// only when there is no configuration to restore, which means the very
+	// first boot of a cluster.
+	//
+	// It must contain this node's ID. Once membership has changed, the log and
+	// any snapshot are authoritative and this field is ignored.
 	Peers []NodeID
+
+	// InitialConfState is the membership recovered from a snapshot, if there
+	// was one. It supersedes Peers.
+	//
+	// A node restarting after its log was compacted past a membership change
+	// cannot derive that change from the log any more, because the entry is
+	// gone. The snapshot is the only remaining record of it, so restoring from
+	// there is what keeps a compacted node's view of the cluster in step with
+	// everyone else's.
+	InitialConfState *ConfState
 
 	// ElectionTick is how many Tick calls a follower tolerates without
 	// hearing from a leader before it starts an election. The effective
@@ -48,6 +61,26 @@ func (c *Config) validate() error {
 	if c.ID == None {
 		return errors.New("raft: config ID must be non-zero")
 	}
+
+	// A restored configuration replaces the peer list entirely, so the peer
+	// list only has to make sense when there is nothing to restore.
+	if c.InitialConfState != nil && !c.InitialConfState.IsEmpty() {
+		if c.Storage == nil {
+			return errors.New("raft: config Storage must not be nil")
+		}
+		if c.ElectionTick <= 0 {
+			return errors.New("raft: config ElectionTick must be positive")
+		}
+		if c.HeartbeatTick <= 0 {
+			return errors.New("raft: config HeartbeatTick must be positive")
+		}
+		if c.HeartbeatTick >= c.ElectionTick {
+			return fmt.Errorf("raft: config HeartbeatTick (%d) must be less than ElectionTick (%d)",
+				c.HeartbeatTick, c.ElectionTick)
+		}
+		return nil
+	}
+
 	if len(c.Peers) == 0 {
 		return errors.New("raft: config Peers must not be empty")
 	}
@@ -121,10 +154,10 @@ type Node struct {
 	// truncation that removes a change be undone by simply deriving conf
 	// again.
 	//
-	// It is currently the statically configured peer set. Once a snapshot can
-	// carry a configuration, it will come from there instead; until then a log
-	// compacted past a conf-change entry would lose that change on restart,
-	// which is why compaction and membership have not yet been combined.
+	// It comes from the snapshot when there is one, and from the statically
+	// configured peer set only on a cluster's very first boot. That is what
+	// makes compaction safe alongside membership changes: an entry that has
+	// been compacted away is already reflected in the base.
 	baseConf config
 
 	state State
@@ -188,10 +221,18 @@ func NewNode(cfg Config) (*Node, error) {
 		rng = rand.New(rand.NewSource(int64(cfg.ID)))
 	}
 
+	// A restored configuration wins over the static peer list: it reflects
+	// every membership change that committed before the snapshot was taken,
+	// including ones whose log entries have since been compacted away.
+	base := newConfig(cfg.Peers)
+	if cfg.InitialConfState != nil && !cfg.InitialConfState.IsEmpty() {
+		base = configFromState(*cfg.InitialConfState)
+	}
+
 	n := &Node{
 		id:            cfg.ID,
-		conf:          newConfig(cfg.Peers),
-		baseConf:      newConfig(cfg.Peers),
+		conf:          base.clone(),
+		baseConf:      base,
 		state:         Follower,
 		term:          hs.Term,
 		vote:          hs.VotedFor,

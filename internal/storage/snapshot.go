@@ -53,6 +53,16 @@ type Snapshot struct {
 	// Data is the state machine's serialized contents. The storage layer
 	// treats it as opaque; only the state machine knows how to read it.
 	Data []byte
+
+	// Conf is the cluster membership as of Meta.Index.
+	//
+	// It travels with the snapshot because it cannot be recovered any other
+	// way. Membership lives in the log as conf-change entries, and a snapshot
+	// exists precisely so those entries can be deleted — so without recording
+	// the configuration here, compacting past a membership change would lose
+	// it, and the node would come back believing in a cluster that no longer
+	// exists.
+	Conf raft.ConfState
 }
 
 // Snapshotter manages the snapshot files in a directory.
@@ -138,6 +148,7 @@ func (s *Snapshotter) Save(snap Snapshot) error {
 	payload := appendUint64(nil, uint64(snap.Meta.Index))
 	payload = appendUint64(payload, uint64(snap.Meta.Term))
 	payload = appendBytes(payload, snap.Data)
+	payload = appendConfState(payload, snap.Conf)
 
 	if len(payload)+typeSize > maxRecordSize {
 		return fmt.Errorf("%w: %d bytes at index %d exceeds the %d-byte limit",
@@ -284,6 +295,10 @@ func (s *Snapshotter) load(meta SnapshotMeta) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("storage: snapshot %s data: %w", name, err)
 	}
+	conf, err := readConfState(r)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("storage: snapshot %s configuration: %w", name, err)
+	}
 
 	got := SnapshotMeta{Index: raft.Index(index), Term: raft.Term(term)}
 	if got != meta {
@@ -293,7 +308,112 @@ func (s *Snapshotter) load(meta SnapshotMeta) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("storage: snapshot %s contains metadata %+v", name, got)
 	}
 
-	return Snapshot{Meta: got, Data: body}, nil
+	return Snapshot{Meta: got, Data: body, Conf: conf}, nil
+}
+
+// appendConfState writes a cluster configuration.
+//
+// Both voter sets arrive already sorted, and the address map is sorted here,
+// so identical membership always produces identical bytes. Two replicas'
+// snapshots stay directly comparable, which is the cheapest check that they
+// really did converge.
+func appendConfState(dst []byte, cs raft.ConfState) []byte {
+	dst = appendUint64(dst, uint64(len(cs.Voters)))
+	for _, id := range cs.Voters {
+		dst = appendUint64(dst, uint64(id))
+	}
+
+	dst = appendUint64(dst, uint64(len(cs.Incoming)))
+	for _, id := range cs.Incoming {
+		dst = appendUint64(dst, uint64(id))
+	}
+
+	// The joint flag is recorded rather than inferred from the incoming set,
+	// because a shrinking transition can leave that set smaller than the
+	// outgoing one and, at the limit, empty.
+	var joint uint64
+	if cs.Joint {
+		joint = 1
+	}
+	dst = appendUint64(dst, joint)
+
+	ids := make([]raft.NodeID, 0, len(cs.Addrs))
+	for id := range cs.Addrs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	dst = appendUint64(dst, uint64(len(ids)))
+	for _, id := range ids {
+		dst = appendUint64(dst, uint64(id))
+		dst = appendBytes(dst, []byte(cs.Addrs[id]))
+	}
+	return dst
+}
+
+// readConfState reads a cluster configuration written by appendConfState.
+func readConfState(r *reader) (raft.ConfState, error) {
+	readIDs := func(what string) ([]raft.NodeID, error) {
+		count, err := r.uint64()
+		if err != nil {
+			return nil, fmt.Errorf("reading %s count: %w", what, err)
+		}
+		if count > maxRecordSize {
+			return nil, fmt.Errorf("implausible %s count %d", what, count)
+		}
+		if count == 0 {
+			return nil, nil
+		}
+		out := make([]raft.NodeID, 0, count)
+		for i := uint64(0); i < count; i++ {
+			id, err := r.uint64()
+			if err != nil {
+				return nil, fmt.Errorf("reading %s member %d: %w", what, i, err)
+			}
+			out = append(out, raft.NodeID(id))
+		}
+		return out, nil
+	}
+
+	var cs raft.ConfState
+	var err error
+
+	if cs.Voters, err = readIDs("voters"); err != nil {
+		return raft.ConfState{}, err
+	}
+	if cs.Incoming, err = readIDs("incoming voters"); err != nil {
+		return raft.ConfState{}, err
+	}
+
+	joint, err := r.uint64()
+	if err != nil {
+		return raft.ConfState{}, fmt.Errorf("reading joint flag: %w", err)
+	}
+	cs.Joint = joint != 0
+
+	count, err := r.uint64()
+	if err != nil {
+		return raft.ConfState{}, fmt.Errorf("reading address count: %w", err)
+	}
+	if count > maxRecordSize {
+		return raft.ConfState{}, fmt.Errorf("implausible address count %d", count)
+	}
+	if count > 0 {
+		cs.Addrs = make(map[raft.NodeID]string, count)
+		for i := uint64(0); i < count; i++ {
+			id, err := r.uint64()
+			if err != nil {
+				return raft.ConfState{}, fmt.Errorf("reading address %d node ID: %w", i, err)
+			}
+			addr, err := r.bytes()
+			if err != nil {
+				return raft.ConfState{}, fmt.Errorf("reading address %d: %w", i, err)
+			}
+			cs.Addrs[raft.NodeID(id)] = string(addr)
+		}
+	}
+
+	return cs, nil
 }
 
 // Purge deletes all but the newest keep snapshots.
