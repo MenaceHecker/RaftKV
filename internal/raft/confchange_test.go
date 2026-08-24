@@ -54,6 +54,11 @@ func TestConfChangeTakesEffectOnAppendNotCommit(t *testing.T) {
 func TestFollowersAdoptTheChangeAsItReplicates(t *testing.T) {
 	// Every node derives its membership from the same entries, so a change
 	// reaches followers by ordinary replication rather than any side channel.
+	//
+	// The transition completes on its own once the entry commits, so what is
+	// observable here is the destination rather than the joint phase in
+	// between. TestTransitionStaysOpenUntilItsEntryCommits looks at the
+	// intermediate state, where it can be held still.
 	c, n := leaderWithConfChange(t, 3, 801)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
@@ -63,12 +68,113 @@ func TestFollowersAdoptTheChangeAsItReplicates(t *testing.T) {
 
 	for _, id := range c.ids {
 		f := c.node(id)
-		if !f.InJointConfiguration() {
-			t.Fatalf("node %d did not enter the joint configuration\n%s", id, c.dump())
-		}
 		if len(f.Members()) != 4 {
-			t.Fatalf("node %d has members %v, want four", id, f.Members())
+			t.Fatalf("node %d has members %v, want four\n%s", id, f.Members(), c.dump())
 		}
+		if f.conf.addrs[4] != "h:4" {
+			t.Fatalf("node %d did not learn the new member's address", id)
+		}
+	}
+}
+
+func TestLeaderFinishesTheTransitionItself(t *testing.T) {
+	// Raft describes both halves of a membership change, but only the first is
+	// triggered by anyone: an operator asks to add a node, and nobody asks to
+	// leave the joint configuration. The leader has to propose that second
+	// entry itself, or the cluster sits in joint consensus indefinitely —
+	// still safe, since a double majority is stricter, but unable to make any
+	// further membership change.
+	c, n := leaderWithConfChange(t, 3, 830)
+
+	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
+		t.Fatalf("ProposeConfChange: %v", err)
+	}
+	if !n.InJointConfiguration() {
+		t.Fatal("the change did not open a transition")
+	}
+
+	// Nobody proposes the leave-joint entry; the leader must do it once the
+	// first entry commits.
+	c.deliverAll()
+
+	if n.InJointConfiguration() {
+		t.Fatalf("the leader left the cluster in a joint configuration\n%s", c.dump())
+	}
+	assertVoters(t, n.conf.voters, 1, 2, 3, 4)
+
+	// And with the transition closed, another change is possible again.
+	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 5, Addr: "h:5"}); err != nil {
+		t.Fatalf("a second change after the first completed: %v", err)
+	}
+}
+
+func TestTransitionStaysOpenUntilItsEntryCommits(t *testing.T) {
+	// Finishing a transition on top of an entry that has not committed would
+	// be finishing something a new leader could still undo, leaving this node
+	// in a configuration no one else ever adopted.
+	c := newCluster(t, 5, clusterOpts{seed: 831})
+	leader := c.awaitLeader(defaultElectionTick * 2)
+	n := c.node(leader)
+
+	// Cut the leader off so nothing it appends can reach a majority.
+	var rest []NodeID
+	for _, id := range c.ids {
+		if id != leader {
+			rest = append(rest, id)
+		}
+	}
+	c.partition([]NodeID{leader}, rest)
+
+	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 6, Addr: "h:6"}); err != nil {
+		t.Fatalf("ProposeConfChange: %v", err)
+	}
+	if !n.InJointConfiguration() {
+		t.Fatal("the change did not take effect on append")
+	}
+
+	c.tickN(defaultElectionTick)
+
+	if !n.InJointConfiguration() {
+		t.Fatalf("the transition was finished without its entry ever committing\n%s", c.dump())
+	}
+}
+
+func TestANewLeaderFinishesAnInheritedTransition(t *testing.T) {
+	// A leader can die mid-transition. Whoever replaces it inherits the joint
+	// configuration and has to complete it, or the cluster stays there for
+	// good.
+	c := newCluster(t, 3, clusterOpts{seed: 832})
+	leader := c.awaitLeader(defaultElectionTick * 2)
+	n := c.node(leader)
+
+	// Open a transition that cannot commit, so it is still open when
+	// leadership moves.
+	var rest []NodeID
+	for _, id := range c.ids {
+		if id != leader {
+			rest = append(rest, id)
+		}
+	}
+	c.partition([]NodeID{leader}, rest)
+
+	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
+		t.Fatalf("ProposeConfChange: %v", err)
+	}
+	if !n.InJointConfiguration() {
+		t.Fatal("the change did not take effect on append")
+	}
+
+	// Heal and let the cluster settle. Whichever node leads afterwards must
+	// not leave a transition open.
+	c.heal()
+	c.tickN(defaultElectionTick * 6)
+
+	current, ok := c.leader()
+	if !ok {
+		t.Fatalf("no leader after healing\n%s", c.dump())
+	}
+	if c.node(current).InJointConfiguration() {
+		t.Fatalf("the new leader left an inherited transition open\n%s", c.dump())
 	}
 }
 
@@ -164,7 +270,9 @@ func TestConfigurationIsDerivedFromTheLogOnRestart(t *testing.T) {
 	}
 	c.deliverAll()
 
-	// Restart a follower that had accepted the change.
+	// Restart a follower that had accepted the change. Its peer list still
+	// says three nodes, so anything other than four proves it fell back to
+	// static configuration.
 	var follower NodeID
 	for _, id := range c.ids {
 		if id != leader {
@@ -172,19 +280,18 @@ func TestConfigurationIsDerivedFromTheLogOnRestart(t *testing.T) {
 			break
 		}
 	}
-	if !c.node(follower).InJointConfiguration() {
+	if len(c.node(follower).Members()) != 4 {
 		t.Fatal("the follower never adopted the change, so the restart proves nothing")
 	}
 
 	c.restart(follower, clusterOpts{seed: 804})
 	restarted := c.node(follower)
 
-	if !restarted.InJointConfiguration() {
-		t.Fatalf("the restarted node forgot the in-flight change; members = %v",
-			restarted.Members())
+	if got := restarted.Members(); len(got) != 4 {
+		t.Fatalf("restarted members = %v, want four; the node fell back to its peer list", got)
 	}
-	if len(restarted.Members()) != 4 {
-		t.Fatalf("restarted members = %v, want four", restarted.Members())
+	if restarted.conf.addrs[4] != "h:4" {
+		t.Fatal("the restarted node lost the new member's address")
 	}
 }
 
@@ -397,5 +504,82 @@ func TestAddressTravelsWithTheChange(t *testing.T) {
 		if got := f.conf.addrs[4]; got != "10.0.0.4:9000" {
 			t.Fatalf("node %d has address %q for the new member, want 10.0.0.4:9000", id, got)
 		}
+	}
+}
+
+func TestTransitionWaitsEvenWhenCommitAdvancesBelowIt(t *testing.T) {
+	// The commit index advancing is not the same as *this* entry committing.
+	//
+	// A leader can have entries queued behind a membership change: a majority
+	// acknowledges some earlier index, the commit index moves, and the
+	// transition is reconsidered — while the entry that opened it is still
+	// unreplicated. Finishing there would build the new configuration on top
+	// of an entry a future leader could still overwrite.
+	//
+	// This is checked directly rather than through the message layer, because
+	// arranging the exact gap between the commit index and the change's index
+	// takes a partition that would also stop the leader hearing anything at
+	// all, which is a different case.
+	c := newCluster(t, 3, clusterOpts{seed: 833})
+	n := c.node(1)
+
+	if err := n.Step(Message{Type: MsgCampaign}); err != nil {
+		t.Fatalf("campaign: %v", err)
+	}
+	c.deliverAll()
+	if n.State() != Leader {
+		t.Fatalf("node 1 is %s, want Leader", n.State())
+	}
+
+	// An ordinary entry, then the membership change behind it.
+	if err := n.propose([]Entry{{Type: EntryNormal, Data: []byte("before")}}); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	earlier := n.LastIndex()
+
+	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
+		t.Fatalf("ProposeConfChange: %v", err)
+	}
+	changeIndex := n.LastIndex()
+	if changeIndex <= earlier {
+		t.Fatalf("the change is at %d, expected it after %d", changeIndex, earlier)
+	}
+
+	// A majority has the earlier entry but not the change itself.
+	for _, id := range []NodeID{2, 3} {
+		n.progress[id].match = earlier
+	}
+	n.progress[n.ID()].match = changeIndex
+
+	if !n.maybeCommit() {
+		t.Fatalf("the earlier entry did not commit; commit is %d, wanted %d",
+			n.CommitIndex(), earlier)
+	}
+	if n.CommitIndex() != earlier {
+		t.Fatalf("commit index = %d, want %d — the change must not have committed",
+			n.CommitIndex(), earlier)
+	}
+
+	if err := n.maybeFinishConfChange(); err != nil {
+		t.Fatalf("maybeFinishConfChange: %v", err)
+	}
+
+	if !n.InJointConfiguration() {
+		t.Fatalf("the transition was finished while the entry that opened it was "+
+			"still uncommitted (commit %d, change at %d)", n.CommitIndex(), changeIndex)
+	}
+
+	// Once the change itself commits, the leader completes it.
+	for _, id := range []NodeID{2, 3} {
+		n.progress[id].match = changeIndex
+	}
+	if !n.maybeCommit() {
+		t.Fatalf("the change did not commit once a majority held it")
+	}
+	if err := n.maybeFinishConfChange(); err != nil {
+		t.Fatalf("maybeFinishConfChange: %v", err)
+	}
+	if n.InJointConfiguration() {
+		t.Fatal("the leader did not finish the transition once its entry committed")
 	}
 }
