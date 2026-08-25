@@ -45,6 +45,10 @@ type cluster struct {
 	// readStates records the completed read indexes each node has reported.
 	readStates map[NodeID][]ReadState
 
+	// snapshots records the state machine images each node was told to
+	// restore, so tests can tell a snapshot transfer from ordinary catch-up.
+	snapshots map[NodeID][]*Snapshot
+
 	// undeliverable counts messages addressed to nodes this harness does not
 	// run, which happens while a member is being added.
 	undeliverable int
@@ -90,6 +94,7 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 		storages:   make(map[NodeID]*MemoryStorage, size),
 		applied:    make(map[NodeID][]Entry, size),
 		readStates: make(map[NodeID][]ReadState, size),
+		snapshots:  make(map[NodeID][]*Snapshot, size),
 	}
 
 	for _, id := range ids {
@@ -183,6 +188,9 @@ func (c *cluster) collect() {
 		c.inflight = append(c.inflight, rd.Messages...)
 		c.applied[id] = append(c.applied[id], rd.CommittedEntries...)
 		c.readStates[id] = append(c.readStates[id], rd.ReadStates...)
+		if rd.Snapshot != nil {
+			c.snapshots[id] = append(c.snapshots[id], rd.Snapshot)
+		}
 		// Acknowledging only after recording mirrors the real contract: a
 		// caller advances once the entries are safely applied.
 		n.Advance(rd)
