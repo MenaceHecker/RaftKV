@@ -51,6 +51,21 @@ type Storage interface {
 	// entries[0].Index is overwritten, which is how a follower resolves a
 	// conflict with the leader's log (§5.3).
 	Append(entries []Entry) error
+
+	// Snapshot returns the most recent state machine image, for sending to a
+	// follower that has fallen behind the compaction point. It reports
+	// ErrSnapshotUnavailable when none has been taken.
+	Snapshot() (Snapshot, error)
+
+	// ApplySnapshot replaces the stored state with a snapshot received from a
+	// leader.
+	//
+	// This is the one operation that moves the log backwards, and it is safe
+	// only because the snapshot is by definition a committed prefix: the
+	// leader would not hold it otherwise. Everything the receiver had is
+	// discarded, because reconciling entry by entry is exactly what became
+	// impossible when the leader compacted.
+	ApplySnapshot(snap Snapshot) error
 }
 
 var (
@@ -60,6 +75,10 @@ var (
 
 	// ErrUnavailable means the requested index is past the end of the log.
 	ErrUnavailable = errors.New("raft: requested index is unavailable")
+
+	// ErrSnapshotUnavailable means no snapshot has been taken yet, so there is
+	// nothing to send a lagging follower. The leader falls back to the log.
+	ErrSnapshotUnavailable = errors.New("raft: no snapshot is available")
 )
 
 // HardState is the subset of a node's state that Raft requires to be on stable
@@ -94,8 +113,13 @@ type MemoryStorage struct {
 	mu        sync.RWMutex
 	hardState HardState
 
-	// entries holds the log in index order. entries[0].Index is the log's
-	// first index, which is 1 until compaction exists.
+	// snapshot is the last image installed, if any. Its index is the floor
+	// below which entries no longer exist, and its term answers for that
+	// boundary position — which a leader asks about when replicating the first
+	// entry after it.
+	snapshot Snapshot
+
+	// entries holds the log in index order, all of it above snapshot.Index.
 	entries []Entry
 }
 
@@ -129,7 +153,7 @@ func (s *MemoryStorage) FirstIndex() Index {
 
 func (s *MemoryStorage) firstIndexLocked() Index {
 	if len(s.entries) == 0 {
-		return 1
+		return s.snapshot.Index + 1
 	}
 	return s.entries[0].Index
 }
@@ -143,7 +167,7 @@ func (s *MemoryStorage) LastIndex() Index {
 
 func (s *MemoryStorage) lastIndexLocked() Index {
 	if len(s.entries) == 0 {
-		return 0
+		return s.snapshot.Index
 	}
 	return s.entries[len(s.entries)-1].Index
 }
@@ -158,6 +182,12 @@ func (s *MemoryStorage) Term(i Index) (Term, error) {
 	// own — an empty follower legitimately matches PrevLogIndex 0.
 	if i == 0 {
 		return 0, nil
+	}
+	// The snapshot answers for the compaction boundary. Without this a leader
+	// replicating the first entry after a snapshot could never find a matching
+	// position, and the follower could never be caught up.
+	if i == s.snapshot.Index {
+		return s.snapshot.Term, nil
 	}
 	if i < s.firstIndexLocked() {
 		return 0, ErrCompacted
@@ -222,5 +252,37 @@ func (s *MemoryStorage) Append(entries []Entry) error {
 	// array instead of overwriting entries a concurrent reader still holds.
 	keep := entries[0].Index - first
 	s.entries = append(s.entries[:keep:keep], entries...)
+	return nil
+}
+
+// Snapshot implements Storage.
+func (s *MemoryStorage) Snapshot() (Snapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.snapshot.Index == 0 {
+		return Snapshot{}, ErrSnapshotUnavailable
+	}
+	return s.snapshot, nil
+}
+
+// ApplySnapshot implements Storage.
+func (s *MemoryStorage) ApplySnapshot(snap Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// A snapshot older than one already installed carries nothing new, and
+	// applying it would throw away entries this node has since accepted.
+	// Delayed messages make this reachable, so it is refused rather than
+	// assumed impossible.
+	if snap.Index <= s.snapshot.Index {
+		return fmt.Errorf("raft: snapshot at index %d is not newer than the one at %d",
+			snap.Index, s.snapshot.Index)
+	}
+
+	s.snapshot = snap
+	// Every entry is superseded: the snapshot covers a committed prefix, and
+	// anything after it has to come from the leader.
+	s.entries = nil
 	return nil
 }

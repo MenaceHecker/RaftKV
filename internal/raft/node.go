@@ -192,6 +192,10 @@ type Node struct {
 	// them, mirroring how msgs accumulates outbound messages.
 	readStates []ReadState
 
+	// pendingSnapshot holds a snapshot installed from a leader, waiting for
+	// Ready to hand it to the state machine.
+	pendingSnapshot *Snapshot
+
 	electionElapsed  int
 	heartbeatElapsed int
 	electionTick     int
@@ -318,11 +322,19 @@ type Ready struct {
 	// caller must wait until the state machine has applied through each
 	// Index before serving the corresponding read.
 	ReadStates []ReadState
+
+	// Snapshot is a state machine image received from the leader, or nil.
+	//
+	// When present it must be restored *before* CommittedEntries are applied:
+	// it replaces the state machine wholesale, and anything applied first
+	// would be overwritten by it.
+	Snapshot *Snapshot
 }
 
 // IsEmpty reports whether there is nothing for the caller to do.
 func (r Ready) IsEmpty() bool {
-	return len(r.Messages) == 0 && len(r.CommittedEntries) == 0 && len(r.ReadStates) == 0
+	return len(r.Messages) == 0 && len(r.CommittedEntries) == 0 &&
+		len(r.ReadStates) == 0 && r.Snapshot == nil
 }
 
 // Ready drains the pending effects.
@@ -332,9 +344,10 @@ func (r Ready) IsEmpty() bool {
 // crash part-way through applying replays those entries rather than skipping
 // them.
 func (n *Node) Ready() Ready {
-	rd := Ready{Messages: n.msgs, ReadStates: n.readStates}
+	rd := Ready{Messages: n.msgs, ReadStates: n.readStates, Snapshot: n.pendingSnapshot}
 	n.msgs = nil
 	n.readStates = nil
+	n.pendingSnapshot = nil
 
 	committed, err := n.log.nextCommitted()
 	if err != nil {
@@ -346,6 +359,13 @@ func (n *Node) Ready() Ready {
 
 // Advance reports that the entries from rd have been applied.
 func (n *Node) Advance(rd Ready) {
+	if rd.Snapshot != nil {
+		// The state machine has been rebuilt from the image, so it is applied
+		// through the snapshot's index whether or not entries followed.
+		if rd.Snapshot.Index > n.log.applied {
+			n.log.applied = rd.Snapshot.Index
+		}
+	}
 	if len(rd.CommittedEntries) > 0 {
 		n.log.appliedTo(rd.CommittedEntries[len(rd.CommittedEntries)-1].Index)
 	}
@@ -436,6 +456,10 @@ func (n *Node) Step(m Message) error {
 		return n.handleHeartbeat(m)
 	case MsgHeartbeatResponse:
 		return n.handleHeartbeatResponse(m)
+	case MsgInstallSnapshot:
+		return n.handleInstallSnapshot(m)
+	case MsgInstallSnapshotResponse:
+		return n.handleInstallSnapshotResponse(m)
 	default:
 		return fmt.Errorf("raft: unhandled message type %s", m.Type)
 	}

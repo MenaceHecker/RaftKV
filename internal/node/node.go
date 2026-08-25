@@ -503,6 +503,24 @@ func (n *Node) processReady() {
 		n.cfg.Transport.Send(rd.Messages)
 	}
 
+	// A snapshot must be restored before any entries are applied. It replaces
+	// the state machine wholesale, so anything applied first would be thrown
+	// away by it — and the entries in this same batch are the ones that follow
+	// the snapshot, not the ones it contains.
+	if rd.Snapshot != nil {
+		if err := n.kv.Restore(rd.Snapshot.Data); err != nil {
+			// The image cannot be decoded, so this node has no way to reach
+			// the state the rest of the cluster agreed on. Continuing would
+			// mean serving reads from a state machine that silently stopped
+			// tracking the log.
+			n.failAllPending(fmt.Errorf("node: restoring snapshot: %w", err))
+			return
+		}
+		// The log below the snapshot is gone, so the next compaction has to
+		// measure from here rather than from a point that no longer exists.
+		n.lastSnapshot = rd.Snapshot.Index
+	}
+
 	for _, e := range rd.CommittedEntries {
 		n.applyEntry(e)
 	}

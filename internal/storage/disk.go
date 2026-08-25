@@ -363,6 +363,79 @@ func (s *DiskStorage) CreateSnapshot(index raft.Index, data []byte, conf raft.Co
 	return s.snapshots.Purge(DefaultSnapshotsKept)
 }
 
+// Snapshot implements raft.Storage.
+//
+// It reads the image back from disk rather than keeping one in memory. A
+// snapshot is only wanted when a follower has fallen behind the compaction
+// point, which is rare, and holding the whole state machine image resident to
+// serve that case would double a node's memory for no ordinary benefit.
+func (s *DiskStorage) Snapshot() (raft.Snapshot, error) {
+	s.mu.RLock()
+	meta := SnapshotMeta{Index: s.entries[0].Index, Term: s.entries[0].Term}
+	closed := s.closed
+	s.mu.RUnlock()
+
+	if closed {
+		return raft.Snapshot{}, errClosed
+	}
+	if meta.Index == 0 {
+		return raft.Snapshot{}, raft.ErrSnapshotUnavailable
+	}
+
+	snap, err := s.snapshots.LoadAt(meta)
+	if err != nil {
+		return raft.Snapshot{}, err
+	}
+	return raft.Snapshot{
+		Index: snap.Meta.Index,
+		Term:  snap.Meta.Term,
+		Conf:  snap.Conf,
+		Data:  snap.Data,
+	}, nil
+}
+
+// ApplySnapshot implements raft.Storage.
+//
+// Ordering mirrors CreateSnapshot for the same reason: the image is made
+// durable before anything is discarded, so a crash part-way through leaves the
+// node recoverable rather than holding neither the old log nor the new state.
+func (s *DiskStorage) ApplySnapshot(snap raft.Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return errClosed
+	}
+	if snap.Index <= s.offset() {
+		// Older than what this node already has. A delayed message makes this
+		// reachable, and applying it would discard entries accepted since.
+		return fmt.Errorf("storage: snapshot at index %d is not newer than the local state at %d",
+			snap.Index, s.offset())
+	}
+
+	meta := SnapshotMeta{Index: snap.Index, Term: snap.Term}
+
+	// 1. Publish the image. Until this succeeds nothing is thrown away.
+	if err := s.snapshots.Save(Snapshot{Meta: meta, Data: snap.Data, Conf: snap.Conf}); err != nil {
+		return err
+	}
+
+	// 2. Record it in the log, so recovery knows the snapshot must exist.
+	if err := s.wal.SaveSnapshotMeta(meta); err != nil {
+		return err
+	}
+
+	// 3. Replace the cached log. Everything is superseded: the snapshot covers
+	//    a committed prefix, and whatever followed has to come from the leader.
+	s.entries = []raft.Entry{{Index: snap.Index, Term: snap.Term}}
+
+	// 4. Drop the segments the snapshot has made redundant.
+	if err := s.wal.TruncateBefore(snap.Index); err != nil {
+		return err
+	}
+	return s.snapshots.Purge(DefaultSnapshotsKept)
+}
+
 // SnapshotMeta returns the position of the most recent snapshot, or the zero
 // value if none has been taken.
 func (s *DiskStorage) SnapshotMeta() SnapshotMeta {

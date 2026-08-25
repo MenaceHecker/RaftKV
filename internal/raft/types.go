@@ -131,6 +131,16 @@ const (
 	// MsgReadIndex is a local signal asking the leader to establish a read
 	// index for a linearizable read (§6.4).
 	MsgReadIndex
+	// MsgInstallSnapshot is a leader sending its state machine image to a
+	// follower that has fallen behind the leader's compaction point (§7).
+	//
+	// It exists because the log is not always enough. Once a leader compacts,
+	// the entries a lagging follower still needs are gone, and no amount of
+	// backing off can find a matching position. The snapshot replaces the
+	// follower's state wholesale rather than reconciling with it.
+	MsgInstallSnapshot
+	// MsgInstallSnapshotResponse answers a MsgInstallSnapshot.
+	MsgInstallSnapshotResponse
 )
 
 // String renders the message type for logs and test failure messages.
@@ -154,6 +164,10 @@ func (t MessageType) String() string {
 		return "Propose"
 	case MsgReadIndex:
 		return "ReadIndex"
+	case MsgInstallSnapshot:
+		return "InstallSnapshot"
+	case MsgInstallSnapshotResponse:
+		return "InstallSnapshotResponse"
 	default:
 		return "Unknown"
 	}
@@ -222,7 +236,35 @@ type Message struct {
 	// The Raft core never interprets it; the layer above uses it to match a
 	// completed read index back to the client request that asked for it.
 	Context []byte
+
+	// Snapshot carries a state machine image in a MsgInstallSnapshot. It is
+	// nil for every other message type.
+	Snapshot *Snapshot
 }
+
+// Snapshot is a state machine image at a point in the log, together with the
+// cluster configuration in force there.
+//
+// It is the unit a leader sends to a follower it can no longer catch up from
+// the log alone. The configuration travels with it for the same reason it
+// travels into storage: the conf-change entries it was derived from may have
+// been compacted away, so the image is the only remaining record of them.
+type Snapshot struct {
+	// Index is the last log index included. A node holding this snapshot has,
+	// by definition, applied everything through Index.
+	Index Index
+	// Term is the term of the entry at Index. Together with Index it gives the
+	// snapshot a position the log-matching rules can reason about.
+	Term Term
+	// Conf is the cluster membership as of Index.
+	Conf ConfState
+	// Data is the serialized state machine. The Raft core never inspects it.
+	Data []byte
+}
+
+// IsEmpty reports whether the snapshot describes no state at all, which is
+// what a node that has never taken one reads back.
+func (s *Snapshot) IsEmpty() bool { return s == nil || s.Index == 0 }
 
 // ConfChangeType describes what a membership change does.
 type ConfChangeType uint8

@@ -89,14 +89,16 @@ func (n *Node) sendAppend(to NodeID) {
 	prevIdx := pr.next - 1
 	prevTerm, err := n.log.term(prevIdx)
 	if err != nil {
-		// The entry this follower needs has been compacted away, so the log
-		// alone cannot catch it up. Phase 2 answers this with a snapshot
-		// transfer; until compaction exists it is unreachable.
+		// The entry this follower needs has been compacted away, so no amount
+		// of backing off will find a position the two logs agree on. Send the
+		// state machine image instead and let it start over from there.
+		n.sendSnapshot(to)
 		return
 	}
 
 	entries, err := n.log.entriesFrom(pr.next)
 	if err != nil {
+		n.sendSnapshot(to)
 		return
 	}
 
