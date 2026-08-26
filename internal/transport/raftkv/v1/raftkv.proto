@@ -60,6 +60,8 @@ enum MessageType {
   MESSAGE_TYPE_APPEND_RESPONSE = 4;
   MESSAGE_TYPE_HEARTBEAT = 5;
   MESSAGE_TYPE_HEARTBEAT_RESPONSE = 6;
+  MESSAGE_TYPE_INSTALL_SNAPSHOT = 7;
+  MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE = 8;
 }
 
 // EntryType mirrors the Raft core's entry types.
@@ -112,6 +114,9 @@ message Message {
   // Opaque token echoed by heartbeat responses, identifying a read-index
   // round.
   bytes context = 16;
+
+  // State machine image, present only on an install-snapshot message.
+  Snapshot snapshot = 17;
 }
 
 // DeliverRequest wraps the message being delivered.
@@ -122,6 +127,46 @@ message Message {
 // change, whereas changing the request type is not.
 message DeliverRequest {
   Message message = 1;
+}
+
+// ConfState is the cluster membership at a point in the log.
+//
+// It travels with a snapshot because it cannot be recovered any other way:
+// membership lives in the log as configuration-change entries, and a snapshot
+// exists precisely so those entries can be deleted.
+message ConfState {
+  // Authoritative voter set, or the outgoing one during a joint transition.
+  repeated uint64 voters = 1;
+  // Target voter set during a joint transition; empty otherwise.
+  repeated uint64 incoming = 2;
+  // Whether a transition is in progress.
+  //
+  // Carried rather than inferred from incoming being non-empty: a shrinking
+  // transition produces a smaller incoming set and, at the limit, an empty
+  // one, which would otherwise read as "no transition" and let the receiver
+  // decide on a single majority while the rest of the cluster requires two.
+  bool joint = 3;
+  // Network addresses, so a node restored from this configuration can reach
+  // members it was never statically told about.
+  map<uint64, string> addrs = 4;
+}
+
+// Snapshot is a state machine image at a point in the log.
+//
+// A leader sends one to a follower it can no longer catch up from the log
+// alone, which happens once compaction has removed the entries that follower
+// still needs.
+message Snapshot {
+  // Last log index included. A node holding this has applied everything
+  // through here.
+  uint64 index = 1;
+  // Term of the entry at index, giving the snapshot a position the
+  // log-matching rules can reason about.
+  uint64 term = 2;
+  // Membership as of index.
+  ConfState conf = 3;
+  // Serialized state machine, opaque to the consensus layer.
+  bytes data = 4;
 }
 
 message DeliverResponse {}

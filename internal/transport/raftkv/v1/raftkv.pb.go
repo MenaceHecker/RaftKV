@@ -30,13 +30,15 @@ const (
 type MessageType int32
 
 const (
-	MessageType_MESSAGE_TYPE_UNSPECIFIED        MessageType = 0
-	MessageType_MESSAGE_TYPE_VOTE_REQUEST       MessageType = 1
-	MessageType_MESSAGE_TYPE_VOTE_RESPONSE      MessageType = 2
-	MessageType_MESSAGE_TYPE_APPEND_REQUEST     MessageType = 3
-	MessageType_MESSAGE_TYPE_APPEND_RESPONSE    MessageType = 4
-	MessageType_MESSAGE_TYPE_HEARTBEAT          MessageType = 5
-	MessageType_MESSAGE_TYPE_HEARTBEAT_RESPONSE MessageType = 6
+	MessageType_MESSAGE_TYPE_UNSPECIFIED               MessageType = 0
+	MessageType_MESSAGE_TYPE_VOTE_REQUEST              MessageType = 1
+	MessageType_MESSAGE_TYPE_VOTE_RESPONSE             MessageType = 2
+	MessageType_MESSAGE_TYPE_APPEND_REQUEST            MessageType = 3
+	MessageType_MESSAGE_TYPE_APPEND_RESPONSE           MessageType = 4
+	MessageType_MESSAGE_TYPE_HEARTBEAT                 MessageType = 5
+	MessageType_MESSAGE_TYPE_HEARTBEAT_RESPONSE        MessageType = 6
+	MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT          MessageType = 7
+	MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE MessageType = 8
 )
 
 // Enum value maps for MessageType.
@@ -49,15 +51,19 @@ var (
 		4: "MESSAGE_TYPE_APPEND_RESPONSE",
 		5: "MESSAGE_TYPE_HEARTBEAT",
 		6: "MESSAGE_TYPE_HEARTBEAT_RESPONSE",
+		7: "MESSAGE_TYPE_INSTALL_SNAPSHOT",
+		8: "MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE",
 	}
 	MessageType_value = map[string]int32{
-		"MESSAGE_TYPE_UNSPECIFIED":        0,
-		"MESSAGE_TYPE_VOTE_REQUEST":       1,
-		"MESSAGE_TYPE_VOTE_RESPONSE":      2,
-		"MESSAGE_TYPE_APPEND_REQUEST":     3,
-		"MESSAGE_TYPE_APPEND_RESPONSE":    4,
-		"MESSAGE_TYPE_HEARTBEAT":          5,
-		"MESSAGE_TYPE_HEARTBEAT_RESPONSE": 6,
+		"MESSAGE_TYPE_UNSPECIFIED":               0,
+		"MESSAGE_TYPE_VOTE_REQUEST":              1,
+		"MESSAGE_TYPE_VOTE_RESPONSE":             2,
+		"MESSAGE_TYPE_APPEND_REQUEST":            3,
+		"MESSAGE_TYPE_APPEND_RESPONSE":           4,
+		"MESSAGE_TYPE_HEARTBEAT":                 5,
+		"MESSAGE_TYPE_HEARTBEAT_RESPONSE":        6,
+		"MESSAGE_TYPE_INSTALL_SNAPSHOT":          7,
+		"MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE": 8,
 	}
 )
 
@@ -291,7 +297,9 @@ type Message struct {
 	ConflictTerm  uint64 `protobuf:"varint,15,opt,name=conflict_term,json=conflictTerm,proto3" json:"conflict_term,omitempty"`
 	// Opaque token echoed by heartbeat responses, identifying a read-index
 	// round.
-	Context       []byte `protobuf:"bytes,16,opt,name=context,proto3" json:"context,omitempty"`
+	Context []byte `protobuf:"bytes,16,opt,name=context,proto3" json:"context,omitempty"`
+	// State machine image, present only on an install-snapshot message.
+	Snapshot      *Snapshot `protobuf:"bytes,17,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -438,6 +446,13 @@ func (x *Message) GetContext() []byte {
 	return nil
 }
 
+func (x *Message) GetSnapshot() *Snapshot {
+	if x != nil {
+		return x.Snapshot
+	}
+	return nil
+}
+
 // DeliverRequest wraps the message being delivered.
 //
 // The wrapper is not ceremony: an RPC whose request type is a bare domain
@@ -488,6 +503,168 @@ func (x *DeliverRequest) GetMessage() *Message {
 	return nil
 }
 
+// ConfState is the cluster membership at a point in the log.
+//
+// It travels with a snapshot because it cannot be recovered any other way:
+// membership lives in the log as configuration-change entries, and a snapshot
+// exists precisely so those entries can be deleted.
+type ConfState struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Authoritative voter set, or the outgoing one during a joint transition.
+	Voters []uint64 `protobuf:"varint,1,rep,packed,name=voters,proto3" json:"voters,omitempty"`
+	// Target voter set during a joint transition; empty otherwise.
+	Incoming []uint64 `protobuf:"varint,2,rep,packed,name=incoming,proto3" json:"incoming,omitempty"`
+	// Whether a transition is in progress.
+	//
+	// Carried rather than inferred from incoming being non-empty: a shrinking
+	// transition produces a smaller incoming set and, at the limit, an empty
+	// one, which would otherwise read as "no transition" and let the receiver
+	// decide on a single majority while the rest of the cluster requires two.
+	Joint bool `protobuf:"varint,3,opt,name=joint,proto3" json:"joint,omitempty"`
+	// Network addresses, so a node restored from this configuration can reach
+	// members it was never statically told about.
+	Addrs         map[uint64]string `protobuf:"bytes,4,rep,name=addrs,proto3" json:"addrs,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfState) Reset() {
+	*x = ConfState{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfState) ProtoMessage() {}
+
+func (x *ConfState) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfState.ProtoReflect.Descriptor instead.
+func (*ConfState) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ConfState) GetVoters() []uint64 {
+	if x != nil {
+		return x.Voters
+	}
+	return nil
+}
+
+func (x *ConfState) GetIncoming() []uint64 {
+	if x != nil {
+		return x.Incoming
+	}
+	return nil
+}
+
+func (x *ConfState) GetJoint() bool {
+	if x != nil {
+		return x.Joint
+	}
+	return false
+}
+
+func (x *ConfState) GetAddrs() map[uint64]string {
+	if x != nil {
+		return x.Addrs
+	}
+	return nil
+}
+
+// Snapshot is a state machine image at a point in the log.
+//
+// A leader sends one to a follower it can no longer catch up from the log
+// alone, which happens once compaction has removed the entries that follower
+// still needs.
+type Snapshot struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Last log index included. A node holding this has applied everything
+	// through here.
+	Index uint64 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	// Term of the entry at index, giving the snapshot a position the
+	// log-matching rules can reason about.
+	Term uint64 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
+	// Membership as of index.
+	Conf *ConfState `protobuf:"bytes,3,opt,name=conf,proto3" json:"conf,omitempty"`
+	// Serialized state machine, opaque to the consensus layer.
+	Data          []byte `protobuf:"bytes,4,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Snapshot) Reset() {
+	*x = Snapshot{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Snapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Snapshot) ProtoMessage() {}
+
+func (x *Snapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
+func (*Snapshot) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Snapshot) GetIndex() uint64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *Snapshot) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *Snapshot) GetConf() *ConfState {
+	if x != nil {
+		return x.Conf
+	}
+	return nil
+}
+
+func (x *Snapshot) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 type DeliverResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -496,7 +673,7 @@ type DeliverResponse struct {
 
 func (x *DeliverResponse) Reset() {
 	*x = DeliverResponse{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[3]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -508,7 +685,7 @@ func (x *DeliverResponse) String() string {
 func (*DeliverResponse) ProtoMessage() {}
 
 func (x *DeliverResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[3]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -521,7 +698,7 @@ func (x *DeliverResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeliverResponse.ProtoReflect.Descriptor instead.
 func (*DeliverResponse) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{3}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{5}
 }
 
 // ClientRequest carries the session information that makes a retry safe.
@@ -545,7 +722,7 @@ type ClientRequest struct {
 
 func (x *ClientRequest) Reset() {
 	*x = ClientRequest{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[4]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -557,7 +734,7 @@ func (x *ClientRequest) String() string {
 func (*ClientRequest) ProtoMessage() {}
 
 func (x *ClientRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[4]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -570,7 +747,7 @@ func (x *ClientRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClientRequest.ProtoReflect.Descriptor instead.
 func (*ClientRequest) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{4}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ClientRequest) GetClientId() uint64 {
@@ -596,7 +773,7 @@ type GetRequest struct {
 
 func (x *GetRequest) Reset() {
 	*x = GetRequest{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[5]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -608,7 +785,7 @@ func (x *GetRequest) String() string {
 func (*GetRequest) ProtoMessage() {}
 
 func (x *GetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[5]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -621,7 +798,7 @@ func (x *GetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRequest.ProtoReflect.Descriptor instead.
 func (*GetRequest) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{5}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetRequest) GetKey() string {
@@ -643,7 +820,7 @@ type GetResponse struct {
 
 func (x *GetResponse) Reset() {
 	*x = GetResponse{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[6]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -655,7 +832,7 @@ func (x *GetResponse) String() string {
 func (*GetResponse) ProtoMessage() {}
 
 func (x *GetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[6]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -668,7 +845,7 @@ func (x *GetResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetResponse.ProtoReflect.Descriptor instead.
 func (*GetResponse) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{6}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetResponse) GetValue() []byte {
@@ -696,7 +873,7 @@ type PutRequest struct {
 
 func (x *PutRequest) Reset() {
 	*x = PutRequest{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[7]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -708,7 +885,7 @@ func (x *PutRequest) String() string {
 func (*PutRequest) ProtoMessage() {}
 
 func (x *PutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[7]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -721,7 +898,7 @@ func (x *PutRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutRequest.ProtoReflect.Descriptor instead.
 func (*PutRequest) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{7}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PutRequest) GetClient() *ClientRequest {
@@ -753,7 +930,7 @@ type PutResponse struct {
 
 func (x *PutResponse) Reset() {
 	*x = PutResponse{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[8]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -765,7 +942,7 @@ func (x *PutResponse) String() string {
 func (*PutResponse) ProtoMessage() {}
 
 func (x *PutResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[8]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -778,7 +955,7 @@ func (x *PutResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PutResponse.ProtoReflect.Descriptor instead.
 func (*PutResponse) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{8}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{10}
 }
 
 type DeleteRequest struct {
@@ -791,7 +968,7 @@ type DeleteRequest struct {
 
 func (x *DeleteRequest) Reset() {
 	*x = DeleteRequest{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[9]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -803,7 +980,7 @@ func (x *DeleteRequest) String() string {
 func (*DeleteRequest) ProtoMessage() {}
 
 func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[9]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -816,7 +993,7 @@ func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
 func (*DeleteRequest) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{9}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DeleteRequest) GetClient() *ClientRequest {
@@ -841,7 +1018,7 @@ type DeleteResponse struct {
 
 func (x *DeleteResponse) Reset() {
 	*x = DeleteResponse{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[10]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -853,7 +1030,7 @@ func (x *DeleteResponse) String() string {
 func (*DeleteResponse) ProtoMessage() {}
 
 func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[10]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -866,7 +1043,7 @@ func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
 func (*DeleteResponse) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{10}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{12}
 }
 
 type StatusRequest struct {
@@ -877,7 +1054,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[11]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -889,7 +1066,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[11]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -902,7 +1079,7 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{11}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{13}
 }
 
 type StatusResponse struct {
@@ -923,7 +1100,7 @@ type StatusResponse struct {
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[12]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -935,7 +1112,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_raftkv_v1_raftkv_proto_msgTypes[12]
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -948,7 +1125,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{12}
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StatusResponse) GetNodeId() uint64 {
@@ -1009,7 +1186,7 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x14\n" +
 	"\x05index\x18\x02 \x01(\x04R\x05index\x12(\n" +
 	"\x04type\x18\x03 \x01(\x0e2\x14.raftkv.v1.EntryTypeR\x04type\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"\x8b\x04\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"\xbc\x04\n" +
 	"\aMessage\x12*\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x16.raftkv.v1.MessageTypeR\x04type\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\x04R\x04from\x12\x0e\n" +
@@ -1028,9 +1205,24 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"matchIndex\x12%\n" +
 	"\x0econflict_index\x18\x0e \x01(\x04R\rconflictIndex\x12#\n" +
 	"\rconflict_term\x18\x0f \x01(\x04R\fconflictTerm\x12\x18\n" +
-	"\acontext\x18\x10 \x01(\fR\acontext\">\n" +
+	"\acontext\x18\x10 \x01(\fR\acontext\x12/\n" +
+	"\bsnapshot\x18\x11 \x01(\v2\x13.raftkv.v1.SnapshotR\bsnapshot\">\n" +
 	"\x0eDeliverRequest\x12,\n" +
-	"\amessage\x18\x01 \x01(\v2\x12.raftkv.v1.MessageR\amessage\"\x11\n" +
+	"\amessage\x18\x01 \x01(\v2\x12.raftkv.v1.MessageR\amessage\"\xc6\x01\n" +
+	"\tConfState\x12\x16\n" +
+	"\x06voters\x18\x01 \x03(\x04R\x06voters\x12\x1a\n" +
+	"\bincoming\x18\x02 \x03(\x04R\bincoming\x12\x14\n" +
+	"\x05joint\x18\x03 \x01(\bR\x05joint\x125\n" +
+	"\x05addrs\x18\x04 \x03(\v2\x1f.raftkv.v1.ConfState.AddrsEntryR\x05addrs\x1a8\n" +
+	"\n" +
+	"AddrsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\x04R\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"r\n" +
+	"\bSnapshot\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
+	"\x04term\x18\x02 \x01(\x04R\x04term\x12(\n" +
+	"\x04conf\x18\x03 \x01(\v2\x14.raftkv.v1.ConfStateR\x04conf\x12\x12\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"\x11\n" +
 	"\x0fDeliverResponse\"H\n" +
 	"\rClientRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\x04R\bclientId\x12\x1a\n" +
@@ -1059,7 +1251,7 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x04term\x18\x04 \x01(\x04R\x04term\x12*\n" +
 	"\x05state\x18\x05 \x01(\x0e2\x14.raftkv.v1.NodeStateR\x05state\x12!\n" +
 	"\fcommit_index\x18\x06 \x01(\x04R\vcommitIndex\x12#\n" +
-	"\rapplied_index\x18\a \x01(\x04R\fappliedIndex*\xee\x01\n" +
+	"\rapplied_index\x18\a \x01(\x04R\fappliedIndex*\xbd\x02\n" +
 	"\vMessageType\x12\x1c\n" +
 	"\x18MESSAGE_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19MESSAGE_TYPE_VOTE_REQUEST\x10\x01\x12\x1e\n" +
@@ -1067,7 +1259,9 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x1bMESSAGE_TYPE_APPEND_REQUEST\x10\x03\x12 \n" +
 	"\x1cMESSAGE_TYPE_APPEND_RESPONSE\x10\x04\x12\x1a\n" +
 	"\x16MESSAGE_TYPE_HEARTBEAT\x10\x05\x12#\n" +
-	"\x1fMESSAGE_TYPE_HEARTBEAT_RESPONSE\x10\x06*p\n" +
+	"\x1fMESSAGE_TYPE_HEARTBEAT_RESPONSE\x10\x06\x12!\n" +
+	"\x1dMESSAGE_TYPE_INSTALL_SNAPSHOT\x10\a\x12*\n" +
+	"&MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE\x10\b*p\n" +
 	"\tEntryType\x12\x1a\n" +
 	"\x16ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11ENTRY_TYPE_NORMAL\x10\x01\x12\x14\n" +
@@ -1101,7 +1295,7 @@ func file_raftkv_v1_raftkv_proto_rawDescGZIP() []byte {
 }
 
 var file_raftkv_v1_raftkv_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_raftkv_v1_raftkv_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_raftkv_v1_raftkv_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_raftkv_v1_raftkv_proto_goTypes = []any{
 	(MessageType)(0),        // 0: raftkv.v1.MessageType
 	(EntryType)(0),          // 1: raftkv.v1.EntryType
@@ -1109,40 +1303,46 @@ var file_raftkv_v1_raftkv_proto_goTypes = []any{
 	(*Entry)(nil),           // 3: raftkv.v1.Entry
 	(*Message)(nil),         // 4: raftkv.v1.Message
 	(*DeliverRequest)(nil),  // 5: raftkv.v1.DeliverRequest
-	(*DeliverResponse)(nil), // 6: raftkv.v1.DeliverResponse
-	(*ClientRequest)(nil),   // 7: raftkv.v1.ClientRequest
-	(*GetRequest)(nil),      // 8: raftkv.v1.GetRequest
-	(*GetResponse)(nil),     // 9: raftkv.v1.GetResponse
-	(*PutRequest)(nil),      // 10: raftkv.v1.PutRequest
-	(*PutResponse)(nil),     // 11: raftkv.v1.PutResponse
-	(*DeleteRequest)(nil),   // 12: raftkv.v1.DeleteRequest
-	(*DeleteResponse)(nil),  // 13: raftkv.v1.DeleteResponse
-	(*StatusRequest)(nil),   // 14: raftkv.v1.StatusRequest
-	(*StatusResponse)(nil),  // 15: raftkv.v1.StatusResponse
+	(*ConfState)(nil),       // 6: raftkv.v1.ConfState
+	(*Snapshot)(nil),        // 7: raftkv.v1.Snapshot
+	(*DeliverResponse)(nil), // 8: raftkv.v1.DeliverResponse
+	(*ClientRequest)(nil),   // 9: raftkv.v1.ClientRequest
+	(*GetRequest)(nil),      // 10: raftkv.v1.GetRequest
+	(*GetResponse)(nil),     // 11: raftkv.v1.GetResponse
+	(*PutRequest)(nil),      // 12: raftkv.v1.PutRequest
+	(*PutResponse)(nil),     // 13: raftkv.v1.PutResponse
+	(*DeleteRequest)(nil),   // 14: raftkv.v1.DeleteRequest
+	(*DeleteResponse)(nil),  // 15: raftkv.v1.DeleteResponse
+	(*StatusRequest)(nil),   // 16: raftkv.v1.StatusRequest
+	(*StatusResponse)(nil),  // 17: raftkv.v1.StatusResponse
+	nil,                     // 18: raftkv.v1.ConfState.AddrsEntry
 }
 var file_raftkv_v1_raftkv_proto_depIdxs = []int32{
 	1,  // 0: raftkv.v1.Entry.type:type_name -> raftkv.v1.EntryType
 	0,  // 1: raftkv.v1.Message.type:type_name -> raftkv.v1.MessageType
 	3,  // 2: raftkv.v1.Message.entries:type_name -> raftkv.v1.Entry
-	4,  // 3: raftkv.v1.DeliverRequest.message:type_name -> raftkv.v1.Message
-	7,  // 4: raftkv.v1.PutRequest.client:type_name -> raftkv.v1.ClientRequest
-	7,  // 5: raftkv.v1.DeleteRequest.client:type_name -> raftkv.v1.ClientRequest
-	2,  // 6: raftkv.v1.StatusResponse.state:type_name -> raftkv.v1.NodeState
-	5,  // 7: raftkv.v1.RaftService.Deliver:input_type -> raftkv.v1.DeliverRequest
-	8,  // 8: raftkv.v1.KVService.Get:input_type -> raftkv.v1.GetRequest
-	10, // 9: raftkv.v1.KVService.Put:input_type -> raftkv.v1.PutRequest
-	12, // 10: raftkv.v1.KVService.Delete:input_type -> raftkv.v1.DeleteRequest
-	14, // 11: raftkv.v1.KVService.Status:input_type -> raftkv.v1.StatusRequest
-	6,  // 12: raftkv.v1.RaftService.Deliver:output_type -> raftkv.v1.DeliverResponse
-	9,  // 13: raftkv.v1.KVService.Get:output_type -> raftkv.v1.GetResponse
-	11, // 14: raftkv.v1.KVService.Put:output_type -> raftkv.v1.PutResponse
-	13, // 15: raftkv.v1.KVService.Delete:output_type -> raftkv.v1.DeleteResponse
-	15, // 16: raftkv.v1.KVService.Status:output_type -> raftkv.v1.StatusResponse
-	12, // [12:17] is the sub-list for method output_type
-	7,  // [7:12] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	7,  // 3: raftkv.v1.Message.snapshot:type_name -> raftkv.v1.Snapshot
+	4,  // 4: raftkv.v1.DeliverRequest.message:type_name -> raftkv.v1.Message
+	18, // 5: raftkv.v1.ConfState.addrs:type_name -> raftkv.v1.ConfState.AddrsEntry
+	6,  // 6: raftkv.v1.Snapshot.conf:type_name -> raftkv.v1.ConfState
+	9,  // 7: raftkv.v1.PutRequest.client:type_name -> raftkv.v1.ClientRequest
+	9,  // 8: raftkv.v1.DeleteRequest.client:type_name -> raftkv.v1.ClientRequest
+	2,  // 9: raftkv.v1.StatusResponse.state:type_name -> raftkv.v1.NodeState
+	5,  // 10: raftkv.v1.RaftService.Deliver:input_type -> raftkv.v1.DeliverRequest
+	10, // 11: raftkv.v1.KVService.Get:input_type -> raftkv.v1.GetRequest
+	12, // 12: raftkv.v1.KVService.Put:input_type -> raftkv.v1.PutRequest
+	14, // 13: raftkv.v1.KVService.Delete:input_type -> raftkv.v1.DeleteRequest
+	16, // 14: raftkv.v1.KVService.Status:input_type -> raftkv.v1.StatusRequest
+	8,  // 15: raftkv.v1.RaftService.Deliver:output_type -> raftkv.v1.DeliverResponse
+	11, // 16: raftkv.v1.KVService.Get:output_type -> raftkv.v1.GetResponse
+	13, // 17: raftkv.v1.KVService.Put:output_type -> raftkv.v1.PutResponse
+	15, // 18: raftkv.v1.KVService.Delete:output_type -> raftkv.v1.DeleteResponse
+	17, // 19: raftkv.v1.KVService.Status:output_type -> raftkv.v1.StatusResponse
+	15, // [15:20] is the sub-list for method output_type
+	10, // [10:15] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_raftkv_v1_raftkv_proto_init() }
@@ -1156,7 +1356,7 @@ func file_raftkv_v1_raftkv_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_raftkv_v1_raftkv_proto_rawDesc), len(file_raftkv_v1_raftkv_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   13,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
