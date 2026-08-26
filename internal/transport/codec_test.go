@@ -228,6 +228,8 @@ func TestEveryCoreMessageTypeIsMapped(t *testing.T) {
 		raft.MsgAppendResponse,
 		raft.MsgHeartbeat,
 		raft.MsgHeartbeatResponse,
+		raft.MsgInstallSnapshot,
+		raft.MsgInstallSnapshotResponse,
 	}
 
 	seen := make(map[raftkvv1.MessageType]raft.MessageType, len(interNode))
@@ -340,6 +342,171 @@ func TestLargeEntryBatchRoundTrips(t *testing.T) {
 	for i, e := range got.Entries {
 		if e.Index != raft.Index(i+1) {
 			t.Fatalf("entry at position %d has index %d; the batch was reordered", i, e.Index)
+		}
+	}
+}
+
+func TestSnapshotMessageRoundTrips(t *testing.T) {
+	// A snapshot is the largest and most structured thing that crosses the
+	// wire, and the only message whose loss of a field would silently install
+	// the wrong state rather than fail. Every part of it has to survive.
+	want := raft.Message{
+		Type: raft.MsgInstallSnapshot, From: 1, To: 4, Term: 9,
+		Snapshot: &raft.Snapshot{
+			Index: 500,
+			Term:  8,
+			Data:  bytes.Repeat([]byte("state"), 1000),
+			Conf: raft.ConfState{
+				Voters:   []raft.NodeID{1, 2, 3},
+				Incoming: []raft.NodeID{1, 2, 3, 4},
+				Joint:    true,
+				Addrs:    map[raft.NodeID]string{4: "10.0.0.4:9000"},
+			},
+		},
+	}
+
+	wire, err := MessageToWire(want)
+	if err != nil {
+		t.Fatalf("MessageToWire: %v", err)
+	}
+	got, err := MessageFromWire(wire)
+	if err != nil {
+		t.Fatalf("MessageFromWire: %v", err)
+	}
+
+	if got.Snapshot == nil {
+		t.Fatal("the snapshot did not survive the round trip")
+	}
+	if got.Snapshot.Index != want.Snapshot.Index || got.Snapshot.Term != want.Snapshot.Term {
+		t.Fatalf("snapshot position = %d/%d, want %d/%d",
+			got.Snapshot.Index, got.Snapshot.Term, want.Snapshot.Index, want.Snapshot.Term)
+	}
+	if !bytes.Equal(got.Snapshot.Data, want.Snapshot.Data) {
+		t.Fatalf("snapshot data length = %d, want %d",
+			len(got.Snapshot.Data), len(want.Snapshot.Data))
+	}
+
+	gc, wc := got.Snapshot.Conf, want.Snapshot.Conf
+	if gc.Joint != wc.Joint {
+		t.Fatalf("joint = %v, want %v", gc.Joint, wc.Joint)
+	}
+	if len(gc.Voters) != len(wc.Voters) || len(gc.Incoming) != len(wc.Incoming) {
+		t.Fatalf("configuration = %v, want %v", gc, wc)
+	}
+	for i := range wc.Voters {
+		if gc.Voters[i] != wc.Voters[i] {
+			t.Fatalf("voters = %v, want %v", gc.Voters, wc.Voters)
+		}
+	}
+	if gc.Addrs[4] != "10.0.0.4:9000" {
+		t.Fatalf("addresses = %v, want the new member's address", gc.Addrs)
+	}
+}
+
+func TestSnapshotJointFlagSurvivesAnEmptyIncomingSet(t *testing.T) {
+	// The flag is carried rather than inferred, and the wire form has to
+	// preserve that. A receiver that read "not joint" from an empty incoming
+	// set would decide on a single majority while the rest of the cluster
+	// still required two.
+	want := raft.Message{
+		Type: raft.MsgInstallSnapshot, From: 1, To: 2, Term: 3,
+		Snapshot: &raft.Snapshot{
+			Index: 10, Term: 2,
+			Conf: raft.ConfState{Voters: []raft.NodeID{1, 2, 3}, Joint: true},
+		},
+	}
+
+	wire, err := MessageToWire(want)
+	if err != nil {
+		t.Fatalf("MessageToWire: %v", err)
+	}
+	got, err := MessageFromWire(wire)
+	if err != nil {
+		t.Fatalf("MessageFromWire: %v", err)
+	}
+
+	if !got.Snapshot.Conf.Joint {
+		t.Fatal("the joint flag was lost, so the receiver would use a single majority")
+	}
+}
+
+func TestSnapshotResponseCarriesNoImage(t *testing.T) {
+	// The response only acknowledges; sending the image back would double the
+	// cost of every transfer for nothing.
+	want := raft.Message{
+		Type: raft.MsgInstallSnapshotResponse, From: 4, To: 1, Term: 9,
+		Success: true, MatchIndex: 500,
+	}
+
+	wire, err := MessageToWire(want)
+	if err != nil {
+		t.Fatalf("MessageToWire: %v", err)
+	}
+	got, err := MessageFromWire(wire)
+	if err != nil {
+		t.Fatalf("MessageFromWire: %v", err)
+	}
+
+	assertMessageEqual(t, got, want)
+	if got.Snapshot != nil {
+		t.Fatal("a response carried a snapshot")
+	}
+}
+
+func TestSnapshotWithNoIndexIsRejected(t *testing.T) {
+	// An image at index zero covers nothing while claiming to cover a prefix
+	// of the log. Installing it would replace a node's state with nothing.
+	wire := &raftkvv1.Message{
+		Type: raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT,
+		From: 1, To: 2, Term: 3,
+		Snapshot: &raftkvv1.Snapshot{Index: 0, Term: 0, Data: []byte("nothing")},
+	}
+
+	if _, err := MessageFromWire(wire); err == nil {
+		t.Fatal("a snapshot with no index was accepted")
+	}
+}
+
+func TestSnapshotWithNoConfigurationIsAccepted(t *testing.T) {
+	// A snapshot taken before membership ever changed legitimately records no
+	// configuration, and must not be mistaken for a damaged one.
+	wire := &raftkvv1.Message{
+		Type: raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT,
+		From: 1, To: 2, Term: 3,
+		Snapshot: &raftkvv1.Snapshot{Index: 5, Term: 2, Data: []byte("state")},
+	}
+
+	got, err := MessageFromWire(wire)
+	if err != nil {
+		t.Fatalf("a snapshot with no configuration was rejected: %v", err)
+	}
+	if !got.Snapshot.Conf.IsEmpty() {
+		t.Fatalf("configuration = %v, want empty", got.Snapshot.Conf)
+	}
+}
+
+func TestNonSnapshotMessagesCarryNoSnapshot(t *testing.T) {
+	// Every other message type must leave the field nil, or an ordinary append
+	// would arrive looking like a snapshot transfer.
+	for _, typ := range []raft.MessageType{
+		raft.MsgVoteRequest, raft.MsgVoteResponse,
+		raft.MsgAppendRequest, raft.MsgAppendResponse,
+		raft.MsgHeartbeat, raft.MsgHeartbeatResponse,
+	} {
+		wire, err := MessageToWire(raft.Message{Type: typ, From: 1, To: 2, Term: 1})
+		if err != nil {
+			t.Fatalf("encoding %s: %v", typ, err)
+		}
+		if wire.GetSnapshot() != nil {
+			t.Fatalf("%s carried a snapshot", typ)
+		}
+
+		got, err := MessageFromWire(wire)
+		if err != nil {
+			t.Fatalf("decoding %s: %v", typ, err)
+		}
+		if got.Snapshot != nil {
+			t.Fatalf("%s decoded with a snapshot", typ)
 		}
 	}
 }

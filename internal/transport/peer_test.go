@@ -47,6 +47,7 @@ type grpcCluster struct {
 
 	ids        []raft.NodeID
 	addrs      map[raft.NodeID]string
+	dataDirs   map[raft.NodeID]string
 	nodes      map[raft.NodeID]*node.Node
 	transports map[raft.NodeID]*PeerTransport
 	servers    map[raft.NodeID]*grpc.Server
@@ -59,6 +60,7 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 	c := &grpcCluster{
 		t:          t,
 		addrs:      make(map[raft.NodeID]string, size),
+		dataDirs:   make(map[raft.NodeID]string, size),
 		nodes:      make(map[raft.NodeID]*node.Node, size),
 		transports: make(map[raft.NodeID]*PeerTransport, size),
 		servers:    make(map[raft.NodeID]*grpc.Server, size),
@@ -81,6 +83,8 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 
 	root := t.TempDir()
 	for _, id := range c.ids {
+		c.dataDirs[id] = filepath.Join(root, fmt.Sprintf("node-%d", id))
+
 		tr, err := NewPeerTransport(PeerConfig{Self: id, Addresses: c.addrs})
 		if err != nil {
 			t.Fatalf("creating transport for node %d: %v", id, err)
@@ -91,7 +95,7 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 		n, err := node.Start(node.Config{
 			ID:            id,
 			Peers:         c.ids,
-			DataDir:       filepath.Join(root, fmt.Sprintf("node-%d", id)),
+			DataDir:       c.dataDirs[id],
 			Transport:     tr,
 			TickInterval:  10 * time.Millisecond,
 			ElectionTick:  10,
@@ -603,4 +607,117 @@ func TestConcurrentSendsAreSafe(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestSnapshotTransferOverGRPC(t *testing.T) {
+	// Snapshot transfer working in the core proves nothing about the wire: the
+	// image is the largest and most structured thing that crosses it, and
+	// until this message had a wire form the transport rejected it outright.
+	//
+	// A follower is stopped, the cluster moves on and compacts past what that
+	// follower needs, and then it is brought back. The only way it can catch
+	// up is an image sent over gRPC.
+	c := newGRPCCluster(t, 3)
+	leader := c.awaitLeader()
+	leaderID := leader.Status().ID
+
+	ctx, cancel := context.WithTimeout(context.Background(), grpcSettleTimeout)
+	defer cancel()
+
+	var victim raft.NodeID
+	for _, id := range c.ids {
+		if id != leaderID {
+			victim = id
+			break
+		}
+	}
+
+	// Take the follower down, and its server with it so nothing reaches it.
+	c.servers[victim].Stop()
+	if err := c.nodes[victim].Stop(); err != nil {
+		t.Fatalf("stopping node %d: %v", victim, err)
+	}
+	delete(c.nodes, victim)
+
+	// The remaining majority keeps working and compacts well past where the
+	// stopped node left off.
+	const writes = 40
+	for i := range writes {
+		err := leader.Propose(ctx, statemachine.Command{
+			ClientID: 1, Seq: uint64(i + 1), Op: statemachine.OpPut,
+			Key: fmt.Sprintf("key-%d", i), Value: []byte("value"),
+		})
+		if err != nil {
+			t.Fatalf("writing while node %d is down: %v", victim, err)
+		}
+	}
+
+	// Every running node compacts, not just the one that happens to be leading
+	// now. Leadership can move while the follower is away, and only a leader
+	// that has actually compacted is unable to catch it up from the log —
+	// compacting one node would leave the test passing through ordinary
+	// replication instead.
+	for _, id := range c.ids {
+		n, ok := c.nodes[id]
+		if !ok {
+			continue
+		}
+		if err := n.Compact(ctx); err != nil {
+			t.Fatalf("compacting node %d: %v", id, err)
+		}
+	}
+
+	// Bring it back. Its log stops long before the leader's first retained
+	// entry, so only a snapshot can reconcile them.
+	l, err := net.Listen("tcp", c.addrs[victim])
+	if err != nil {
+		t.Fatalf("re-binding node %d: %v", victim, err)
+	}
+
+	tr, err := NewPeerTransport(PeerConfig{Self: victim, Addresses: c.addrs})
+	if err != nil {
+		t.Fatalf("creating transport: %v", err)
+	}
+	t.Cleanup(func() { tr.Close() })
+
+	restarted, err := node.Start(node.Config{
+		ID:            victim,
+		Peers:         c.ids,
+		DataDir:       c.dataDirs[victim],
+		Transport:     tr,
+		TickInterval:  10 * time.Millisecond,
+		ElectionTick:  10,
+		HeartbeatTick: 1,
+		Sync:          storage.SyncNever,
+	})
+	if err != nil {
+		t.Fatalf("restarting node %d: %v", victim, err)
+	}
+	c.nodes[victim] = restarted
+	c.transports[victim] = tr
+	t.Cleanup(func() { restarted.Stop() })
+	tr.SetLocal(restarted)
+
+	srv, err := NewRaftServer(restarted)
+	if err != nil {
+		t.Fatalf("creating server: %v", err)
+	}
+	gs := grpc.NewServer()
+	srv.Register(gs)
+	c.servers[victim] = gs
+	go gs.Serve(l)
+	t.Cleanup(gs.Stop)
+
+	want := leader.Status().Applied
+	c.eventually("the restarted node to be caught up", func() bool {
+		return c.nodes[victim].Status().Applied >= want
+	})
+
+	// It must have got there by snapshot, not by log. Without this the test
+	// would still pass if the leader had never compacted far enough, and would
+	// be exercising ordinary replication instead.
+	if got := c.nodes[victim].Status().SnapshotsReceived; got == 0 {
+		t.Fatalf("node %d caught up without receiving a snapshot, so this test is "+
+			"not exercising snapshot transfer\n%s", victim, c.dump())
+	}
 }
