@@ -130,6 +130,14 @@ type Status struct {
 	State   raft.State
 	Commit  raft.Index
 	Applied raft.Index
+
+	// SnapshotsReceived counts state machine images installed from a leader.
+	//
+	// It is worth surfacing because a node being caught up by snapshot rather
+	// than by log means it had fallen behind the leader's compaction point,
+	// which is the difference between a node that is merely lagging and one
+	// that could not have recovered on its own.
+	SnapshotsReceived uint64
 }
 
 // proposal is a client write waiting for its entry to commit.
@@ -169,6 +177,7 @@ type Node struct {
 	proposec chan proposalRequest
 	readc    chan readRequest
 	statusc  chan chan Status
+	compactc chan chan error
 
 	stopc chan struct{}
 	donec chan struct{}
@@ -191,6 +200,9 @@ type Node struct {
 
 	// lastSnapshot is the index the most recent snapshot was taken at.
 	lastSnapshot raft.Index
+
+	// snapshotsReceived counts images installed from a leader.
+	snapshotsReceived uint64
 }
 
 type proposalRequest struct {
@@ -262,6 +274,7 @@ func Start(cfg Config) (*Node, error) {
 		proposec:     make(chan proposalRequest),
 		readc:        make(chan readRequest),
 		statusc:      make(chan chan Status),
+		compactc:     make(chan chan error),
 		stopc:        make(chan struct{}),
 		donec:        make(chan struct{}),
 		pending:      make(map[raft.Index]*proposal),
@@ -415,6 +428,9 @@ func (n *Node) run() {
 
 		case reply := <-n.statusc:
 			reply <- n.status()
+
+		case reply := <-n.compactc:
+			reply <- n.compact()
 		}
 
 		n.processReady()
@@ -432,6 +448,8 @@ func (n *Node) status() Status {
 		State:   n.raft.State(),
 		Commit:  n.raft.CommitIndex(),
 		Applied: n.kv.Applied(),
+
+		SnapshotsReceived: n.snapshotsReceived,
 	}
 }
 
@@ -519,6 +537,7 @@ func (n *Node) processReady() {
 		// The log below the snapshot is gone, so the next compaction has to
 		// measure from here rather than from a point that no longer exists.
 		n.lastSnapshot = rd.Snapshot.Index
+		n.snapshotsReceived++
 	}
 
 	for _, e := range rd.CommittedEntries {
@@ -598,6 +617,56 @@ func (n *Node) failAllPending(err error) {
 		req.done <- err
 	}
 	n.deferred = nil
+}
+
+// Compact takes a snapshot and truncates the log immediately, rather than
+// waiting for enough entries to accumulate.
+//
+// Operators need this for the same reason the automatic threshold exists, just
+// on demand: bounding the log before a planned restart, or before adding a
+// member that would otherwise have to replay everything ever written.
+func (n *Node) Compact(ctx context.Context) error {
+	reply := make(chan error, 1)
+
+	select {
+	case n.compactc <- reply:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.donec:
+		return ErrStopped
+	}
+
+	select {
+	case err := <-reply:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.donec:
+		return ErrStopped
+	}
+}
+
+// compact snapshots and truncates. It runs on the loop goroutine, where
+// reading the state machine and the raft node is safe.
+func (n *Node) compact() error {
+	applied := n.kv.Applied()
+	if applied == 0 {
+		return errors.New("node: nothing has been applied yet")
+	}
+	if applied <= n.lastSnapshot {
+		// Already compacted to here; nothing to do.
+		return nil
+	}
+
+	data, err := n.kv.Snapshot()
+	if err != nil {
+		return fmt.Errorf("node: snapshotting the state machine: %w", err)
+	}
+	if err := n.storage.CreateSnapshot(applied, data, n.raft.ConfState()); err != nil {
+		return fmt.Errorf("node: compacting: %w", err)
+	}
+	n.lastSnapshot = applied
+	return nil
 }
 
 // maybeSnapshot compacts the log once enough entries have been applied past
