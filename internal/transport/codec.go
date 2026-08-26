@@ -59,6 +59,10 @@ func messageTypeToWire(t raft.MessageType) (raftkvv1.MessageType, error) {
 		return raftkvv1.MessageType_MESSAGE_TYPE_HEARTBEAT, nil
 	case raft.MsgHeartbeatResponse:
 		return raftkvv1.MessageType_MESSAGE_TYPE_HEARTBEAT_RESPONSE, nil
+	case raft.MsgInstallSnapshot:
+		return raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT, nil
+	case raft.MsgInstallSnapshotResponse:
+		return raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE, nil
 	default:
 		return raftkvv1.MessageType_MESSAGE_TYPE_UNSPECIFIED,
 			fmt.Errorf("transport: %s is a node-local signal and has no wire form", t)
@@ -80,9 +84,101 @@ func messageTypeFromWire(t raftkvv1.MessageType) (raft.MessageType, error) {
 		return raft.MsgHeartbeat, nil
 	case raftkvv1.MessageType_MESSAGE_TYPE_HEARTBEAT_RESPONSE:
 		return raft.MsgHeartbeatResponse, nil
+	case raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT:
+		return raft.MsgInstallSnapshot, nil
+	case raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE:
+		return raft.MsgInstallSnapshotResponse, nil
 	default:
 		return 0, &ErrUnknownEnum{Field: "MessageType", Value: int32(t)}
 	}
+}
+
+// confStateToWire converts a cluster configuration.
+func confStateToWire(cs raft.ConfState) *raftkvv1.ConfState {
+	out := &raftkvv1.ConfState{Joint: cs.Joint}
+
+	if len(cs.Voters) > 0 {
+		out.Voters = make([]uint64, len(cs.Voters))
+		for i, id := range cs.Voters {
+			out.Voters[i] = uint64(id)
+		}
+	}
+	if len(cs.Incoming) > 0 {
+		out.Incoming = make([]uint64, len(cs.Incoming))
+		for i, id := range cs.Incoming {
+			out.Incoming[i] = uint64(id)
+		}
+	}
+	if len(cs.Addrs) > 0 {
+		out.Addrs = make(map[uint64]string, len(cs.Addrs))
+		for id, addr := range cs.Addrs {
+			out.Addrs[uint64(id)] = addr
+		}
+	}
+	return out
+}
+
+// confStateFromWire converts a cluster configuration.
+//
+// A nil message means the sender recorded no configuration, which is
+// legitimate for a snapshot taken before membership ever changed.
+func confStateFromWire(cs *raftkvv1.ConfState) raft.ConfState {
+	if cs == nil {
+		return raft.ConfState{}
+	}
+
+	out := raft.ConfState{Joint: cs.GetJoint()}
+	if v := cs.GetVoters(); len(v) > 0 {
+		out.Voters = make([]raft.NodeID, len(v))
+		for i, id := range v {
+			out.Voters[i] = raft.NodeID(id)
+		}
+	}
+	if v := cs.GetIncoming(); len(v) > 0 {
+		out.Incoming = make([]raft.NodeID, len(v))
+		for i, id := range v {
+			out.Incoming[i] = raft.NodeID(id)
+		}
+	}
+	if a := cs.GetAddrs(); len(a) > 0 {
+		out.Addrs = make(map[raft.NodeID]string, len(a))
+		for id, addr := range a {
+			out.Addrs[raft.NodeID(id)] = addr
+		}
+	}
+	return out
+}
+
+// snapshotToWire converts a state machine image.
+func snapshotToWire(s *raft.Snapshot) *raftkvv1.Snapshot {
+	if s == nil {
+		return nil
+	}
+	return &raftkvv1.Snapshot{
+		Index: uint64(s.Index),
+		Term:  uint64(s.Term),
+		Conf:  confStateToWire(s.Conf),
+		Data:  s.Data,
+	}
+}
+
+// snapshotFromWire converts a state machine image.
+func snapshotFromWire(s *raftkvv1.Snapshot) (*raft.Snapshot, error) {
+	if s == nil {
+		return nil, nil
+	}
+	// A snapshot at index zero covers nothing while claiming to cover a prefix
+	// of the log. Installing it would replace a node's state with an image of
+	// nothing at all, so it is refused here rather than at the point of use.
+	if s.GetIndex() == 0 {
+		return nil, fmt.Errorf("transport: snapshot has no index")
+	}
+	return &raft.Snapshot{
+		Index: raft.Index(s.GetIndex()),
+		Term:  raft.Term(s.GetTerm()),
+		Conf:  confStateFromWire(s.GetConf()),
+		Data:  s.GetData(),
+	}, nil
 }
 
 // entryTypeToWire maps a core entry type onto the wire enum.
@@ -195,6 +291,7 @@ func MessageToWire(m raft.Message) (*raftkvv1.Message, error) {
 		ConflictIndex: uint64(m.ConflictIndex),
 		ConflictTerm:  uint64(m.ConflictTerm),
 		Context:       m.Context,
+		Snapshot:      snapshotToWire(m.Snapshot),
 	}, nil
 }
 
@@ -225,6 +322,11 @@ func MessageFromWire(m *raftkvv1.Message) (raft.Message, error) {
 		}
 	}
 
+	snap, err := snapshotFromWire(m.GetSnapshot())
+	if err != nil {
+		return raft.Message{}, err
+	}
+
 	return raft.Message{
 		Type:          typ,
 		From:          raft.NodeID(m.GetFrom()),
@@ -242,5 +344,6 @@ func MessageFromWire(m *raftkvv1.Message) (raft.Message, error) {
 		ConflictIndex: raft.Index(m.GetConflictIndex()),
 		ConflictTerm:  raft.Term(m.GetConflictTerm()),
 		Context:       m.GetContext(),
+		Snapshot:      snap,
 	}, nil
 }
