@@ -143,6 +143,212 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	ClusterService_AddNode_FullMethodName     = "/raftkv.v1.ClusterService/AddNode"
+	ClusterService_RemoveNode_FullMethodName  = "/raftkv.v1.ClusterService/RemoveNode"
+	ClusterService_ListMembers_FullMethodName = "/raftkv.v1.ClusterService/ListMembers"
+)
+
+// ClusterServiceClient is the client API for ClusterService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ClusterService exposes membership administration.
+//
+// It is a third service rather than more methods on KVService for the same
+// reason KVService is separate from RaftService: a different audience. Reading
+// and writing keys is what applications do; adding and removing nodes is what
+// an operator does, and the two should be separately authorizable, separately
+// rate-limited, and separately auditable. Folding them together would make
+// that impossible without reshaping the protocol later.
+type ClusterServiceClient interface {
+	// AddNode brings a new member into the cluster. It returns once the change
+	// has committed, which means a majority has agreed to it.
+	AddNode(ctx context.Context, in *AddNodeRequest, opts ...grpc.CallOption) (*AddNodeResponse, error)
+	// RemoveNode takes a member out of the cluster.
+	RemoveNode(ctx context.Context, in *RemoveNodeRequest, opts ...grpc.CallOption) (*RemoveNodeResponse, error)
+	// ListMembers reports the current membership, including whether a change is
+	// in progress.
+	ListMembers(ctx context.Context, in *ListMembersRequest, opts ...grpc.CallOption) (*ListMembersResponse, error)
+}
+
+type clusterServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewClusterServiceClient(cc grpc.ClientConnInterface) ClusterServiceClient {
+	return &clusterServiceClient{cc}
+}
+
+func (c *clusterServiceClient) AddNode(ctx context.Context, in *AddNodeRequest, opts ...grpc.CallOption) (*AddNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddNodeResponse)
+	err := c.cc.Invoke(ctx, ClusterService_AddNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clusterServiceClient) RemoveNode(ctx context.Context, in *RemoveNodeRequest, opts ...grpc.CallOption) (*RemoveNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveNodeResponse)
+	err := c.cc.Invoke(ctx, ClusterService_RemoveNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clusterServiceClient) ListMembers(ctx context.Context, in *ListMembersRequest, opts ...grpc.CallOption) (*ListMembersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMembersResponse)
+	err := c.cc.Invoke(ctx, ClusterService_ListMembers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ClusterServiceServer is the server API for ClusterService service.
+// All implementations must embed UnimplementedClusterServiceServer
+// for forward compatibility.
+//
+// ClusterService exposes membership administration.
+//
+// It is a third service rather than more methods on KVService for the same
+// reason KVService is separate from RaftService: a different audience. Reading
+// and writing keys is what applications do; adding and removing nodes is what
+// an operator does, and the two should be separately authorizable, separately
+// rate-limited, and separately auditable. Folding them together would make
+// that impossible without reshaping the protocol later.
+type ClusterServiceServer interface {
+	// AddNode brings a new member into the cluster. It returns once the change
+	// has committed, which means a majority has agreed to it.
+	AddNode(context.Context, *AddNodeRequest) (*AddNodeResponse, error)
+	// RemoveNode takes a member out of the cluster.
+	RemoveNode(context.Context, *RemoveNodeRequest) (*RemoveNodeResponse, error)
+	// ListMembers reports the current membership, including whether a change is
+	// in progress.
+	ListMembers(context.Context, *ListMembersRequest) (*ListMembersResponse, error)
+	mustEmbedUnimplementedClusterServiceServer()
+}
+
+// UnimplementedClusterServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedClusterServiceServer struct{}
+
+func (UnimplementedClusterServiceServer) AddNode(context.Context, *AddNodeRequest) (*AddNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddNode not implemented")
+}
+func (UnimplementedClusterServiceServer) RemoveNode(context.Context, *RemoveNodeRequest) (*RemoveNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveNode not implemented")
+}
+func (UnimplementedClusterServiceServer) ListMembers(context.Context, *ListMembersRequest) (*ListMembersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMembers not implemented")
+}
+func (UnimplementedClusterServiceServer) mustEmbedUnimplementedClusterServiceServer() {}
+func (UnimplementedClusterServiceServer) testEmbeddedByValue()                        {}
+
+// UnsafeClusterServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ClusterServiceServer will
+// result in compilation errors.
+type UnsafeClusterServiceServer interface {
+	mustEmbedUnimplementedClusterServiceServer()
+}
+
+func RegisterClusterServiceServer(s grpc.ServiceRegistrar, srv ClusterServiceServer) {
+	// If the following call panics, it indicates UnimplementedClusterServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ClusterService_ServiceDesc, srv)
+}
+
+func _ClusterService_AddNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterServiceServer).AddNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterService_AddNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterServiceServer).AddNode(ctx, req.(*AddNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClusterService_RemoveNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterServiceServer).RemoveNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterService_RemoveNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterServiceServer).RemoveNode(ctx, req.(*RemoveNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClusterService_ListMembers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMembersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterServiceServer).ListMembers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterService_ListMembers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterServiceServer).ListMembers(ctx, req.(*ListMembersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ClusterService_ServiceDesc is the grpc.ServiceDesc for ClusterService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ClusterService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "raftkv.v1.ClusterService",
+	HandlerType: (*ClusterServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "AddNode",
+			Handler:    _ClusterService_AddNode_Handler,
+		},
+		{
+			MethodName: "RemoveNode",
+			Handler:    _ClusterService_RemoveNode_Handler,
+		},
+		{
+			MethodName: "ListMembers",
+			Handler:    _ClusterService_ListMembers_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "raftkv/v1/raftkv.proto",
+}
+
+const (
 	KVService_Get_FullMethodName    = "/raftkv.v1.KVService/Get"
 	KVService_Put_FullMethodName    = "/raftkv.v1.KVService/Put"
 	KVService_Delete_FullMethodName = "/raftkv.v1.KVService/Delete"

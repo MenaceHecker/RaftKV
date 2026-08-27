@@ -28,6 +28,27 @@ service RaftService {
   rpc Deliver(DeliverRequest) returns (DeliverResponse);
 }
 
+// ClusterService exposes membership administration.
+//
+// It is a third service rather than more methods on KVService for the same
+// reason KVService is separate from RaftService: a different audience. Reading
+// and writing keys is what applications do; adding and removing nodes is what
+// an operator does, and the two should be separately authorizable, separately
+// rate-limited, and separately auditable. Folding them together would make
+// that impossible without reshaping the protocol later.
+service ClusterService {
+  // AddNode brings a new member into the cluster. It returns once the change
+  // has committed, which means a majority has agreed to it.
+  rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
+
+  // RemoveNode takes a member out of the cluster.
+  rpc RemoveNode(RemoveNodeRequest) returns (RemoveNodeResponse);
+
+  // ListMembers reports the current membership, including whether a change is
+  // in progress.
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+}
+
 // KV is the client-facing key-value API.
 service KVService {
   // Get reads a key linearizably: the serving node confirms it is still
@@ -212,6 +233,56 @@ message DeleteRequest {
 }
 
 message DeleteResponse {}
+
+// NotLeader is attached to the error returned when a request reaches a node
+// that cannot serve it.
+//
+// It is an error detail rather than a field on every response because that is
+// what it is: the request did not happen. Encoding it as a successful response
+// with an "actually, no" flag would make every client remember to check, and
+// the ones that forgot would silently treat a redirect as a result.
+//
+// The address is included so a client can redirect itself without consulting
+// configuration, which matters most when membership has changed since the
+// client was configured.
+message NotLeader {
+  // The leader this node recognizes, or zero if it knows of none — during an
+  // election, for instance.
+  uint64 leader_id = 1;
+  // The leader's address, empty when unknown.
+  string leader_address = 2;
+}
+
+// Member is one node in the cluster.
+message Member {
+  uint64 id = 1;
+  string address = 2;
+}
+
+message AddNodeRequest {
+  // The new member's ID. It must not already be a member.
+  uint64 node_id = 1;
+  // Where to reach it. Required: a member the cluster cannot contact would
+  // count toward every majority while never answering.
+  string address = 2;
+}
+
+message AddNodeResponse {}
+
+message RemoveNodeRequest {
+  uint64 node_id = 1;
+}
+
+message RemoveNodeResponse {}
+
+message ListMembersRequest {}
+
+message ListMembersResponse {
+  repeated Member members = 1;
+  // Whether a membership change is currently in progress. While it is, no
+  // further change can start.
+  bool joint = 2;
+}
 
 message StatusRequest {}
 
