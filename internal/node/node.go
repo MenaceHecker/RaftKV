@@ -131,6 +131,11 @@ type Status struct {
 	Commit  raft.Index
 	Applied raft.Index
 
+	// Members is the cluster membership this node currently believes in,
+	// with addresses where they are known. It comes from the log rather than
+	// from configuration, so it reflects changes made since startup.
+	Members raft.ConfState
+
 	// SnapshotsReceived counts state machine images installed from a leader.
 	//
 	// It is worth surfacing because a node being caught up by snapshot rather
@@ -178,6 +183,7 @@ type Node struct {
 	readc    chan readRequest
 	statusc  chan chan Status
 	compactc chan chan error
+	confc    chan confChangeRequest
 
 	stopc chan struct{}
 	donec chan struct{}
@@ -213,6 +219,11 @@ type proposalRequest struct {
 type readRequest struct {
 	context []byte
 	done    chan error
+}
+
+type confChangeRequest struct {
+	change raft.ConfChange
+	done   chan error
 }
 
 // Start opens a node's durable state, restores its state machine, and begins
@@ -275,6 +286,7 @@ func Start(cfg Config) (*Node, error) {
 		readc:        make(chan readRequest),
 		statusc:      make(chan chan Status),
 		compactc:     make(chan chan error),
+		confc:        make(chan confChangeRequest),
 		stopc:        make(chan struct{}),
 		donec:        make(chan struct{}),
 		pending:      make(map[raft.Index]*proposal),
@@ -431,6 +443,9 @@ func (n *Node) run() {
 
 		case reply := <-n.compactc:
 			reply <- n.compact()
+
+		case req := <-n.confc:
+			n.handleConfChange(req)
 		}
 
 		n.processReady()
@@ -448,6 +463,7 @@ func (n *Node) status() Status {
 		State:   n.raft.State(),
 		Commit:  n.raft.CommitIndex(),
 		Applied: n.kv.Applied(),
+		Members: n.raft.ConfState(),
 
 		SnapshotsReceived: n.snapshotsReceived,
 	}
@@ -617,6 +633,76 @@ func (n *Node) failAllPending(err error) {
 		req.done <- err
 	}
 	n.deferred = nil
+}
+
+// AddNode brings a new member into the cluster and waits for the change to
+// commit.
+//
+// The address is required. A member the cluster cannot reach would count
+// toward every majority while never answering, which makes the cluster less
+// available than it was before the node was added — the opposite of the point.
+func (n *Node) AddNode(ctx context.Context, id raft.NodeID, addr string) error {
+	if addr == "" {
+		return errors.New("node: a new member needs an address")
+	}
+	return n.proposeConfChange(ctx, raft.ConfChange{
+		Type: raft.ConfChangeAddNode, NodeID: id, Addr: addr,
+	})
+}
+
+// RemoveNode takes a member out of the cluster and waits for the change to
+// commit.
+func (n *Node) RemoveNode(ctx context.Context, id raft.NodeID) error {
+	return n.proposeConfChange(ctx, raft.ConfChange{
+		Type: raft.ConfChangeRemoveNode, NodeID: id,
+	})
+}
+
+// proposeConfChange submits a membership change and waits for its entry to
+// commit.
+//
+// Waiting matters more here than for an ordinary write. A membership change
+// that was appended but never committed can be undone by the next leader, so
+// returning as soon as it was accepted would tell an operator the cluster had
+// grown when it might not have.
+func (n *Node) proposeConfChange(ctx context.Context, cc raft.ConfChange) error {
+	req := confChangeRequest{change: cc, done: make(chan error, 1)}
+
+	select {
+	case n.confc <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.donec:
+		return ErrStopped
+	}
+
+	select {
+	case err := <-req.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-n.donec:
+		return ErrStopped
+	}
+}
+
+// handleConfChange proposes a membership change and registers a waiter for the
+// entry it produced.
+func (n *Node) handleConfChange(req confChangeRequest) {
+	before := n.raft.LastIndex()
+
+	if err := n.raft.ProposeConfChange(req.change); err != nil {
+		req.done <- err
+		return
+	}
+
+	index := n.raft.LastIndex()
+	if index == before {
+		// Nothing was appended, so there is nothing to wait for.
+		req.done <- nil
+		return
+	}
+	n.pending[index] = &proposal{term: n.raft.Term(), done: req.done}
 }
 
 // Compact takes a snapshot and truncates the log immediately, rather than
