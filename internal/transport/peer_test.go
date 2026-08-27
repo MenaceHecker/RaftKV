@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/MenaceHecker/raftkv/internal/node"
 	"github.com/MenaceHecker/raftkv/internal/raft"
@@ -51,6 +52,11 @@ type grpcCluster struct {
 	nodes      map[raft.NodeID]*node.Node
 	transports map[raft.NodeID]*PeerTransport
 	servers    map[raft.NodeID]*grpc.Server
+
+	// conns holds a client connection per node, so tests can exercise the
+	// client-facing API against any member — including a follower, which is
+	// where redirection has to be observed.
+	conns map[raft.NodeID]*grpc.ClientConn
 }
 
 // newGRPCCluster starts a cluster of the given size on loopback sockets.
@@ -64,6 +70,7 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 		nodes:      make(map[raft.NodeID]*node.Node, size),
 		transports: make(map[raft.NodeID]*PeerTransport, size),
 		servers:    make(map[raft.NodeID]*grpc.Server, size),
+		conns:      make(map[raft.NodeID]*grpc.ClientConn, size),
 	}
 	for i := range size {
 		c.ids = append(c.ids, raft.NodeID(i+1))
@@ -118,13 +125,64 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 		}
 		gs := grpc.NewServer()
 		srv.Register(gs)
-		c.servers[id] = gs
 
+		// Every node also serves the client API, which is what makes a
+		// redirect observable: a client has to be able to reach a follower
+		// and be told to go elsewhere.
+		kv, err := NewKVServer(n, c.addrs)
+		if err != nil {
+			t.Fatalf("creating client server for node %d: %v", id, err)
+		}
+		kv.Register(gs)
+
+		c.servers[id] = gs
 		go gs.Serve(listeners[id])
 		t.Cleanup(gs.Stop)
 	}
 
+	for _, id := range c.ids {
+		conn, err := grpc.NewClient(c.addrs[id],
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dialling node %d: %v", id, err)
+		}
+		c.conns[id] = conn
+		t.Cleanup(func() { conn.Close() })
+	}
+
 	return c
+}
+
+// kv returns a key-value client for one node.
+func (c *grpcCluster) kv(id raft.NodeID) raftkvv1.KVServiceClient {
+	c.t.Helper()
+	conn, ok := c.conns[id]
+	if !ok {
+		c.t.Fatalf("no connection to node %d", id)
+	}
+	return raftkvv1.NewKVServiceClient(conn)
+}
+
+// cluster returns a membership client for one node.
+func (c *grpcCluster) cluster(id raft.NodeID) raftkvv1.ClusterServiceClient {
+	c.t.Helper()
+	conn, ok := c.conns[id]
+	if !ok {
+		c.t.Fatalf("no connection to node %d", id)
+	}
+	return raftkvv1.NewClusterServiceClient(conn)
+}
+
+// followerOf returns some node that is not the given one.
+func (c *grpcCluster) followerOf(leader raft.NodeID) raft.NodeID {
+	c.t.Helper()
+	for _, id := range c.ids {
+		if id != leader {
+			return id
+		}
+	}
+	c.t.Fatal("the cluster has only one node")
+	return 0
 }
 
 // eventually polls until cond holds, failing with a cluster dump if it never
