@@ -25,7 +25,7 @@ import (
 
 // sendSnapshot sends a follower the leader's state machine image.
 //
-// It is the fallback when the log alone cannot catch that follower up. If no
+// It is the only fallback when the log alone cannot catch that follower up. If no
 // snapshot exists the leader can do nothing useful right now, which is not an
 // error: a cluster that has never compacted has every entry it needs, so this
 // only happens in the moment between a follower falling behind and a snapshot
