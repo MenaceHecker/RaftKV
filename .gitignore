@@ -1,6 +1,10 @@
 # Binaries
+#
+# The leading slash matters: an unanchored "raftkv-server" would also match the
+# cmd/raftkv-server source directory and silently keep the entrypoint out of
+# the repository.
 /bin/
-raftkv-server
+/raftkv-server
 
 # Test artifacts
 *.test
