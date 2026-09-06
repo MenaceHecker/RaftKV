@@ -288,6 +288,17 @@ func (n *Node) LastIndex() Index { return n.log.lastIndex() }
 // CommitIndex returns the highest index this node knows to be committed.
 func (n *Node) CommitIndex() Index { return n.log.committed }
 
+// TermAt returns the term of the entry at an index.
+//
+// It is how a caller tells "my entry committed" from "a different entry took
+// that index". The two are indistinguishable from the index alone, and
+// confusing them would report a write as successful when a new leader had
+// actually overwritten it.
+//
+// It reports ErrCompacted for an index below the log's start and
+// ErrUnavailable for one past its end.
+func (n *Node) TermAt(i Index) (Term, error) { return n.log.term(i) }
+
 // Members returns every node in any currently active configuration, sorted.
 func (n *Node) Members() []NodeID { return n.conf.members() }
 
