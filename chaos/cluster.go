@@ -449,6 +449,92 @@ func (c *Cluster) Write(client int, key, value string) *Op {
 	return op
 }
 
+// ReadFrom invokes a read against one specific node.
+//
+// This exists because Read always picks the node with the highest term, which
+// is not what a client does. A real client remembers where the leader was and
+// keeps asking there until it is redirected — so it can and does end up
+// talking to a node that still believes it leads but has been partitioned
+// away. That node is exactly where a stale read would come from, and steering
+// every read to the best available leader hides the case entirely.
+//
+// A node that knows it is not the leader refuses, which is the redirect a real
+// client would follow.
+func (c *Cluster) ReadFrom(client int, node raft.NodeID, key string) *Op {
+	op := &Op{
+		Kind:    OpRead,
+		Client:  client,
+		Key:     key,
+		Invoked: c.net.Now(),
+		Status:  StatusPending,
+	}
+	c.history = append(c.history, op)
+
+	n, up := c.nodes[node]
+	if !up || c.down[node] {
+		c.finish(op, StatusFailed)
+		return op
+	}
+
+	c.seq++
+	ctx := fmt.Sprintf("r%d", c.seq)
+	if err := n.ReadIndex([]byte(ctx)); err != nil {
+		// Refused: not the leader, or leading a term it has not committed in.
+		c.finish(op, StatusFailed)
+		return op
+	}
+
+	op.node = node
+	op.readCtx = ctx
+	c.pending = append(c.pending, op)
+	return op
+}
+
+// WriteTo invokes a write against one specific node, for the same reason
+// ReadFrom exists.
+func (c *Cluster) WriteTo(client int, node raft.NodeID, key, value string) *Op {
+	op := &Op{
+		Kind:    OpWrite,
+		Client:  client,
+		Key:     key,
+		Value:   value,
+		Invoked: c.net.Now(),
+		Status:  StatusPending,
+	}
+	c.history = append(c.history, op)
+
+	n, up := c.nodes[node]
+	if !up || c.down[node] {
+		c.finish(op, StatusFailed)
+		return op
+	}
+
+	c.seq++
+	cmd := statemachine.Command{
+		ClientID: uint64(client),
+		Seq:      uint64(c.seq),
+		Op:       statemachine.OpPut,
+		Key:      key,
+		Value:    []byte(value),
+	}
+
+	before := n.LastIndex()
+	if err := n.Propose(cmd.Encode()); err != nil {
+		c.finish(op, StatusFailed)
+		return op
+	}
+	if n.LastIndex() == before {
+		c.finish(op, StatusFailed)
+		return op
+	}
+
+	op.node = node
+	op.index = n.LastIndex()
+	op.term = n.Term()
+	c.pending = append(c.pending, op)
+	return op
+}
+
 // Read invokes a linearizable read and returns immediately.
 //
 // It goes through the read-index protocol, so it is answered only once a
