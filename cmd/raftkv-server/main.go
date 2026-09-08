@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sort"
@@ -31,8 +32,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"google.golang.org/grpc"
 
+	"github.com/MenaceHecker/raftkv/internal/metrics"
 	"github.com/MenaceHecker/raftkv/internal/node"
 	"github.com/MenaceHecker/raftkv/internal/raft"
 	"github.com/MenaceHecker/raftkv/internal/storage"
@@ -58,6 +62,7 @@ type options struct {
 	fsync    bool
 	snapshot uint64
 	logLevel string
+	metrics  string
 }
 
 func run() error {
@@ -82,6 +87,8 @@ func run() error {
 	flag.Uint64Var(&opt.snapshot, "snapshot-threshold", node.DefaultSnapshotThreshold,
 		"entries applied past the last snapshot before another is taken")
 	flag.StringVar(&opt.logLevel, "log-level", "info", "debug, info, warn, or error")
+	flag.StringVar(&opt.metrics, "metrics-listen", "",
+		"address to serve Prometheus metrics and health on, e.g. 127.0.0.1:9101 (empty disables it)")
 	flag.Parse()
 
 	logger, err := newLogger(opt.logLevel)
@@ -133,6 +140,17 @@ func run() error {
 	}
 	defer peerTransport.Close()
 
+	// The registry is built before the node so the node can be handed the
+	// recorder at construction. Metrics that only start once an HTTP server
+	// is up would miss the first election, which is the one most worth
+	// seeing.
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+	recorder := metrics.New(registry)
+
 	sync := storage.SyncAlways
 	if !opt.fsync {
 		sync = storage.SyncNever
@@ -149,8 +167,20 @@ func run() error {
 		HeartbeatTick:     opt.beat,
 		SnapshotThreshold: opt.snapshot,
 		Sync:              sync,
+		Metrics:           recorder,
 	})
 	if err != nil {
+		listener.Close()
+		return err
+	}
+
+	// The collector samples the node and the transport at scrape time, so it
+	// can only be registered once both exist.
+	registry.MustRegister(metrics.NewCollector(n, peerTransport))
+
+	metricsServer, err := serveMetrics(opt.metrics, registry, n)
+	if err != nil {
+		n.Stop()
 		listener.Close()
 		return err
 	}
@@ -203,11 +233,72 @@ func run() error {
 	// node that is on its way down and would only fail it.
 	grpcServer.GracefulStop()
 
+	if metricsServer != nil {
+		// Close rather than Shutdown: a scrape in flight has nothing worth
+		// waiting for, and a held-open connection should not delay the node
+		// releasing its files.
+		metricsServer.Close()
+	}
+
 	if err := n.Stop(); err != nil {
 		return fmt.Errorf("stopping node: %w", err)
 	}
 	slog.Info("stopped", "id", self)
 	return nil
+}
+
+// serveMetrics starts the observability endpoint, or returns nil if no
+// address was configured.
+//
+// It runs on its own listener rather than alongside the Raft and client
+// services. Metrics are most valuable exactly when the cluster is unhealthy,
+// and sharing a server with the traffic that is failing is how a monitoring
+// endpoint ends up unavailable during the incident it exists to explain. A
+// separate port also keeps it easy to expose internally without exposing the
+// data plane.
+func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*http.Server, error) {
+	if addr == "" {
+		return nil, nil
+	}
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listening for metrics on %s: %w", addr, err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler(registry))
+
+	// Liveness: the process is up and its Raft loop is answering. Status goes
+	// through that loop, so a reply here means more than a bare TCP accept.
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		st := n.Status()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":%d,"state":%q,"term":%d,"leader":%d,"commit":%d,"applied":%d}`+"\n",
+			st.ID, st.State, st.Term, st.Leader, st.Commit, st.Applied)
+	})
+
+	// Readiness: this node can serve. A node with no leader is running
+	// correctly but cannot answer a linearizable read, so a load balancer
+	// should route around it rather than send traffic it will refuse.
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if n.Status().Leader == 0 {
+			http.Error(w, "no leader", http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte("ok\n"))
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() {
+		slog.Info("serving metrics", "address", listener.Addr().String())
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// The node keeps running: losing observability is bad, but
+			// stopping a healthy cluster member over it is worse.
+			slog.Error("metrics server stopped", "error", err)
+		}
+	}()
+	return srv, nil
 }
 
 // watchLeadership logs leadership changes.
