@@ -36,7 +36,13 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **A node driver.** The thing that owns the consensus core, the WAL, and the state machine, and runs the loop connecting them. Real goroutines, real timers, real recovery on restart.
 
-**A gRPC wire protocol.** Defined and generated, with the codec between it and the core fully tested.
+**A gRPC wire protocol.** Defined and generated, with the codec between it and the core fully tested, plus a server that redirects a client to the leader instead of just refusing it.
+
+**Cluster membership changes.** Joint consensus, so a node can be added or removed while the cluster keeps serving, with both the old and new configurations required to agree during the transition.
+
+**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss and duplication driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Ten scenarios, run across multiple seeds.
+
+**Observability.** Prometheus metrics, health and readiness endpoints, a Grafana dashboard and alert rules. Details in [docs/observability.md](docs/observability.md).
 
 ---
 
@@ -46,7 +52,7 @@ The consensus core has **no clock, no goroutines, and no network.**
 
 Not "minimal", but none. `internal/raft` doesn't import `time`, doesn't start a goroutine, and never touches a socket. A node advances when you call `Tick()`, receives a message when you call `Step(msg)`, and hands you everything it wants to do (messages to send, entries to apply) from `Ready()`.
 
-This sounds like an inconvenience and it is the single best decision in the project. It means an entire five-node cluster runs inside one goroutine with a fake clock, and a test that fails does so *identically* every time. No sleeps, no polling, no "run it again and see." When I get to the chaos harness in Phase 5, with partitions and message reordering and crashes mid-write, this is what makes those scenarios reproducible instead of a flaky mess I'd learn to ignore.
+This sounds like an inconvenience and it is the single best decision in the project. It means an entire five-node cluster runs inside one goroutine with a fake clock, and a test that fails does so *identically* every time. No sleeps, no polling, no "run it again and see." In the chaos harness, with partitions and message reordering and crashes mid-write, this is what makes those scenarios reproducible instead of a flaky mess I'd learn to ignore.
 
 The cost is real. All the concurrency has to live somewhere, and it lives in exactly one place: a single loop in `internal/node` that owns the core and is the only thing allowed to touch it. Everything else talks to it over channels. One file to review when something's racy.
 
@@ -85,6 +91,8 @@ Not a highlight reel. These are real, and they're the reason the test discipline
 
 **Three tests that passed while testing nothing.** The §5.4.2 one above, plus three compaction tests that were "passing" while truncating zero segments. My test setup batched appends, so everything landed in one file and nothing ever rolled over.
 
+**The chaos suite had a blind spot exactly where it mattered most.** Nine scenarios, all passing. So I deliberately broke the read-index protocol, letting a leader answer reads without confirming with a majority that it was still the leader. Every scenario still passed. The harness routed each read to whichever live node had the highest term, so after a partition the client was quietly steered to the *new* leader and never touched the stale one. A real client does the opposite: it remembers an address and keeps using it until something redirects it. Clients can now target a specific node, and the scenario that does so catches the injected bug immediately. A chaos suite you have not tried to fool is a chaos suite you should not trust.
+
 ---
 
 ## Layout
@@ -98,7 +106,10 @@ internal/
 │   ├── node.go         state transitions, Tick/Step/Ready
 │   ├── election.go     RequestVote (§5.2, §5.4.1)
 │   ├── replication.go  AppendEntries and commit advancement (§5.3, §5.4.2)
-│   └── readonly.go     read-index protocol for linearizable reads (§6.4)
+│   ├── readonly.go     read-index protocol for linearizable reads (§6.4)
+│   ├── membership.go   configurations and double majorities (§6)
+│   ├── confchange.go   joint consensus transitions
+│   └── snapshot.go     InstallSnapshot past the compaction point (§7)
 ├── storage/        durability
 │   ├── record.go       on-disk framing, CRC, torn-vs-corrupt detection
 │   ├── wal.go          segmented append-only log
@@ -108,10 +119,21 @@ internal/
 │   ├── kv.go           deterministic apply, deterministic snapshots
 │   └── session.go      client dedup (§6.3)
 ├── node/           the driver, where goroutines and real time live
-└── transport/      gRPC wire protocol and codec
+├── transport/      gRPC wire protocol, peer transport, KV server
+└── metrics/        Prometheus collectors, the only package that knows them
+
+chaos/              fault injection and the linearizability checker
+├── network.go          partitions, loss, delay, duplication on a virtual clock
+├── cluster.go          real Raft nodes behind that network
+├── checker.go          Wing and Gong, split per key, memoized
+└── scenario.go         the scenarios and the report they generate
+
+cmd/raftkv-server/  the binary
+deploy/             Prometheus config, alert rules, Grafana dashboard
+docs/               chaos report, observability guide
 ```
 
-Roughly 5,000 lines of implementation and 6,000 of tests. The ratio is not an accident.
+Roughly 10,000 lines of implementation and 12,000 of tests, across 367 tests. The ratio is not an accident.
 
 ---
 
@@ -147,12 +169,9 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 
 ## Things that are honestly not done
 
-- **No chaos harness yet.** This is Phase 5 and it's the centerpiece of the whole project: fault injection, a linearizability checker, and a documented set of adversarial scenarios with pass/fail results. The deterministic core was built specifically to make it possible. It doesn't exist yet.
-- **No gRPC server.** The protocol is defined and the codec is tested, but the peer transport and the client-facing service aren't written. Right now the only transport is the in-memory one the tests use.
-- **No cluster membership changes.** That's Phase 4. Membership is fixed at startup.
-- **No `InstallSnapshot` RPC.** A follower that falls behind a leader's compaction point can't currently be caught up. Lands with Phase 4.
+- **No pre-vote.** A node that restarts campaigns immediately, bumping the term and disrupting a leader that was serving perfectly well. I have watched this happen in a three process test. §9.6 describes the fix and it is not implemented.
 - **Snapshots are held in memory**, capping them at 64 MiB, enforced with a clear error rather than discovered as a corrupt file later. Streaming is the fix.
-- **No metrics, no dashboards, no Docker, no Kubernetes.** Phases 5 and 6.
+- **No Docker or Kubernetes story.** Phase 6.
 - **No benchmark numbers.** I'm not publishing throughput figures until they're measured on something real. Made-up numbers are worse than no numbers.
 
 ---
@@ -161,9 +180,9 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 
 - [x] **Phase 1.** Leader election, log replication, commit rules, deterministic test harness
 - [x] **Phase 2.** WAL, snapshotting, compaction, crash recovery, KV state machine
-- [ ] **Phase 3.** Client API *(read-index ✅, dedup ✅, node driver ✅, wire protocol ✅, gRPC server ⬜)*
-- [ ] **Phase 4.** Cluster membership via joint consensus
-- [ ] **Phase 5.** Chaos testing, linearizability checking, observability
+- [x] **Phase 3.** Client API: read-index, dedup, node driver, wire protocol, gRPC server
+- [x] **Phase 4.** Cluster membership via joint consensus
+- [x] **Phase 5.** Chaos testing, linearizability checking, observability
 - [ ] **Phase 6.** Deployment story, writeup, real benchmarks
 
 ---
@@ -176,7 +195,27 @@ Requires Go 1.25+. No system packages needed.
 go test ./...              # everything
 go test ./... -race        # with the race detector
 go test ./internal/raft/   # just the consensus core (fast, deterministic)
+go test ./chaos/           # fault injection and linearizability checking
 ```
+
+A three node cluster on one machine, each node given the same peer list
+including itself:
+
+```bash
+go build -o bin/raftkv-server ./cmd/raftkv-server
+
+PEERS=1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003
+for i in 1 2 3; do
+  bin/raftkv-server --id $i --peers $PEERS \
+    --data-dir /tmp/raftkv-$i --metrics-listen 127.0.0.1:910$i &
+done
+
+curl -s 127.0.0.1:9101/health
+curl -s 127.0.0.1:9101/metrics | grep raftkv_is_leader
+```
+
+Nodes may be started in any order. One that comes up first will campaign, fail
+to reach a majority, and keep trying until the others appear.
 
 To regenerate the protobuf code after editing the `.proto`:
 
