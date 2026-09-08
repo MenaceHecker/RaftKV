@@ -84,6 +84,10 @@ type Config struct {
 	// Sync selects the WAL durability policy. The zero value fsyncs every
 	// write, which is what Raft's guarantees assume.
 	Sync storage.SyncPolicy
+
+	// Metrics receives observations about what this node is doing. It is
+	// optional; a nil Recorder discards everything.
+	Metrics Recorder
 }
 
 // Defaults for a node that does not specify otherwise.
@@ -106,6 +110,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.SnapshotThreshold == 0 {
 		c.SnapshotThreshold = DefaultSnapshotThreshold
+	}
+	if c.Metrics == nil {
+		c.Metrics = nopRecorder{}
 	}
 }
 
@@ -209,6 +216,14 @@ type Node struct {
 
 	// snapshotsReceived counts images installed from a leader.
 	snapshotsReceived uint64
+
+	// lastTerm and lastLeader are the leadership this node last reported to
+	// the Recorder. They are kept so a change can be counted as an event:
+	// sampling term and leader at scrape time would miss every election that
+	// began and ended between two scrapes, which is exactly the situation
+	// worth alerting on.
+	lastTerm   raft.Term
+	lastLeader raft.NodeID
 }
 
 type proposalRequest struct {
@@ -269,7 +284,7 @@ func Start(cfg Config) (*Node, error) {
 		InitialConfState: initialConf,
 		ElectionTick:     cfg.ElectionTick,
 		HeartbeatTick:    cfg.HeartbeatTick,
-		Storage:          store,
+		Storage:          meteredStorage{Storage: store, rec: cfg.Metrics},
 	})
 	if err != nil {
 		store.Close()
@@ -339,23 +354,31 @@ func (n *Node) Status() Status {
 // which is exactly why commands carry a client ID and sequence number, so the
 // retry is deduplicated rather than double-applied.
 func (n *Node) Propose(ctx context.Context, cmd statemachine.Command) error {
+	start := time.Now()
+	var err error
+	defer func() { n.cfg.Metrics.ObserveProposal(classify(err), time.Since(start)) }()
+
 	req := proposalRequest{data: cmd.Encode(), done: make(chan error, 1)}
 
 	select {
 	case n.proposec <- req:
 	case <-ctx.Done():
-		return ctx.Err()
+		err = ctx.Err()
+		return err
 	case <-n.donec:
-		return ErrStopped
+		err = ErrStopped
+		return err
 	}
 
 	select {
-	case err := <-req.done:
+	case err = <-req.done:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		err = ctx.Err()
+		return err
 	case <-n.donec:
-		return ErrStopped
+		err = ErrStopped
+		return err
 	}
 }
 
@@ -366,6 +389,10 @@ func (n *Node) Propose(ctx context.Context, cmd statemachine.Command) error {
 // confirmation could come from a leader that has already been deposed, and
 // would be stale with nothing to detect it.
 func (n *Node) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	start := time.Now()
+	var err error
+	defer func() { n.cfg.Metrics.ObserveRead(classify(err), time.Since(start)) }()
+
 	// A unique context per read: it is what attributes a leadership
 	// acknowledgement to this specific request.
 	seq := n.readSeq.Add(1)
@@ -379,20 +406,24 @@ func (n *Node) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	select {
 	case n.readc <- req:
 	case <-ctx.Done():
-		return nil, false, ctx.Err()
+		err = ctx.Err()
+		return nil, false, err
 	case <-n.donec:
-		return nil, false, ErrStopped
+		err = ErrStopped
+		return nil, false, err
 	}
 
 	select {
-	case err := <-req.done:
+	case err = <-req.done:
 		if err != nil {
 			return nil, false, err
 		}
 	case <-ctx.Done():
-		return nil, false, ctx.Err()
+		err = ctx.Err()
+		return nil, false, err
 	case <-n.donec:
-		return nil, false, ErrStopped
+		err = ErrStopped
+		return nil, false, err
 	}
 
 	// The read index has been confirmed and applied, so local state now
@@ -554,10 +585,15 @@ func (n *Node) processReady() {
 		// measure from here rather than from a point that no longer exists.
 		n.lastSnapshot = rd.Snapshot.Index
 		n.snapshotsReceived++
+		n.cfg.Metrics.SnapshotReceived()
 	}
 
-	for _, e := range rd.CommittedEntries {
-		n.applyEntry(e)
+	if len(rd.CommittedEntries) > 0 {
+		start := time.Now()
+		for _, e := range rd.CommittedEntries {
+			n.applyEntry(e)
+		}
+		n.cfg.Metrics.ObserveApply(len(rd.CommittedEntries), time.Since(start))
 	}
 
 	// Read indexes are recorded before resolving waiters, because a read may
@@ -571,6 +607,7 @@ func (n *Node) processReady() {
 	n.resolveReads()
 
 	n.raft.Advance(rd)
+	n.observeLeadership()
 
 	// Leadership changes invalidate everything in flight: a follower cannot
 	// commit proposals or confirm reads.
@@ -744,6 +781,7 @@ func (n *Node) compact() error {
 		return nil
 	}
 
+	start := time.Now()
 	data, err := n.kv.Snapshot()
 	if err != nil {
 		return fmt.Errorf("node: snapshotting the state machine: %w", err)
@@ -752,6 +790,7 @@ func (n *Node) compact() error {
 		return fmt.Errorf("node: compacting: %w", err)
 	}
 	n.lastSnapshot = applied
+	n.cfg.Metrics.SnapshotCreated(uint64(applied), time.Since(start))
 	return nil
 }
 
@@ -767,6 +806,7 @@ func (n *Node) maybeSnapshot() {
 		return
 	}
 
+	start := time.Now()
 	data, err := n.kv.Snapshot()
 	if err != nil {
 		return
@@ -777,4 +817,20 @@ func (n *Node) maybeSnapshot() {
 		return
 	}
 	n.lastSnapshot = applied
+	n.cfg.Metrics.SnapshotCreated(uint64(applied), time.Since(start))
+}
+
+// observeLeadership reports a change of term or leader exactly once.
+//
+// It runs on the loop goroutine after every Ready, which is the only place
+// that sees every transition. An election that starts and finishes between
+// two scrapes is invisible to a sampled gauge but is precisely the event an
+// operator wants counted, so it is recorded here as it happens.
+func (n *Node) observeLeadership() {
+	term, leader := n.raft.Term(), n.raft.Leader()
+	if term == n.lastTerm && leader == n.lastLeader {
+		return
+	}
+	n.lastTerm, n.lastLeader = term, leader
+	n.cfg.Metrics.LeaderChanged(uint64(term), uint64(leader), n.raft.State() == raft.Leader)
 }
