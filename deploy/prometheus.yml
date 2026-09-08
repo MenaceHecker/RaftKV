@@ -1,0 +1,32 @@
+# Prometheus configuration for a local RaftKV cluster.
+#
+# Every node is scraped individually rather than through a load balancer. That
+# matters more here than for a stateless service: the interesting questions are
+# all about disagreement between nodes: who each one thinks the leader is, how
+# far behind each has fallen. A balanced endpoint would answer with a
+# different node each time and hide exactly that.
+
+global:
+  # Elections complete in well under a second with the default tick, so a
+  # slower interval would miss them entirely. The event counters exist
+  # because even this is not fast enough to catch every one by sampling.
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: raftkv
+    static_configs:
+      - targets:
+          - 127.0.0.1:9101
+          - 127.0.0.1:9102
+          - 127.0.0.1:9103
+    relabel_configs:
+      # Label each series with the node's own ID rather than its address, so
+      # dashboards stay readable when addresses change.
+      - source_labels: [__address__]
+        regex: .*:910(\d)
+        target_label: node
+        replacement: $1

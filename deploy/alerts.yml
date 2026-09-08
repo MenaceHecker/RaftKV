@@ -1,0 +1,104 @@
+# Alerts for a RaftKV cluster.
+#
+# These are deliberately few. Each one corresponds to a state the cluster
+# cannot recover from on its own, or one where it is technically working but
+# not doing what a client asked. Everything else Raft handles by design, and
+# alerting on it would train an operator to ignore the page that matters.
+
+groups:
+  - name: raftkv
+    rules:
+      # The cluster is not serving. Raft tolerates losing a minority, but
+      # without a leader nothing commits and no linearizable read succeeds.
+      - alert: RaftKVNoLeader
+        expr: sum(raftkv_is_leader) == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: RaftKV cluster has no leader
+          description: >-
+            No node reports leadership. Writes and linearizable reads are both
+            failing. Usually this means a majority is unreachable.
+
+      # Two leaders at once would be a violation of Election Safety, the
+      # property everything else rests on. In practice this fires during the
+      # moment a deposed leader has not yet learned it lost, which is why it
+      # has to persist before paging.
+      - alert: RaftKVMultipleLeaders
+        expr: sum(raftkv_is_leader) > 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: RaftKV reports more than one leader
+          description: >-
+            More than one node claims leadership for longer than a deposed
+            leader should take to notice. Investigate before trusting reads.
+
+      # Elections that keep happening mean the cluster is spending its time
+      # choosing a leader rather than being led. A flapping node or a network
+      # too slow for the election timeout both look like this.
+      - alert: RaftKVElectionChurn
+        expr: sum(rate(raftkv_leader_changes_total[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: RaftKV is electing leaders repeatedly
+          description: >-
+            Sustained leadership churn. Check for a node restarting in a loop,
+            or an election timeout too short for the network.
+
+      # A node whose state machine cannot keep up with what has committed.
+      # Consensus is fine; reads from this node are just behind.
+      - alert: RaftKVApplyLag
+        expr: raftkv_apply_lag_entries > 1000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: RaftKV node {{ $labels.node }} is behind on applying entries
+          description: >-
+            Committed entries are outpacing the state machine.
+
+      # The disk has become the bottleneck. Every write waits on this, so it
+      # is the first thing to check when write latency rises.
+      - alert: RaftKVSlowFsync
+        expr: >-
+          histogram_quantile(0.99, sum by (le, node) (rate(raftkv_persist_duration_seconds_bucket[5m]))) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: RaftKV node {{ $labels.node }} has slow durable writes
+          description: >-
+            The 99th percentile fsync exceeds 100ms, which puts a floor under
+            every write the cluster accepts.
+
+      # Writes accepted and then lost to an election. Clients must retry, and
+      # deduplication makes that safe, but a sustained rate means the cluster
+      # is unstable rather than merely busy.
+      - alert: RaftKVLostLeadershipWrites
+        expr: sum(rate(raftkv_proposals_total{result="lost_leadership"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: RaftKV writes are being lost to leadership changes
+          description: >-
+            Proposals are being accepted and then orphaned by elections.
+
+      # A peer's send queue is overflowing, so it is being fed faster than it
+      # can consume. Raft recovers on the next heartbeat, but a climbing count
+      # is the clearest early signal of an unhealthy peer.
+      - alert: RaftKVPeerMessagesDropped
+        expr: sum by (node, peer) (rate(raftkv_peer_messages_dropped_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: RaftKV node {{ $labels.node }} is dropping messages to peer {{ $labels.peer }}
+          description: >-
+            The peer's queue is full. It is slower than the traffic being
+            produced for it, or it is unreachable.
