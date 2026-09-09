@@ -1,0 +1,214 @@
+# A five node RaftKV cluster with monitoring.
+#
+# Five nodes rather than three because it is the smallest size that survives
+# two failures, and because the difference between a minority and a majority
+# is easier to see when there is more than one node on each side of it.
+#
+#   docker compose up --build
+#   curl -s localhost:9101/health
+#   docker compose exec raftkv-1 raftkv-bench --endpoints raftkv-1:9001 --duration 20s
+#
+# Grafana is on http://localhost:3000 with the dashboard already loaded.
+
+name: raftkv
+
+services:
+  raftkv-1:
+    image: raftkv:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: raftkv-1
+    command:
+      - --id=1
+      - --peers=1=raftkv-1:9001,2=raftkv-2:9001,3=raftkv-3:9001,4=raftkv-4:9001,5=raftkv-5:9001
+      # Bind every interface: the advertised address is a service name that
+      # only resolves from other containers, so binding it directly would
+      # work by luck rather than by design.
+      - --listen=0.0.0.0:9001
+      - --metrics-listen=0.0.0.0:9101
+      - --data-dir=/data
+    volumes:
+      - raftkv-1-data:/data
+    ports:
+      - "9001:9001"
+      - "9101:9101"
+    healthcheck:
+      # /ready fails while this node sees no leader, so compose reports a node
+      # healthy only once it can actually serve, not merely once it has
+      # started listening.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9101/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks: [raftkv]
+  raftkv-2:
+    image: raftkv:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: raftkv-2
+    command:
+      - --id=2
+      - --peers=1=raftkv-1:9001,2=raftkv-2:9001,3=raftkv-3:9001,4=raftkv-4:9001,5=raftkv-5:9001
+      # Bind every interface: the advertised address is a service name that
+      # only resolves from other containers, so binding it directly would
+      # work by luck rather than by design.
+      - --listen=0.0.0.0:9001
+      - --metrics-listen=0.0.0.0:9101
+      - --data-dir=/data
+    volumes:
+      - raftkv-2-data:/data
+    ports:
+      - "9002:9001"
+      - "9102:9101"
+    healthcheck:
+      # /ready fails while this node sees no leader, so compose reports a node
+      # healthy only once it can actually serve, not merely once it has
+      # started listening.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9101/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks: [raftkv]
+  raftkv-3:
+    image: raftkv:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: raftkv-3
+    command:
+      - --id=3
+      - --peers=1=raftkv-1:9001,2=raftkv-2:9001,3=raftkv-3:9001,4=raftkv-4:9001,5=raftkv-5:9001
+      # Bind every interface: the advertised address is a service name that
+      # only resolves from other containers, so binding it directly would
+      # work by luck rather than by design.
+      - --listen=0.0.0.0:9001
+      - --metrics-listen=0.0.0.0:9101
+      - --data-dir=/data
+    volumes:
+      - raftkv-3-data:/data
+    ports:
+      - "9003:9001"
+      - "9103:9101"
+    healthcheck:
+      # /ready fails while this node sees no leader, so compose reports a node
+      # healthy only once it can actually serve, not merely once it has
+      # started listening.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9101/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks: [raftkv]
+  raftkv-4:
+    image: raftkv:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: raftkv-4
+    command:
+      - --id=4
+      - --peers=1=raftkv-1:9001,2=raftkv-2:9001,3=raftkv-3:9001,4=raftkv-4:9001,5=raftkv-5:9001
+      # Bind every interface: the advertised address is a service name that
+      # only resolves from other containers, so binding it directly would
+      # work by luck rather than by design.
+      - --listen=0.0.0.0:9001
+      - --metrics-listen=0.0.0.0:9101
+      - --data-dir=/data
+    volumes:
+      - raftkv-4-data:/data
+    ports:
+      - "9004:9001"
+      - "9104:9101"
+    healthcheck:
+      # /ready fails while this node sees no leader, so compose reports a node
+      # healthy only once it can actually serve, not merely once it has
+      # started listening.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9101/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks: [raftkv]
+  raftkv-5:
+    image: raftkv:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: raftkv-5
+    command:
+      - --id=5
+      - --peers=1=raftkv-1:9001,2=raftkv-2:9001,3=raftkv-3:9001,4=raftkv-4:9001,5=raftkv-5:9001
+      # Bind every interface: the advertised address is a service name that
+      # only resolves from other containers, so binding it directly would
+      # work by luck rather than by design.
+      - --listen=0.0.0.0:9001
+      - --metrics-listen=0.0.0.0:9101
+      - --data-dir=/data
+    volumes:
+      - raftkv-5-data:/data
+    ports:
+      - "9005:9001"
+      - "9105:9101"
+    healthcheck:
+      # /ready fails while this node sees no leader, so compose reports a node
+      # healthy only once it can actually serve, not merely once it has
+      # started listening.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9101/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks: [raftkv]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+    depends_on:
+      - raftkv-1
+    networks: [raftkv]
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    ports:
+      - "3000:3000"
+    environment:
+      # Anonymous admin access: this is a local demo stack, and a login
+      # prompt between an operator and a dashboard they are trying to read
+      # during an incident is friction with no security value here. Do not
+      # copy this into anything reachable from outside your machine.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks: [raftkv]
+
+networks:
+  raftkv:
+    driver: bridge
+
+volumes:
+  raftkv-1-data:
+  raftkv-2-data:
+  raftkv-3-data:
+  raftkv-4-data:
+  raftkv-5-data:
