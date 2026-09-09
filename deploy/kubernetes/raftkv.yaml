@@ -1,0 +1,201 @@
+# A five node RaftKV cluster on Kubernetes.
+#
+# The whole deployment turns on one idea: Raft needs stable identity. A node is
+# not interchangeable with its replacement, because its identity is what its
+# votes and its log are attributed to. A Deployment gives pods random names and
+# treats them as fungible, which is exactly wrong here, so this is a
+# StatefulSet: pod raftkv-0 is always node 1, always resolves to the same DNS
+# name, and always reattaches to the same volume.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raftkv
+---
+# The headless service is what gives each pod a stable DNS name of the form
+# raftkv-0.raftkv.raftkv.svc.cluster.local. Peers address each other through
+# these names, so a rescheduled pod on a new IP is still the same node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: raftkv
+  namespace: raftkv
+  labels:
+    app: raftkv
+spec:
+  clusterIP: None
+  # Peers must be able to find each other before any of them is ready. A
+  # cluster cannot elect a leader until a majority can talk, and no node
+  # reports ready until a leader exists, so waiting for readiness to publish
+  # DNS would deadlock the cluster on its first start.
+  publishNotReadyAddresses: true
+  selector:
+    app: raftkv
+  ports:
+    - name: raft
+      port: 9001
+      targetPort: raft
+    - name: metrics
+      port: 9101
+      targetPort: metrics
+---
+# Clients talk to this one. It load balances across all five nodes, and any
+# node that is not the leader replies with a redirect naming one that is, so
+# landing on a follower costs a round trip rather than an error.
+apiVersion: v1
+kind: Service
+metadata:
+  name: raftkv-client
+  namespace: raftkv
+  labels:
+    app: raftkv
+spec:
+  type: ClusterIP
+  selector:
+    app: raftkv
+  ports:
+    - name: raft
+      port: 9001
+      targetPort: raft
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: raftkv
+  namespace: raftkv
+  labels:
+    app: raftkv
+spec:
+  serviceName: raftkv
+  replicas: 5
+  # Parallel, not the default OrderedReady. OrderedReady starts pod N+1 only
+  # once pod N is ready, and no pod here becomes ready until the cluster has
+  # elected a leader, which needs a majority running. Ordered startup would
+  # therefore wait forever on the first pod. This is the single most important
+  # line in the file.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: raftkv
+  template:
+    metadata:
+      labels:
+        app: raftkv
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
+        prometheus.io/path: /metrics
+    spec:
+      # A node that outlives its peers' patience is worse than one that exits
+      # promptly, but a node killed mid-fsync must still recover, and it does:
+      # the write-ahead log distinguishes a torn tail from corruption.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      affinity:
+        # Spread across nodes so a single machine failure cannot take the
+        # majority with it. Preferred rather than required, so a small cluster
+        # can still schedule all five.
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: raftkv
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: raftkv
+          image: raftkv:dev
+          imagePullPolicy: IfNotPresent
+          # The pod ordinal is the only per-pod input, and it is derivable
+          # from the hostname, so every replica runs an identical spec. Node
+          # IDs are one-based because zero means "no node" in the protocol.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              ordinal="${HOSTNAME##*-}"
+              id=$((ordinal + 1))
+              peers=""
+              i=0
+              while [ "$i" -lt "${REPLICAS}" ]; do
+                [ -n "$peers" ] && peers="${peers},"
+                peers="${peers}$((i + 1))=raftkv-${i}.raftkv:9001"
+                i=$((i + 1))
+              done
+              exec raftkv-server \
+                --id="$id" \
+                --peers="$peers" \
+                --listen=0.0.0.0:9001 \
+                --metrics-listen=0.0.0.0:9101 \
+                --data-dir=/data
+          env:
+            - name: REPLICAS
+              value: "5"
+          ports:
+            - name: raft
+              containerPort: 9001
+            - name: metrics
+              containerPort: 9101
+          readinessProbe:
+            # Ready means "can serve", which for this system means a leader
+            # exists. A node without one is running correctly and cannot
+            # answer a linearizable read, so it should be taken out of the
+            # client service rather than sent traffic it will refuse.
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            # Liveness asks only whether the Raft loop is answering. It must
+            # not depend on there being a leader: during an election every
+            # node would fail it at once and Kubernetes would restart the
+            # entire cluster, turning a recoverable outage into a longer one.
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# Keep a majority alive through voluntary disruption. With five replicas a
+# quorum is three, so at most two may be down at once. Without this, a node
+# drain can take three pods and stop the cluster entirely.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: raftkv
+  namespace: raftkv
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: raftkv
