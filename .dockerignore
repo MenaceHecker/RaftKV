@@ -1,0 +1,12 @@
+# Keep the build context small and reproducible. Anything generated locally
+# would only invalidate the cache or, worse, end up in the image.
+.git
+.gitignore
+bin/
+data/
+docs/
+deploy/
+*.md
+*.test
+*.out
+coverage.html
