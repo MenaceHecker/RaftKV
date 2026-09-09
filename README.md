@@ -44,6 +44,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Observability.** Prometheus metrics, health and readiness endpoints, a Grafana dashboard and alert rules. Details in [docs/observability.md](docs/observability.md).
 
+**A deployment story.** A multi-stage Docker image that runs the tests during the build, a five node compose stack with Prometheus and Grafana already wired up, and Kubernetes manifests verified against a real cluster. Details in [docs/deployment.md](docs/deployment.md).
+
 ---
 
 ## The design decision everything else follows from
@@ -128,9 +130,15 @@ chaos/              fault injection and the linearizability checker
 ├── checker.go          Wing and Gong, split per key, memoized
 └── scenario.go         the scenarios and the report they generate
 
-cmd/raftkv-server/  the binary
-deploy/             Prometheus config, alert rules, Grafana dashboard
-docs/               chaos report, observability guide
+cmd/
+├── raftkv-server/      the node binary
+└── raftkv-bench/       closed-loop load generator
+deploy/
+├── prometheus.yml      scrape config, alert rules, Grafana dashboard
+├── grafana/            dashboard JSON and provisioning
+├── compose/            compose-specific Prometheus config
+└── kubernetes/         StatefulSet, services, PodDisruptionBudget
+docs/               chaos report, observability, benchmarks, deployment
 ```
 
 Roughly 10,000 lines of implementation and 12,000 of tests, across 367 tests. The ratio is not an accident.
@@ -169,10 +177,9 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 
 ## Things that are honestly not done
 
-- **No pre-vote.** A node that restarts campaigns immediately, bumping the term and disrupting a leader that was serving perfectly well. I have watched this happen in a three process test. §9.6 describes the fix and it is not implemented.
+- **No group commit.** This is the big one, and the benchmarks found it. The driver takes one proposal per loop iteration, so every write gets its own fsync and write throughput is pinned at `1 / fsync` no matter how many clients you add. Measured at 126 ops/s against a 7.81ms fsync, with throughput completely flat from 1 client to 64. Batching proposals that arrive while an fsync is in flight would divide the per-write disk cost by the batch size.
+- **No pre-vote.** A node that restarts campaigns immediately, bumping the term and deposing a leader that was serving perfectly well. Deleting one pod of five produced 31 leadership changes and drove the term from 3 to 21 before it settled. §9.6 describes the fix and it is not implemented.
 - **Snapshots are held in memory**, capping them at 64 MiB, enforced with a clear error rather than discovered as a corrupt file later. Streaming is the fix.
-- **No Docker or Kubernetes story.** Phase 6.
-- **No benchmark numbers.** I'm not publishing throughput figures until they're measured on something real. Made-up numbers are worse than no numbers.
 
 ---
 
@@ -183,7 +190,32 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 - [x] **Phase 3.** Client API: read-index, dedup, node driver, wire protocol, gRPC server
 - [x] **Phase 4.** Cluster membership via joint consensus
 - [x] **Phase 5.** Chaos testing, linearizability checking, observability
-- [ ] **Phase 6.** Deployment story, writeup, real benchmarks
+- [x] **Phase 6.** Deployment story, writeup, real benchmarks
+
+---
+
+## Numbers
+
+Measured with `cmd/raftkv-bench` against running clusters, closed loop, real gRPC, real fsyncs. Full methodology and hardware in [docs/benchmarks.md](docs/benchmarks.md).
+
+Three nodes as local processes on an M3 Pro, 16 clients:
+
+| Workload | Throughput | p50 | p99 |
+| --- | --- | --- | --- |
+| Write | 126 ops/s | 133.7ms | 176.9ms |
+| Read | 7,881 ops/s | 2.0ms | 2.7ms |
+| Mixed, 90% read | 1,322 ops/s | 9.8ms | 36.0ms |
+
+Five nodes in Docker, where an fsync costs 1.10ms instead of 7.81ms:
+
+| Workload | Throughput | p50 | p99 |
+| --- | --- | --- | --- |
+| Write | 823 ops/s | 19.1ms | 32.2ms |
+| Read | 4,440 ops/s | 3.2ms | 6.4ms |
+
+Reads are dramatically faster than writes because a linearizable read costs one round trip to a majority and touches no disk. Writes are capped at one fsync each, which is the missing group commit described above. The Docker numbers are larger only because that fsync is cheaper and weaker, not because the code is faster, and a benchmark that reported the bigger number alone would be describing the storage stack while pretending to describe the database.
+
+Losing two nodes of five costs throughput and nothing else. Losing a third stops the cluster, which is correct.
 
 ---
 
@@ -216,6 +248,22 @@ curl -s 127.0.0.1:9101/metrics | grep raftkv_is_leader
 
 Nodes may be started in any order. One that comes up first will campaign, fail
 to reach a majority, and keep trying until the others appear.
+
+Or the whole thing in containers, with Prometheus and Grafana already wired up:
+
+```bash
+docker compose up --build
+open http://localhost:3000
+```
+
+On Kubernetes:
+
+```bash
+kubectl apply -f deploy/kubernetes/raftkv.yaml
+```
+
+Both are covered in [docs/deployment.md](docs/deployment.md), including the two
+settings that will otherwise deadlock a StatefulSet on first start.
 
 To regenerate the protobuf code after editing the `.proto`:
 
