@@ -39,20 +39,27 @@ const (
 	MessageType_MESSAGE_TYPE_HEARTBEAT_RESPONSE        MessageType = 6
 	MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT          MessageType = 7
 	MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE MessageType = 8
+	// Pre-vote (§9.6). The request carries the term the sender would campaign
+	// in rather than one it holds, so a receiver must not apply the usual term
+	// rules to it.
+	MessageType_MESSAGE_TYPE_PRE_VOTE_REQUEST  MessageType = 9
+	MessageType_MESSAGE_TYPE_PRE_VOTE_RESPONSE MessageType = 10
 )
 
 // Enum value maps for MessageType.
 var (
 	MessageType_name = map[int32]string{
-		0: "MESSAGE_TYPE_UNSPECIFIED",
-		1: "MESSAGE_TYPE_VOTE_REQUEST",
-		2: "MESSAGE_TYPE_VOTE_RESPONSE",
-		3: "MESSAGE_TYPE_APPEND_REQUEST",
-		4: "MESSAGE_TYPE_APPEND_RESPONSE",
-		5: "MESSAGE_TYPE_HEARTBEAT",
-		6: "MESSAGE_TYPE_HEARTBEAT_RESPONSE",
-		7: "MESSAGE_TYPE_INSTALL_SNAPSHOT",
-		8: "MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE",
+		0:  "MESSAGE_TYPE_UNSPECIFIED",
+		1:  "MESSAGE_TYPE_VOTE_REQUEST",
+		2:  "MESSAGE_TYPE_VOTE_RESPONSE",
+		3:  "MESSAGE_TYPE_APPEND_REQUEST",
+		4:  "MESSAGE_TYPE_APPEND_RESPONSE",
+		5:  "MESSAGE_TYPE_HEARTBEAT",
+		6:  "MESSAGE_TYPE_HEARTBEAT_RESPONSE",
+		7:  "MESSAGE_TYPE_INSTALL_SNAPSHOT",
+		8:  "MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE",
+		9:  "MESSAGE_TYPE_PRE_VOTE_REQUEST",
+		10: "MESSAGE_TYPE_PRE_VOTE_RESPONSE",
 	}
 	MessageType_value = map[string]int32{
 		"MESSAGE_TYPE_UNSPECIFIED":               0,
@@ -64,6 +71,8 @@ var (
 		"MESSAGE_TYPE_HEARTBEAT_RESPONSE":        6,
 		"MESSAGE_TYPE_INSTALL_SNAPSHOT":          7,
 		"MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE": 8,
+		"MESSAGE_TYPE_PRE_VOTE_REQUEST":          9,
+		"MESSAGE_TYPE_PRE_VOTE_RESPONSE":         10,
 	}
 )
 
@@ -1648,7 +1657,7 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x04term\x18\x04 \x01(\x04R\x04term\x12*\n" +
 	"\x05state\x18\x05 \x01(\x0e2\x14.raftkv.v1.NodeStateR\x05state\x12!\n" +
 	"\fcommit_index\x18\x06 \x01(\x04R\vcommitIndex\x12#\n" +
-	"\rapplied_index\x18\a \x01(\x04R\fappliedIndex*\xbd\x02\n" +
+	"\rapplied_index\x18\a \x01(\x04R\fappliedIndex*\x84\x03\n" +
 	"\vMessageType\x12\x1c\n" +
 	"\x18MESSAGE_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19MESSAGE_TYPE_VOTE_REQUEST\x10\x01\x12\x1e\n" +
@@ -1658,7 +1667,10 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x16MESSAGE_TYPE_HEARTBEAT\x10\x05\x12#\n" +
 	"\x1fMESSAGE_TYPE_HEARTBEAT_RESPONSE\x10\x06\x12!\n" +
 	"\x1dMESSAGE_TYPE_INSTALL_SNAPSHOT\x10\a\x12*\n" +
-	"&MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE\x10\b*p\n" +
+	"&MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE\x10\b\x12!\n" +
+	"\x1dMESSAGE_TYPE_PRE_VOTE_REQUEST\x10\t\x12\"\n" +
+	"\x1eMESSAGE_TYPE_PRE_VOTE_RESPONSE\x10\n" +
+	"*p\n" +
 	"\tEntryType\x12\x1a\n" +
 	"\x16ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11ENTRY_TYPE_NORMAL\x10\x01\x12\x14\n" +

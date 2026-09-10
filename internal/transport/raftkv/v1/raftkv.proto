@@ -83,6 +83,11 @@ enum MessageType {
   MESSAGE_TYPE_HEARTBEAT_RESPONSE = 6;
   MESSAGE_TYPE_INSTALL_SNAPSHOT = 7;
   MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE = 8;
+  // Pre-vote (§9.6). The request carries the term the sender would campaign
+  // in rather than one it holds, so a receiver must not apply the usual term
+  // rules to it.
+  MESSAGE_TYPE_PRE_VOTE_REQUEST = 9;
+  MESSAGE_TYPE_PRE_VOTE_RESPONSE = 10;
 }
 
 // EntryType mirrors the Raft core's entry types.
