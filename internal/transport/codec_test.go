@@ -221,35 +221,63 @@ func TestEveryCoreMessageTypeIsMapped(t *testing.T) {
 	// A new inter-node message type added to the core must be given a wire
 	// form deliberately, not discovered missing at runtime when two nodes fail
 	// to talk to each other.
-	interNode := []raft.MessageType{
-		raft.MsgVoteRequest,
-		raft.MsgVoteResponse,
-		raft.MsgAppendRequest,
-		raft.MsgAppendResponse,
-		raft.MsgHeartbeat,
-		raft.MsgHeartbeatResponse,
-		raft.MsgInstallSnapshot,
-		raft.MsgInstallSnapshotResponse,
+	//
+	// This enumerates the core's message types rather than listing them,
+	// because a hand-written list cannot fail for a type nobody added to it.
+	// An earlier version of this test did list them, passed cleanly when
+	// pre-vote arrived, and the missing mapping surfaced instead as every
+	// election silently failing to send.
+	//
+	// Node-local signals are named explicitly, so adding one is a deliberate
+	// act too: the default for anything new is "must be on the wire".
+	localOnly := map[raft.MessageType]bool{
+		raft.MsgCampaign:  true,
+		raft.MsgPropose:   true,
+		raft.MsgReadIndex: true,
 	}
 
-	seen := make(map[raftkvv1.MessageType]raft.MessageType, len(interNode))
-	for _, typ := range interNode {
+	seen := make(map[raftkvv1.MessageType]raft.MessageType)
+	var checked int
+
+	for i := 0; i < 256; i++ {
+		typ := raft.MessageType(i)
+		if typ.String() == "Unknown" {
+			// Not a message type the core defines.
+			continue
+		}
+		checked++
+
 		wire, err := messageTypeToWire(typ)
+		if localOnly[typ] {
+			if err == nil {
+				t.Errorf("%s is a node-local signal but has a wire form", typ)
+			}
+			continue
+		}
 		if err != nil {
-			t.Fatalf("%s has no wire form: %v", typ, err)
+			t.Errorf("%s has no wire form: %v", typ, err)
+			continue
 		}
 		if prev, dup := seen[wire]; dup {
-			t.Fatalf("%s and %s both map to wire value %v", prev, typ, wire)
+			t.Errorf("%s and %s both map to wire value %v", prev, typ, wire)
+			continue
 		}
 		seen[wire] = typ
 
 		back, err := messageTypeFromWire(wire)
 		if err != nil {
-			t.Fatalf("wire value %v does not map back: %v", wire, err)
+			t.Errorf("wire value %v does not map back: %v", wire, err)
+			continue
 		}
 		if back != typ {
-			t.Fatalf("%s round-tripped to %s", typ, back)
+			t.Errorf("%s round-tripped to %s", typ, back)
 		}
+	}
+
+	// A guard on the guard: if String() ever stopped naming types, the loop
+	// above would quietly check nothing at all and still pass.
+	if checked < 10 {
+		t.Fatalf("only %d message types were found; the enumeration is broken", checked)
 	}
 }
 
