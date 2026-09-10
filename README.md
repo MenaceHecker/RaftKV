@@ -34,6 +34,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Client deduplication.** Client ID plus sequence number, checked inside the state machine so every replica reaches the same verdict.
 
+**Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never waits for writes that have not arrived.
+
 **A node driver.** The thing that owns the consensus core, the WAL, and the state machine, and runs the loop connecting them. Real goroutines, real timers, real recovery on restart.
 
 **A gRPC wire protocol.** Defined and generated, with the codec between it and the core fully tested, plus a server that redirects a client to the leader instead of just refusing it.
@@ -177,7 +179,6 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 
 ## Things that are honestly not done
 
-- **No group commit.** This is the big one, and the benchmarks found it. The driver takes one proposal per loop iteration, so every write gets its own fsync and write throughput is pinned at `1 / fsync` no matter how many clients you add. Measured at 126 ops/s against a 7.81ms fsync, with throughput completely flat from 1 client to 64. Batching proposals that arrive while an fsync is in flight would divide the per-write disk cost by the batch size.
 - **No pre-vote.** A node that restarts campaigns immediately, bumping the term and deposing a leader that was serving perfectly well. Deleting one pod of five produced 31 leadership changes and drove the term from 3 to 21 before it settled. §9.6 describes the fix and it is not implemented.
 - **Snapshots are held in memory**, capping them at 64 MiB, enforced with a clear error rather than discovered as a corrupt file later. Streaming is the fix.
 
@@ -202,20 +203,22 @@ Three nodes as local processes on an M3 Pro, 16 clients:
 
 | Workload | Throughput | p50 | p99 |
 | --- | --- | --- | --- |
-| Write | 126 ops/s | 133.7ms | 176.9ms |
-| Read | 7,881 ops/s | 2.0ms | 2.7ms |
-| Mixed, 90% read | 1,322 ops/s | 9.8ms | 36.0ms |
+| Write | 521 ops/s | 28.9ms | 68.1ms |
+| Read | 7,332 ops/s | 2.1ms | 3.6ms |
+| Mixed, 90% read | 1,616 ops/s | 8.4ms | 28.1ms |
 
-Five nodes in Docker, where an fsync costs 1.10ms instead of 7.81ms:
+Five nodes in Docker, where an fsync costs 1.10ms instead of 6.8ms:
 
 | Workload | Throughput | p50 | p99 |
 | --- | --- | --- | --- |
-| Write | 823 ops/s | 19.1ms | 32.2ms |
-| Read | 4,440 ops/s | 3.2ms | 6.4ms |
+| Write | 2,999 ops/s | 5.3ms | 8.6ms |
+| Read | 4,552 ops/s | 3.1ms | 6.4ms |
 
-Reads are dramatically faster than writes because a linearizable read costs one round trip to a majority and touches no disk. Writes are capped at one fsync each, which is the missing group commit described above. The Docker numbers are larger only because that fsync is cheaper and weaker, not because the code is faster, and a benchmark that reported the bigger number alone would be describing the storage stack while pretending to describe the database.
+Reads are much faster than writes because a linearizable read costs one round trip to a majority and touches no disk. The Docker write numbers are larger only because that fsync is cheaper and weaker, not because the code is faster, and a benchmark that reported the bigger number alone would be describing the storage stack while pretending to describe the database.
 
 Losing two nodes of five costs throughput and nothing else. Losing a third stops the cluster, which is correct.
+
+The benchmarks earned their keep by finding that every write was getting its own fsync, so write throughput was flat at ~150 ops/s from 1 client to 64 no matter what. Batching the writes that are already waiting into one durable append took 64 clients from 148 ops/s at 424ms to 2,114 ops/s at 30ms, a factor of 14 on both. Every test passed before that fix and every chaos scenario held, which is the argument for measuring a system rather than reasoning about it.
 
 ---
 
