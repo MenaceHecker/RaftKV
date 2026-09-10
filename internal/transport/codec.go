@@ -63,6 +63,10 @@ func messageTypeToWire(t raft.MessageType) (raftkvv1.MessageType, error) {
 		return raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT, nil
 	case raft.MsgInstallSnapshotResponse:
 		return raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE, nil
+	case raft.MsgPreVoteRequest:
+		return raftkvv1.MessageType_MESSAGE_TYPE_PRE_VOTE_REQUEST, nil
+	case raft.MsgPreVoteResponse:
+		return raftkvv1.MessageType_MESSAGE_TYPE_PRE_VOTE_RESPONSE, nil
 	default:
 		return raftkvv1.MessageType_MESSAGE_TYPE_UNSPECIFIED,
 			fmt.Errorf("transport: %s is a node-local signal and has no wire form", t)
@@ -88,6 +92,10 @@ func messageTypeFromWire(t raftkvv1.MessageType) (raft.MessageType, error) {
 		return raft.MsgInstallSnapshot, nil
 	case raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT_RESPONSE:
 		return raft.MsgInstallSnapshotResponse, nil
+	case raftkvv1.MessageType_MESSAGE_TYPE_PRE_VOTE_REQUEST:
+		return raft.MsgPreVoteRequest, nil
+	case raftkvv1.MessageType_MESSAGE_TYPE_PRE_VOTE_RESPONSE:
+		return raft.MsgPreVoteResponse, nil
 	default:
 		return 0, &ErrUnknownEnum{Field: "MessageType", Value: int32(t)}
 	}
@@ -215,6 +223,12 @@ func stateToWire(s raft.State) raftkvv1.NodeState {
 	switch s {
 	case raft.Follower:
 		return raftkvv1.NodeState_NODE_STATE_FOLLOWER
+	case raft.PreCandidate:
+		// The wire enum has no pre-candidate. Reporting it as a candidate is
+		// the closest true statement available: the node is trying to become
+		// leader and is not one. The distinction matters inside the core, to
+		// a client it does not.
+		return raftkvv1.NodeState_NODE_STATE_CANDIDATE
 	case raft.Candidate:
 		return raftkvv1.NodeState_NODE_STATE_CANDIDATE
 	case raft.Leader:
