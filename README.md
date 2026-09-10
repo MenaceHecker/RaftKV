@@ -36,6 +36,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never waits for writes that have not arrived.
 
+**Pre-vote.** A node asks whether an election would be won before starting one (§9.6). Without it, a node that restarts or rejoins deposes a perfectly healthy leader simply by campaigning, because its vote request carries a higher term and everyone must step down to it.
+
 **A node driver.** The thing that owns the consensus core, the WAL, and the state machine, and runs the loop connecting them. Real goroutines, real timers, real recovery on restart.
 
 **A gRPC wire protocol.** Defined and generated, with the codec between it and the core fully tested, plus a server that redirects a client to the leader instead of just refusing it.
@@ -179,7 +181,6 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 
 ## Things that are honestly not done
 
-- **No pre-vote.** A node that restarts campaigns immediately, bumping the term and deposing a leader that was serving perfectly well. Deleting one pod of five produced 31 leadership changes and drove the term from 3 to 21 before it settled. §9.6 describes the fix and it is not implemented.
 - **Snapshots are held in memory**, capping them at 64 MiB, enforced with a clear error rather than discovered as a corrupt file later. Streaming is the fix.
 
 ---
@@ -217,6 +218,8 @@ Five nodes in Docker, where an fsync costs 1.10ms instead of 6.8ms:
 Reads are much faster than writes because a linearizable read costs one round trip to a majority and touches no disk. The Docker write numbers are larger only because that fsync is cheaper and weaker, not because the code is faster, and a benchmark that reported the bigger number alone would be describing the storage stack while pretending to describe the database.
 
 Losing two nodes of five costs throughput and nothing else. Losing a third stops the cluster, which is correct.
+
+The benchmarks also found that a single pod restart cost 31 leadership changes and drove the term from 3 to 21. That was the missing pre-vote round, and with it a node can now be restarted repeatedly without the cluster noticing: across three full restart cycles the term, the leader, and the leadership-change count all stayed exactly where they were.
 
 The benchmarks earned their keep by finding that every write was getting its own fsync, so write throughput was flat at ~150 ops/s from 1 client to 64 no matter what. Batching the writes that are already waiting into one durable append took 64 clients from 148 ops/s at 424ms to 2,114 ops/s at 30ms, a factor of 14 on both. Every test passed before that fix and every chaos scenario held, which is the argument for measuring a system rather than reasoning about it.
 

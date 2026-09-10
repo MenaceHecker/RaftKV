@@ -152,9 +152,15 @@ fixed, and finding it is the best argument for measuring a system rather than
 reasoning about it: every test passed, every scenario held, and the cluster was
 quietly doing a disk write per client request.
 
-**A pod restart is disruptive out of proportion to the event.** Deleting one
+**A pod restart was disruptive out of proportion to the event.** Deleting one
 pod of five produced 31 leadership changes and drove the term from 3 to 21
 before the cluster settled. A node that restarts campaigns immediately, which
-raises the term and deposes a leader that was serving perfectly well. This is
-the missing pre-vote optimization from §9.6, and until now it was a known gap
-described in the README rather than a measured one.
+raises the term and deposes a leader that was serving perfectly well. This was
+the missing pre-vote optimization from §9.6, and until it was measured it had
+been a gap described in the README rather than a number.
+
+It is now implemented. A node asks whether an election would be won before
+starting one, and a follower still hearing from its leader answers no. Three
+consecutive restarts of a follower in a three node cluster left the term, the
+leader, and the leadership-change counter all unmoved: the restart is
+invisible to the cluster rather than costing it an election.

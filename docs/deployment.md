@@ -98,11 +98,16 @@ Deleting the leader pod on a five node cluster:
 That is the StatefulSet guarantee doing its job, and it is why a Deployment
 would be wrong here.
 
-One caveat measured during that test: a single pod deletion produced 31
-leadership changes and drove the term from 3 to 21 before settling. A
-restarting node campaigns immediately, raising the term and deposing a healthy
-leader. Pre-vote (§9.6) is the fix and it is not implemented. In practice this
-means a rolling restart costs more availability than it should. See
+One thing measured during that test was worth fixing: a single pod deletion
+produced 31 leadership changes and drove the term from 3 to 21 before
+settling. A restarting node campaigned immediately, raising the term and
+deposing a healthy leader, which made a rolling restart cost far more
+availability than it should.
+
+Pre-vote (§9.6) has since been implemented, so a node now asks whether an
+election would be won before starting one and a follower still hearing from
+its leader answers no. Restarting a follower repeatedly now leaves the term,
+the leader, and the leadership-change counter unmoved. See
 [benchmarks.md](benchmarks.md).
 
 ## Configuration that matters
