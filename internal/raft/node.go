@@ -479,10 +479,35 @@ func (n *Node) Step(m Message) error {
 // Propose asks a leader to append a command to the log. It returns
 // ErrNotLeader on any other node.
 func (n *Node) Propose(data []byte) error {
+	return n.ProposeBatch([][]byte{data})
+}
+
+// ProposeBatch appends several client commands as a single log write.
+//
+// This is the entry point group commit is built on. The commands become
+// contiguous entries appended in one call, so the storage layer makes them
+// durable with one fsync rather than one each. Since a write cannot be
+// acknowledged until it is durable, and an fsync costs the same whether it
+// covers one entry or a hundred, batching is the difference between write
+// throughput being capped at one fsync per write and being capped at one
+// fsync per batch.
+//
+// Ordering within the batch is preserved, and the caller can locate the
+// entries afterwards: they occupy the last len(datas) indexes of the log.
+// Either every command is appended or none is, because a failure happens
+// before anything is written.
+func (n *Node) ProposeBatch(datas [][]byte) error {
+	if len(datas) == 0 {
+		return nil
+	}
+	entries := make([]Entry, len(datas))
+	for i, d := range datas {
+		entries[i] = Entry{Type: EntryNormal, Data: d}
+	}
 	return n.Step(Message{
 		Type:    MsgPropose,
 		From:    n.id,
-		Entries: []Entry{{Type: EntryNormal, Data: data}},
+		Entries: entries,
 	})
 }
 
