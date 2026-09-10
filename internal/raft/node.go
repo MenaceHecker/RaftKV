@@ -47,6 +47,16 @@ type Config struct {
 	// out under a perfectly healthy leader.
 	HeartbeatTick int
 
+	// PreVote makes a node ask whether an election would be won before
+	// starting one, rather than raising its term and finding out (§9.6).
+	//
+	// Without it, a node that has been partitioned away or has just
+	// restarted disrupts a healthy leader simply by campaigning: its vote
+	// request carries a higher term, and the term rules force everyone to
+	// step down to it. The cluster then has to elect a leader again, often
+	// the same one, having served nothing in the meantime.
+	PreVote bool
+
 	// Storage holds the persistent state. The node reads its hard state from
 	// it at startup and writes through it on every term change and vote.
 	Storage Storage
@@ -199,7 +209,10 @@ type Node struct {
 	electionElapsed  int
 	heartbeatElapsed int
 	electionTick     int
-	heartbeatTick    int
+
+	// preVote enables the pre-vote round described on Config.PreVote.
+	preVote       bool
+	heartbeatTick int
 	// randomizedElectionTimeout is redrawn on every state change, so a
 	// repeated split vote does not repeat the same timing.
 	randomizedElectionTimeout int
@@ -252,6 +265,7 @@ func NewNode(cfg Config) (*Node, error) {
 		readOnly:      newReadOnly(),
 		electionTick:  cfg.ElectionTick,
 		heartbeatTick: cfg.HeartbeatTick,
+		preVote:       cfg.PreVote,
 		rand:          rng,
 		storage:       cfg.Storage,
 	}
@@ -397,7 +411,7 @@ func (n *Node) Tick() error {
 			n.heartbeatElapsed = 0
 			n.broadcastHeartbeat()
 		}
-	case Follower, Candidate:
+	case Follower, PreCandidate, Candidate:
 		n.electionElapsed++
 		if n.electionElapsed >= n.randomizedElectionTimeout {
 			return n.campaign()
@@ -422,6 +436,28 @@ func (n *Node) Step(m Message) error {
 
 	case m.Type == MsgReadIndex:
 		return n.handleReadIndex(m)
+
+	case m.Type == MsgPreVoteRequest:
+		// Deliberately ahead of the term rules. A pre-vote carries the term
+		// the sender would campaign in, which is by construction higher than
+		// its own, and letting §5.1 act on it would cause exactly the
+		// disruption pre-vote exists to prevent.
+		return n.handlePreVoteRequest(m)
+
+	case m.Type == MsgPreVoteResponse && m.Granted:
+		// A grant echoes a hypothetical term that nobody has adopted, so it
+		// must not be treated as evidence of a newer one.
+		return n.handlePreVoteResponse(m)
+
+	case m.Type == MsgPreVoteResponse && m.Term > n.term:
+		// A rejection carrying a real higher term is the one case where a
+		// pre-vote teaches the sender something: its information is stale.
+		// Standing down here costs nothing, because no term was raised to
+		// get this answer.
+		return n.becomeFollower(m.Term, None)
+
+	case m.Type == MsgPreVoteResponse:
+		return n.handlePreVoteResponse(m)
 
 	case m.Term > n.term:
 		// A newer term means this node's information is out of date,
@@ -471,6 +507,10 @@ func (n *Node) Step(m Message) error {
 		return n.handleInstallSnapshot(m)
 	case MsgInstallSnapshotResponse:
 		return n.handleInstallSnapshotResponse(m)
+	case MsgPreVoteRequest:
+		return n.handlePreVoteRequest(m)
+	case MsgPreVoteResponse:
+		return n.handlePreVoteResponse(m)
 	default:
 		return fmt.Errorf("raft: unhandled message type %s", m.Type)
 	}
@@ -553,6 +593,25 @@ func (n *Node) becomeCandidate() error {
 	n.state = Candidate
 	n.leader = None
 	n.reset()
+	n.votes = map[NodeID]bool{n.id: true}
+	return nil
+}
+
+// becomePreCandidate starts a pre-vote round.
+//
+// Nothing durable happens here, and that is the entire point. The term is not
+// raised, no vote is recorded, and the node remains as harmless to the rest of
+// the cluster as the follower it still is. The only state that changes is
+// local bookkeeping for counting the answers.
+func (n *Node) becomePreCandidate() error {
+	if n.state == Leader {
+		return errors.New("raft: a leader cannot become a pre-candidate")
+	}
+
+	n.state = PreCandidate
+	n.leader = None
+	n.reset()
+	// A node always answers its own hypothetical question with yes.
 	n.votes = map[NodeID]bool{n.id: true}
 	return nil
 }
