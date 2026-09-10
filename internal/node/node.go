@@ -310,7 +310,11 @@ func Start(cfg Config) (*Node, error) {
 		InitialConfState: initialConf,
 		ElectionTick:     cfg.ElectionTick,
 		HeartbeatTick:    cfg.HeartbeatTick,
-		Storage:          meteredStorage{Storage: store, rec: cfg.Metrics},
+		// Always on. A restarting node that deposes a healthy leader costs
+		// real availability, and there is no workload for which paying an
+		// extra round trip before an election is the worse trade.
+		PreVote: true,
+		Storage: meteredStorage{Storage: store, rec: cfg.Metrics},
 	})
 	if err != nil {
 		store.Close()
