@@ -122,8 +122,10 @@ func (n *Node) handleAppendRequest(m Message) error {
 		// a bug in this implementation rather than a condition to tolerate.
 		return fmt.Errorf("raft: node %d received an append from %d in its own leader term %d",
 			n.id, m.From, n.term)
-	case Candidate:
-		// Someone else won this term's election. Concede.
+	case PreCandidate, Candidate:
+		// A leader is alive in this term. A candidate has lost the election;
+		// a pre-candidate never started one and has simply learned that it
+		// should not. Both become followers of the leader that is writing.
 		if err := n.becomeFollower(m.Term, m.From); err != nil {
 			return err
 		}

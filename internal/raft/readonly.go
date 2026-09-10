@@ -185,8 +185,12 @@ func (n *Node) handleHeartbeat(m Message) error {
 	case Leader:
 		// Two leaders in one term would break Election Safety.
 		return errors.New("raft: received a heartbeat from a peer in this node's own leader term")
-	case Candidate:
-		// Someone else won this term. Concede.
+	case PreCandidate, Candidate:
+		// A leader is alive in this term, so there is nothing to campaign
+		// for. A pre-candidate concedes for a slightly different reason than
+		// a candidate: it has not lost anything, it simply has its answer.
+		// Standing down matters even so, because a node left as a
+		// pre-candidate would keep asking on every election timeout.
 		if err := n.becomeFollower(m.Term, m.From); err != nil {
 			return err
 		}
