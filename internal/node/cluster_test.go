@@ -56,6 +56,10 @@ type testCluster struct {
 	// blocked records which ordered pairs cannot exchange messages, which is
 	// how partitions are simulated.
 	blocked map[[2]raft.NodeID]bool
+
+	// tune lets a test adjust each node's Config before it starts. It is
+	// applied last, so a test can override any default the helper sets.
+	tune func(*Config)
 }
 
 // Send implements Transport by handing messages straight to the destination
@@ -77,8 +81,16 @@ func (c *testCluster) Send(msgs []raft.Message) {
 // newTestCluster starts a cluster of the given size with IDs 1..size.
 func newTestCluster(t *testing.T, size int) *testCluster {
 	t.Helper()
+	return newTunedTestCluster(t, size, nil)
+}
+
+// newTunedTestCluster starts a cluster whose nodes get their Config adjusted
+// by tune before starting.
+func newTunedTestCluster(t *testing.T, size int, tune func(*Config)) *testCluster {
+	t.Helper()
 
 	c := &testCluster{
+		tune:    tune,
 		t:       t,
 		nodes:   make(map[raft.NodeID]*Node, size),
 		dirs:    make(map[raft.NodeID]string, size),
@@ -103,7 +115,7 @@ func newTestCluster(t *testing.T, size int) *testCluster {
 func (c *testCluster) start(id raft.NodeID) {
 	c.t.Helper()
 
-	n, err := Start(Config{
+	cfg := Config{
 		ID:            id,
 		Peers:         c.ids,
 		DataDir:       c.dirs[id],
@@ -114,7 +126,12 @@ func (c *testCluster) start(id raft.NodeID) {
 		// Tests do not survive power loss, and fsyncing every append makes
 		// them an order of magnitude slower for no additional coverage.
 		Sync: storage.SyncNever,
-	})
+	}
+	if c.tune != nil {
+		c.tune(&cfg)
+	}
+
+	n, err := Start(cfg)
 	if err != nil {
 		c.t.Fatalf("starting node %d: %v", id, err)
 	}
