@@ -41,6 +41,11 @@ const (
 	// Follower is passive: it responds to candidates and leaders but issues
 	// no requests of its own. All nodes start here.
 	Follower State = iota
+	// PreCandidate is asking whether an election it has not yet started
+	// would be won. It has not raised its term and has not voted, so a node
+	// in this state is still a follower as far as the rest of the cluster is
+	// concerned (§9.6).
+	PreCandidate
 	// Candidate is campaigning for leadership of a particular term.
 	Candidate
 	// Leader handles all client requests and replicates them to followers.
@@ -53,6 +58,8 @@ func (s State) String() string {
 	switch s {
 	case Follower:
 		return "Follower"
+	case PreCandidate:
+		return "PreCandidate"
 	case Candidate:
 		return "Candidate"
 	case Leader:
@@ -141,6 +148,28 @@ const (
 	MsgInstallSnapshot
 	// MsgInstallSnapshotResponse answers a MsgInstallSnapshot.
 	MsgInstallSnapshotResponse
+	// MsgPreVoteRequest asks whether a node would grant a vote, without
+	// anyone changing their term (§9.6).
+	//
+	// It exists because a real vote request is destructive: it carries a
+	// higher term, and the term rules of §5.1 force every recipient to step
+	// down to it. A node that has been partitioned away, or has just
+	// restarted, will campaign on a term nobody else has reason to respect,
+	// and in doing so deposes a leader that was serving perfectly well.
+	//
+	// A pre-vote asks the question hypothetically. Its Term is the term the
+	// sender *would* campaign in, and receiving one changes nothing about
+	// the receiver: no term change, no vote recorded, no election timer
+	// reset. Only after a majority answers yes does the sender raise its
+	// term for real.
+	MsgPreVoteRequest
+	// MsgPreVoteResponse answers a MsgPreVoteRequest.
+	//
+	// A grant echoes the hypothetical term it was asked about. A rejection
+	// carries the responder's own real term instead, so a node campaigning
+	// on stale information learns the truth without having disrupted anyone
+	// to find it out.
+	MsgPreVoteResponse
 )
 
 // String renders the message type for logs and test failure messages.
@@ -168,6 +197,10 @@ func (t MessageType) String() string {
 		return "InstallSnapshot"
 	case MsgInstallSnapshotResponse:
 		return "InstallSnapshotResponse"
+	case MsgPreVoteRequest:
+		return "PreVoteRequest"
+	case MsgPreVoteResponse:
+		return "PreVoteResponse"
 	default:
 		return "Unknown"
 	}
