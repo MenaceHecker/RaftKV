@@ -69,6 +69,10 @@ type clusterOpts struct {
 	// seed drives the randomized election timeouts. A fixed seed makes the
 	// whole run reproducible; changing it explores different timings.
 	seed int64
+	// preVote enables the pre-vote round. It is off by default here so the
+	// existing tests keep exercising the plain election path, and the tests
+	// that care about pre-vote turn it on explicitly.
+	preVote bool
 }
 
 // newCluster builds a cluster of size nodes with IDs 1..size.
@@ -109,6 +113,7 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 			Peers:         ids,
 			ElectionTick:  opts.electionTick,
 			HeartbeatTick: opts.heartbeatTick,
+			PreVote:       opts.preVote,
 			Storage:       storage,
 			Rand:          rng,
 		})
@@ -296,6 +301,7 @@ func (c *cluster) restart(id NodeID, opts clusterOpts) {
 		Peers:         c.ids,
 		ElectionTick:  opts.electionTick,
 		HeartbeatTick: opts.heartbeatTick,
+		PreVote:       opts.preVote,
 		Storage:       c.storages[id],
 		Rand:          rand.New(rand.NewSource(opts.seed + int64(id)*7919)),
 	})
