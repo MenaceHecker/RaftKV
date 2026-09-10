@@ -88,6 +88,15 @@ type Config struct {
 	// Metrics receives observations about what this node is doing. It is
 	// optional; a nil Recorder discards everything.
 	Metrics Recorder
+
+	// MaxProposalBatch caps how many client writes are grouped into one
+	// durable log write. Zero means the default.
+	//
+	// Larger batches raise write throughput, because the fsync every write
+	// waits on is paid once per batch rather than once per write. They also
+	// raise the cost of that single fsync, so the value trades throughput
+	// against the latency of the unlucky write that starts a batch.
+	MaxProposalBatch int
 }
 
 // Defaults for a node that does not specify otherwise.
@@ -96,6 +105,16 @@ const (
 	DefaultElectionTick      = 10
 	DefaultHeartbeatTick     = 1
 	DefaultSnapshotThreshold = 10000
+
+	// DefaultMaxProposalBatch is how many writes are grouped into one
+	// durable log write by default.
+	//
+	// The value matters less than it looks. A batch only ever contains
+	// writes that were already waiting when the loop came around, so an
+	// idle cluster batches one at a time and pays nothing, while a loaded
+	// one fills batches without anybody waiting longer than they already
+	// were.
+	DefaultMaxProposalBatch = 64
 )
 
 func (c *Config) applyDefaults() {
@@ -113,6 +132,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Metrics == nil {
 		c.Metrics = nopRecorder{}
+	}
+	if c.MaxProposalBatch == 0 {
+		c.MaxProposalBatch = DefaultMaxProposalBatch
 	}
 }
 
@@ -216,6 +238,10 @@ type Node struct {
 
 	// snapshotsReceived counts images installed from a leader.
 	snapshotsReceived uint64
+
+	// proposalBatch is reused across iterations so grouping writes does not
+	// allocate on every pass of the loop.
+	proposalBatch []proposalRequest
 
 	// lastTerm and lastLeader are the leadership this node last reported to
 	// the Recorder. They are kept so a change can be counted as an event:
@@ -502,16 +528,49 @@ func (n *Node) status() Status {
 
 // handleProposal appends a client command and registers a waiter for it.
 func (n *Node) handleProposal(req proposalRequest) {
-	if err := n.raft.Propose(req.data); err != nil {
-		req.done <- err
+	// Take everything else that is already waiting. Clients block on an
+	// unbuffered channel until the loop receives, so anything ready to send
+	// right now is a write that would otherwise sit through a whole fsync
+	// waiting its turn. Grouping them costs those writes nothing and saves
+	// the cluster one fsync each.
+	batch := append(n.proposalBatch[:0], req)
+collect:
+	for len(batch) < n.cfg.MaxProposalBatch {
+		select {
+		case next := <-n.proposec:
+			batch = append(batch, next)
+		default:
+			// Nothing more is waiting. The channel is unbuffered, so a
+			// receive succeeds here only when a client is already blocked
+			// sending. That is the precise condition worth batching on:
+			// never wait for writes that have not arrived.
+			break collect
+		}
+	}
+	n.proposalBatch = batch
+
+	datas := make([][]byte, len(batch))
+	for i, r := range batch {
+		datas[i] = r.data
+	}
+
+	if err := n.raft.ProposeBatch(datas); err != nil {
+		for _, r := range batch {
+			r.done <- err
+		}
 		return
 	}
 
-	// The entry the core just appended is at the end of the log. Recording
-	// its term as well as its index is what lets the loop tell "committed" from
-	// "overwritten by a new leader at the same index".
-	index := n.raft.LastIndex()
-	n.pending[index] = &proposal{term: n.raft.Term(), done: req.done}
+	// The entries the core just appended occupy the last len(batch) indexes
+	// of the log, in order. Recording each entry's term as well as its index
+	// is what lets the loop tell "committed" from "overwritten by a new
+	// leader at the same index".
+	last := n.raft.LastIndex()
+	term := n.raft.Term()
+	first := last - raft.Index(len(batch)) + 1
+	for i, r := range batch {
+		n.pending[first+raft.Index(i)] = &proposal{term: term, done: r.done}
+	}
 }
 
 // handleRead starts a read-index round, or defers it if the leader is not yet
