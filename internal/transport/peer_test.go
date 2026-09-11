@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -675,6 +676,34 @@ func TestSnapshotTransferOverGRPC(t *testing.T) {
 	// A follower is stopped, the cluster moves on and compacts past what that
 	// follower needs, and then it is brought back. The only way it can catch
 	// up is an image sent over gRPC.
+	runSnapshotTransfer(t, 40, 5)
+}
+
+func TestLargeSnapshotTransferOverGRPC(t *testing.T) {
+	// The same scenario with a state machine too big to fit in a default
+	// gRPC message.
+	//
+	// Nothing about the small case exercises a size limit, and a snapshot is
+	// precisely the message that grows with the data. A cluster that worked
+	// perfectly in testing would fail to catch up a lagging follower once
+	// real data accumulated, and the symptom would be a follower that never
+	// recovers rather than anything that announces itself as a size problem.
+	//
+	// 64 writes of 128 KiB is about 8 MiB of state, comfortably past gRPC's
+	// 4 MiB default receive limit.
+	runSnapshotTransfer(t, 64, 128<<10)
+}
+
+func runSnapshotTransfer(t *testing.T, writes, valueSize int) {
+	t.Helper()
+
+	// Snapshot transfer working in the core proves nothing about the wire: the
+	// image is the largest and most structured thing that crosses it, and
+	// until this message had a wire form the transport rejected it outright.
+	//
+	// A follower is stopped, the cluster moves on and compacts past what that
+	// follower needs, and then it is brought back. The only way it can catch
+	// up is an image sent over gRPC.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -699,11 +728,11 @@ func TestSnapshotTransferOverGRPC(t *testing.T) {
 
 	// The remaining majority keeps working and compacts well past where the
 	// stopped node left off.
-	const writes = 40
+	value := bytes.Repeat([]byte("x"), valueSize)
 	for i := range writes {
 		err := leader.Propose(ctx, statemachine.Command{
 			ClientID: 1, Seq: uint64(i + 1), Op: statemachine.OpPut,
-			Key: fmt.Sprintf("key-%d", i), Value: []byte("value"),
+			Key: fmt.Sprintf("key-%d", i), Value: value,
 		})
 		if err != nil {
 			t.Fatalf("writing while node %d is down: %v", victim, err)
