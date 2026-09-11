@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RaftService_Deliver_FullMethodName = "/raftkv.v1.RaftService/Deliver"
+	RaftService_Deliver_FullMethodName         = "/raftkv.v1.RaftService/Deliver"
+	RaftService_DeliverSnapshot_FullMethodName = "/raftkv.v1.RaftService/DeliverSnapshot"
 )
 
 // RaftServiceClient is the client API for RaftService service.
@@ -38,6 +39,20 @@ type RaftServiceClient interface {
 	// calls in the opposite direction rather than as return values, which keeps
 	// the transport symmetric and stops a slow peer from blocking the sender.
 	Deliver(ctx context.Context, in *DeliverRequest, opts ...grpc.CallOption) (*DeliverResponse, error)
+	// DeliverSnapshot hands over a state machine image in pieces.
+	//
+	// It is separate from Deliver because a snapshot is the one message whose
+	// size follows the data rather than the protocol. Every other Raft message
+	// is bounded by a handful of fields, while an image grows without limit,
+	// and a single unary call carrying one would fail outright once it passed
+	// the receiver's message size limit. The failure is silent in the worst
+	// way: the follower that needed the snapshot simply never catches up, and
+	// nothing about that symptom points at a size.
+	//
+	// Chunking also bounds what either side has to hold at once on the wire,
+	// and keeps one enormous message from monopolizing the connection a peer
+	// sends all its other traffic on.
+	DeliverSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, DeliverResponse], error)
 }
 
 type raftServiceClient struct {
@@ -58,6 +73,19 @@ func (c *raftServiceClient) Deliver(ctx context.Context, in *DeliverRequest, opt
 	return out, nil
 }
 
+func (c *raftServiceClient) DeliverSnapshot(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[SnapshotChunk, DeliverResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RaftService_ServiceDesc.Streams[0], RaftService_DeliverSnapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SnapshotChunk, DeliverResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftService_DeliverSnapshotClient = grpc.ClientStreamingClient[SnapshotChunk, DeliverResponse]
+
 // RaftServiceServer is the server API for RaftService service.
 // All implementations must embed UnimplementedRaftServiceServer
 // for forward compatibility.
@@ -74,6 +102,20 @@ type RaftServiceServer interface {
 	// calls in the opposite direction rather than as return values, which keeps
 	// the transport symmetric and stops a slow peer from blocking the sender.
 	Deliver(context.Context, *DeliverRequest) (*DeliverResponse, error)
+	// DeliverSnapshot hands over a state machine image in pieces.
+	//
+	// It is separate from Deliver because a snapshot is the one message whose
+	// size follows the data rather than the protocol. Every other Raft message
+	// is bounded by a handful of fields, while an image grows without limit,
+	// and a single unary call carrying one would fail outright once it passed
+	// the receiver's message size limit. The failure is silent in the worst
+	// way: the follower that needed the snapshot simply never catches up, and
+	// nothing about that symptom points at a size.
+	//
+	// Chunking also bounds what either side has to hold at once on the wire,
+	// and keeps one enormous message from monopolizing the connection a peer
+	// sends all its other traffic on.
+	DeliverSnapshot(grpc.ClientStreamingServer[SnapshotChunk, DeliverResponse]) error
 	mustEmbedUnimplementedRaftServiceServer()
 }
 
@@ -86,6 +128,9 @@ type UnimplementedRaftServiceServer struct{}
 
 func (UnimplementedRaftServiceServer) Deliver(context.Context, *DeliverRequest) (*DeliverResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Deliver not implemented")
+}
+func (UnimplementedRaftServiceServer) DeliverSnapshot(grpc.ClientStreamingServer[SnapshotChunk, DeliverResponse]) error {
+	return status.Error(codes.Unimplemented, "method DeliverSnapshot not implemented")
 }
 func (UnimplementedRaftServiceServer) mustEmbedUnimplementedRaftServiceServer() {}
 func (UnimplementedRaftServiceServer) testEmbeddedByValue()                     {}
@@ -126,6 +171,13 @@ func _RaftService_Deliver_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RaftService_DeliverSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(RaftServiceServer).DeliverSnapshot(&grpc.GenericServerStream[SnapshotChunk, DeliverResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RaftService_DeliverSnapshotServer = grpc.ClientStreamingServer[SnapshotChunk, DeliverResponse]
+
 // RaftService_ServiceDesc is the grpc.ServiceDesc for RaftService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -138,7 +190,13 @@ var RaftService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _RaftService_Deliver_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "DeliverSnapshot",
+			Handler:       _RaftService_DeliverSnapshot_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "raftkv/v1/raftkv.proto",
 }
 

@@ -26,6 +26,21 @@ service RaftService {
   // calls in the opposite direction rather than as return values, which keeps
   // the transport symmetric and stops a slow peer from blocking the sender.
   rpc Deliver(DeliverRequest) returns (DeliverResponse);
+
+  // DeliverSnapshot hands over a state machine image in pieces.
+  //
+  // It is separate from Deliver because a snapshot is the one message whose
+  // size follows the data rather than the protocol. Every other Raft message
+  // is bounded by a handful of fields, while an image grows without limit,
+  // and a single unary call carrying one would fail outright once it passed
+  // the receiver's message size limit. The failure is silent in the worst
+  // way: the follower that needed the snapshot simply never catches up, and
+  // nothing about that symptom points at a size.
+  //
+  // Chunking also bounds what either side has to hold at once on the wire,
+  // and keeps one enormous message from monopolizing the connection a peer
+  // sends all its other traffic on.
+  rpc DeliverSnapshot(stream SnapshotChunk) returns (DeliverResponse);
 }
 
 // ClusterService exposes membership administration.
@@ -153,6 +168,22 @@ message Message {
 // change, whereas changing the request type is not.
 message DeliverRequest {
   Message message = 1;
+}
+
+// SnapshotChunk is one frame of a streamed snapshot.
+//
+// The stream is a header followed by the payload in order: the first frame
+// carries the whole message envelope with its snapshot data left empty, and
+// every frame after it carries a fragment of that data. Splitting the two
+// means the receiver knows what it is assembling, and for whom, before any
+// of the payload arrives.
+message SnapshotChunk {
+  oneof frame {
+    // Exactly one of these, first on the stream. Its snapshot.data is empty.
+    Message header = 1;
+    // A fragment of snapshot.data, in order.
+    bytes data = 2;
+  }
 }
 
 // ConfState is the cluster membership at a point in the log.
