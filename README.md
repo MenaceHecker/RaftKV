@@ -36,6 +36,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never waits for writes that have not arrived.
 
+**Streamed snapshots.** A state machine image is the one message whose size follows the data rather than the protocol, so it travels over its own streaming RPC in chunks instead of as one message that would fail past the receiver's size limit.
+
 **Pre-vote.** A node asks whether an election would be won before starting one (§9.6). Without it, a node that restarts or rejoins deposes a perfectly healthy leader simply by campaigning, because its vote request carries a higher term and everyone must step down to it.
 
 **A node driver.** The thing that owns the consensus core, the WAL, and the state machine, and runs the loop connecting them. Real goroutines, real timers, real recovery on restart.
@@ -96,6 +98,8 @@ Not a highlight reel. These are real, and they're the reason the test discipline
 **Compaction could delete your vote.** Hard state records live in WAL segments interleaved with log entries, so deleting an old segment could take the most recent vote with it, and a node that forgets its vote can vote twice in one term and elect two leaders. Found while writing the WAL rather than by a test, which is its own kind of luck.
 
 **Three tests that passed while testing nothing.** The §5.4.2 one above, plus three compaction tests that were "passing" while truncating zero segments. My test setup batched appends, so everything landed in one file and nothing ever rolled over.
+
+**A cluster with more than 4 MiB of data could never catch up a lagging follower.** Snapshots went over gRPC as a single message, and gRPC's default receive limit is 4 MiB. Every test passed, because every test had a state machine measured in kilobytes. The symptom was about as unhelpful as symptoms get: the follower sat at commit 0 forever while the leader moved on, with nothing anywhere saying "too big". I found it by writing the same snapshot-transfer test again with 8 MiB of data instead of a few hundred bytes. The README had also claimed snapshots were capped at 64 MiB "with a clear error", which was wrong twice over: that number bounds individual length prefixes inside the encoder, not the image, and the real failure was silent.
 
 **The chaos suite had a blind spot exactly where it mattered most.** Nine scenarios, all passing. So I deliberately broke the read-index protocol, letting a leader answer reads without confirming with a majority that it was still the leader. Every scenario still passed. The harness routed each read to whichever live node had the highest term, so after a partition the client was quietly steered to the *new* leader and never touched the stale one. A real client does the opposite: it remembers an address and keeps using it until something redirects it. Clients can now target a specific node, and the scenario that does so catches the injected bug immediately. A chaos suite you have not tried to fool is a chaos suite you should not trust.
 
@@ -181,7 +185,7 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 
 ## Things that are honestly not done
 
-- **Snapshots are held in memory**, capping them at 64 MiB, enforced with a clear error rather than discovered as a corrupt file later. Streaming is the fix.
+- **Snapshots are still materialized in memory** at both ends. They now travel over the wire in chunks, so size no longer breaks transfer, but the sender holds the whole image and the receiver assembles the whole image before handing it over. Making the state machine serialize and restore through an `io.Reader` and `io.Writer` would remove that, and would ripple through the storage layer and the core's `Snapshot` type.
 
 ---
 

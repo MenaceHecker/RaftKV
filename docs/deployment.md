@@ -110,6 +110,24 @@ its leader answers no. Restarting a follower repeatedly now leaves the term,
 the leader, and the leadership-change counter unmoved. See
 [benchmarks.md](benchmarks.md).
 
+## Snapshots and size
+
+A follower that falls behind the leader's compaction point can only be caught
+up by a state machine image, and that image is the one message in the protocol
+whose size follows your data rather than the protocol. It is streamed in 1 MiB
+chunks over its own RPC for that reason. Sending it as a single message worked
+fine until the data outgrew the receiver's message size limit, at which point
+the follower simply never recovered and nothing in the symptom mentioned size.
+
+The receiver refuses a stream larger than 1 GiB, refuses data arriving before
+the header that describes it, and hands nothing to the consensus layer until
+the whole image has arrived. A partial snapshot is not a smaller snapshot, it
+is a corrupt one, and restoring from it would leave the state machine silently
+wrong rather than merely behind.
+
+Both ends still hold the whole image in memory while this happens, so plan for
+a node's peak memory to exceed its state machine size during a transfer.
+
 ## Configuration that matters
 
 | Flag | Default | Notes |
