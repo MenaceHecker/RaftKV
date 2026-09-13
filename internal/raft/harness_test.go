@@ -69,6 +69,9 @@ type clusterOpts struct {
 	// seed drives the randomized election timeouts. A fixed seed makes the
 	// whole run reproducible; changing it explores different timings.
 	seed int64
+	// maxAppendBytes bounds one AppendEntries payload. Zero takes the
+	// package default, which is far larger than any test backlog.
+	maxAppendBytes int
 	// preVote enables the pre-vote round. It is off by default here so the
 	// existing tests keep exercising the plain election path, and the tests
 	// that care about pre-vote turn it on explicitly.
@@ -109,13 +112,14 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 		rng := rand.New(rand.NewSource(opts.seed + int64(id)*7919))
 
 		node, err := NewNode(Config{
-			ID:            id,
-			Peers:         ids,
-			ElectionTick:  opts.electionTick,
-			HeartbeatTick: opts.heartbeatTick,
-			PreVote:       opts.preVote,
-			Storage:       storage,
-			Rand:          rng,
+			ID:             id,
+			Peers:          ids,
+			ElectionTick:   opts.electionTick,
+			HeartbeatTick:  opts.heartbeatTick,
+			PreVote:        opts.preVote,
+			MaxAppendBytes: opts.maxAppendBytes,
+			Storage:        storage,
+			Rand:           rng,
 		})
 		if err != nil {
 			t.Fatalf("creating node %d: %v", id, err)
@@ -297,13 +301,14 @@ func (c *cluster) restart(id NodeID, opts clusterOpts) {
 	}
 
 	node, err := NewNode(Config{
-		ID:            id,
-		Peers:         c.ids,
-		ElectionTick:  opts.electionTick,
-		HeartbeatTick: opts.heartbeatTick,
-		PreVote:       opts.preVote,
-		Storage:       c.storages[id],
-		Rand:          rand.New(rand.NewSource(opts.seed + int64(id)*7919)),
+		ID:             id,
+		Peers:          c.ids,
+		ElectionTick:   opts.electionTick,
+		HeartbeatTick:  opts.heartbeatTick,
+		PreVote:        opts.preVote,
+		MaxAppendBytes: opts.maxAppendBytes,
+		Storage:        c.storages[id],
+		Rand:           rand.New(rand.NewSource(opts.seed + int64(id)*7919)),
 	})
 	if err != nil {
 		c.t.Fatalf("restarting node %d: %v", id, err)
