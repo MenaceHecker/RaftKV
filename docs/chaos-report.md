@@ -19,7 +19,7 @@ works whether or not each one took effect.
 
 ## Summary
 
-10 of 10 scenarios held across all seeds.
+15 of 15 scenarios held across all seeds.
 
 | Scenario | Seeds | Result |
 |---|---|---|
@@ -33,106 +33,161 @@ works whether or not each one took effect.
 | several clients writing the same key at once | 5 | pass |
 | many keys under loss and leader changes | 5 | pass |
 | client keeps reading from a leader that was partitioned away | 5 | pass |
+| a node joins while clients keep writing | 5 | pass |
+| the leader removes itself from the configuration | 5 | pass |
+| leader crashes during a membership change | 5 | pass |
+| a removed node keeps running and campaigning | 5 | pass |
+| a node joins while the cluster is partitioned | 5 | pass |
 
 ## Detail
 
 ```
 leader partitioned from the majority mid-write
   hypothesis: a leader cut off while a write is in flight must not be able to commit it, and the majority must elect a new leader whose history does not contradict anything already returned to a client
-  seed 1    PASS             ticks=545   ops=24/0/1 (ok/failed/unknown) msgs=5132 dropped=0 partitioned=1000 dup=0 delayed=0
-  seed 2    PASS             ticks=544   ops=24/0/1 (ok/failed/unknown) msgs=5132 dropped=0 partitioned=1000 dup=0 delayed=0
-  seed 3    PASS             ticks=546   ops=24/0/1 (ok/failed/unknown) msgs=5125 dropped=0 partitioned=999 dup=0 delayed=0
-  seed 5    PASS             ticks=544   ops=24/0/1 (ok/failed/unknown) msgs=5139 dropped=0 partitioned=1001 dup=0 delayed=0
-  seed 8    PASS             ticks=544   ops=24/0/1 (ok/failed/unknown) msgs=5140 dropped=0 partitioned=1000 dup=0 delayed=0
+  seed 1    PASS             ticks=547   ops=24/0/1 (ok/failed/unknown) msgs=5120 dropped=0 partitioned=996 dup=0 delayed=0
+  seed 2    PASS             ticks=546   ops=24/0/1 (ok/failed/unknown) msgs=5142 dropped=0 partitioned=998 dup=0 delayed=0
+  seed 3    PASS             ticks=548   ops=24/0/1 (ok/failed/unknown) msgs=5133 dropped=0 partitioned=999 dup=0 delayed=0
+  seed 5    PASS             ticks=546   ops=24/0/1 (ok/failed/unknown) msgs=5156 dropped=0 partitioned=1000 dup=0 delayed=0
+  seed 8    PASS             ticks=546   ops=24/0/1 (ok/failed/unknown) msgs=5143 dropped=0 partitioned=997 dup=0 delayed=0
 ```
 
 ```
 leader crashes with a write in flight
   hypothesis: a write whose leader died is either committed everywhere or nowhere; the client cannot tell which, and either answer must be consistent with everything read afterwards
-  seed 1    PASS             ticks=585   ops=24/0/1 (ok/failed/unknown) msgs=4621 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 2    PASS             ticks=584   ops=24/0/1 (ok/failed/unknown) msgs=4621 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 3    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4614 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 5    PASS             ticks=584   ops=24/0/1 (ok/failed/unknown) msgs=4628 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 8    PASS             ticks=584   ops=24/0/1 (ok/failed/unknown) msgs=4629 dropped=4 partitioned=0 dup=0 delayed=0
+  seed 1    PASS             ticks=587   ops=24/0/1 (ok/failed/unknown) msgs=4609 dropped=4 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4631 dropped=4 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=588   ops=24/0/1 (ok/failed/unknown) msgs=4622 dropped=4 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4645 dropped=4 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4632 dropped=4 partitioned=0 dup=0 delayed=0
 ```
 
 ```
 every node restarted in turn while clients keep writing
   hypothesis: a cluster survives losing any single node at any moment, and a restarted node rebuilds its state machine from the log without contradicting what clients already observed
-  seed 1    PASS             ticks=1245  ops=10/0/0 (ok/failed/unknown) msgs=9634 dropped=19 partitioned=0 dup=0 delayed=6408
-  seed 2    PASS             ticks=1245  ops=10/0/0 (ok/failed/unknown) msgs=9569 dropped=20 partitioned=0 dup=0 delayed=6358
-  seed 3    PASS             ticks=1246  ops=10/0/0 (ok/failed/unknown) msgs=9556 dropped=20 partitioned=0 dup=0 delayed=6339
-  seed 5    PASS             ticks=1244  ops=10/0/0 (ok/failed/unknown) msgs=9642 dropped=20 partitioned=0 dup=0 delayed=6398
-  seed 8    PASS             ticks=1244  ops=10/0/0 (ok/failed/unknown) msgs=9654 dropped=17 partitioned=0 dup=0 delayed=6405
+  seed 1    PASS             ticks=1248  ops=10/0/0 (ok/failed/unknown) msgs=9638 dropped=15 partitioned=0 dup=0 delayed=6411
+  seed 2    PASS             ticks=1249  ops=10/0/0 (ok/failed/unknown) msgs=9658 dropped=19 partitioned=0 dup=0 delayed=6424
+  seed 3    PASS             ticks=1248  ops=10/0/0 (ok/failed/unknown) msgs=9533 dropped=15 partitioned=0 dup=0 delayed=6322
+  seed 5    PASS             ticks=1244  ops=10/0/0 (ok/failed/unknown) msgs=9472 dropped=19 partitioned=0 dup=0 delayed=6284
+  seed 8    PASS             ticks=1246  ops=10/0/0 (ok/failed/unknown) msgs=9631 dropped=18 partitioned=0 dup=0 delayed=6393
 ```
 
 ```
 sustained loss, delay, duplication and reordering
   hypothesis: Raft's retransmission covers every dropped message, and no handler assumed a message arrived once, in order, or at all
-  seed 1    PASS             ticks=513   ops=15/0/0 (ok/failed/unknown) msgs=3803 dropped=947 partitioned=0 dup=295 delayed=2713
-  seed 2    PASS             ticks=811   ops=15/0/0 (ok/failed/unknown) msgs=5957 dropped=1489 partitioned=0 dup=435 delayed=4196
-  seed 3    PASS             ticks=501   ops=15/0/0 (ok/failed/unknown) msgs=3720 dropped=928 partitioned=0 dup=262 delayed=2613
-  seed 5    PASS             ticks=794   ops=14/0/1 (ok/failed/unknown) msgs=5817 dropped=1490 partitioned=0 dup=407 delayed=4070
-  seed 8    PASS             ticks=511   ops=15/0/0 (ok/failed/unknown) msgs=3747 dropped=984 partitioned=0 dup=285 delayed=2630
+  seed 1    PASS             ticks=801   ops=14/0/1 (ok/failed/unknown) msgs=5924 dropped=1495 partitioned=0 dup=447 delayed=4183
+  seed 2    PASS             ticks=521   ops=15/0/0 (ok/failed/unknown) msgs=3859 dropped=953 partitioned=0 dup=268 delayed=2716
+  seed 3    PASS             ticks=506   ops=15/0/0 (ok/failed/unknown) msgs=3767 dropped=939 partitioned=0 dup=266 delayed=2651
+  seed 5    PASS             ticks=805   ops=15/0/0 (ok/failed/unknown) msgs=5980 dropped=1528 partitioned=0 dup=416 delayed=4182
+  seed 8    PASS             ticks=510   ops=15/0/0 (ok/failed/unknown) msgs=3716 dropped=975 partitioned=0 dup=283 delayed=2612
 ```
 
 ```
 candidates competing under heavy delay
   hypothesis: delay long enough to produce competing candidates still yields at most one leader per term, and the cluster eventually settles rather than campaigning forever
-  seed 1    PASS             ticks=1283  ops=16/0/0 (ok/failed/unknown) msgs=6569 dropped=669 partitioned=0 dup=0 delayed=5900
-  seed 2    PASS             ticks=690   ops=16/0/0 (ok/failed/unknown) msgs=3296 dropped=311 partitioned=0 dup=0 delayed=2985
-  seed 3    PASS             ticks=697   ops=16/0/0 (ok/failed/unknown) msgs=3194 dropped=329 partitioned=0 dup=0 delayed=2865
-  seed 5    PASS             ticks=701   ops=16/0/0 (ok/failed/unknown) msgs=3819 dropped=352 partitioned=0 dup=0 delayed=3467
-  seed 8    PASS             ticks=699   ops=16/0/0 (ok/failed/unknown) msgs=3754 dropped=390 partitioned=0 dup=0 delayed=3364
+  seed 1    PASS             ticks=1287  ops=16/0/0 (ok/failed/unknown) msgs=7325 dropped=739 partitioned=0 dup=0 delayed=6586
+  seed 2    PASS             ticks=894   ops=16/0/0 (ok/failed/unknown) msgs=3636 dropped=342 partitioned=0 dup=0 delayed=3294
+  seed 3    PASS             ticks=1274  ops=15/0/1 (ok/failed/unknown) msgs=6822 dropped=679 partitioned=0 dup=0 delayed=6143
+  seed 5    PASS             ticks=679   ops=16/0/0 (ok/failed/unknown) msgs=3759 dropped=346 partitioned=0 dup=0 delayed=3413
+  seed 8    PASS             ticks=862   ops=16/0/0 (ok/failed/unknown) msgs=3593 dropped=370 partitioned=0 dup=0 delayed=3223
 ```
 
 ```
 cluster split into a majority and a minority
   hypothesis: only the side with a majority makes progress; the minority side accepts nothing that later contradicts it, and both converge once the partition heals
-  seed 1    PASS             ticks=667   ops=18/0/0 (ok/failed/unknown) msgs=6108 dropped=0 partitioned=1167 dup=0 delayed=0
-  seed 2    PASS             ticks=666   ops=18/0/0 (ok/failed/unknown) msgs=4958 dropped=0 partitioned=554 dup=0 delayed=0
-  seed 3    PASS             ticks=668   ops=18/0/0 (ok/failed/unknown) msgs=6024 dropped=0 partitioned=1139 dup=0 delayed=0
-  seed 5    PASS             ticks=666   ops=18/0/0 (ok/failed/unknown) msgs=5042 dropped=0 partitioned=548 dup=0 delayed=0
-  seed 8    PASS             ticks=666   ops=18/0/0 (ok/failed/unknown) msgs=4889 dropped=0 partitioned=551 dup=0 delayed=0
+  seed 1    PASS             ticks=669   ops=18/0/0 (ok/failed/unknown) msgs=6100 dropped=0 partitioned=1159 dup=0 delayed=0
+  seed 2    PASS             ticks=668   ops=18/0/0 (ok/failed/unknown) msgs=5205 dropped=0 partitioned=593 dup=0 delayed=0
+  seed 3    PASS             ticks=670   ops=18/0/0 (ok/failed/unknown) msgs=6080 dropped=0 partitioned=1155 dup=0 delayed=0
+  seed 5    PASS             ticks=668   ops=18/0/0 (ok/failed/unknown) msgs=5192 dropped=0 partitioned=590 dup=0 delayed=0
+  seed 8    PASS             ticks=668   ops=18/0/0 (ok/failed/unknown) msgs=5190 dropped=0 partitioned=584 dup=0 delayed=0
 ```
 
 ```
 leadership repeatedly forced to move
   hypothesis: back-to-back leader changes never lose a committed write and never let two leaders act in the same term
-  seed 1    PASS             ticks=1561  ops=12/0/0 (ok/failed/unknown) msgs=13996 dropped=0 partitioned=2971 dup=0 delayed=8273
-  seed 2    PASS             ticks=1557  ops=12/0/0 (ok/failed/unknown) msgs=13967 dropped=0 partitioned=2971 dup=0 delayed=8307
-  seed 3    PASS             ticks=1560  ops=12/0/0 (ok/failed/unknown) msgs=13928 dropped=0 partitioned=2969 dup=0 delayed=8191
-  seed 5    PASS             ticks=1556  ops=12/0/0 (ok/failed/unknown) msgs=14066 dropped=0 partitioned=2983 dup=0 delayed=8307
-  seed 8    PASS             ticks=1553  ops=12/0/0 (ok/failed/unknown) msgs=13949 dropped=0 partitioned=2968 dup=0 delayed=8136
+  seed 1    PASS             ticks=1562  ops=12/0/0 (ok/failed/unknown) msgs=13942 dropped=0 partitioned=2965 dup=0 delayed=8233
+  seed 2    PASS             ticks=1563  ops=12/0/0 (ok/failed/unknown) msgs=13997 dropped=0 partitioned=2973 dup=0 delayed=8328
+  seed 3    PASS             ticks=1558  ops=12/0/0 (ok/failed/unknown) msgs=13510 dropped=0 partitioned=2914 dup=0 delayed=7908
+  seed 5    PASS             ticks=1556  ops=12/0/0 (ok/failed/unknown) msgs=13885 dropped=0 partitioned=2961 dup=0 delayed=8186
+  seed 8    PASS             ticks=1558  ops=12/0/0 (ok/failed/unknown) msgs=13911 dropped=0 partitioned=2960 dup=0 delayed=8114
 ```
 
 ```
 several clients writing the same key at once
   hypothesis: concurrent writes to one register are ordered consistently, and every read observes a value some ordering could produce
-  seed 1    PASS             ticks=471   ops=19/0/0 (ok/failed/unknown) msgs=1886 dropped=97 partitioned=0 dup=0 delayed=1432
-  seed 2    PASS             ticks=468   ops=19/0/0 (ok/failed/unknown) msgs=1895 dropped=90 partitioned=0 dup=0 delayed=1451
-  seed 3    PASS             ticks=474   ops=19/0/0 (ok/failed/unknown) msgs=1873 dropped=108 partitioned=0 dup=0 delayed=1429
-  seed 5    PASS             ticks=468   ops=19/0/0 (ok/failed/unknown) msgs=1898 dropped=82 partitioned=0 dup=0 delayed=1456
-  seed 8    PASS             ticks=470   ops=19/0/0 (ok/failed/unknown) msgs=1899 dropped=89 partitioned=0 dup=0 delayed=1458
+  seed 1    PASS             ticks=475   ops=19/0/0 (ok/failed/unknown) msgs=1908 dropped=97 partitioned=0 dup=0 delayed=1447
+  seed 2    PASS             ticks=474   ops=19/0/0 (ok/failed/unknown) msgs=1923 dropped=90 partitioned=0 dup=0 delayed=1474
+  seed 3    PASS             ticks=482   ops=19/0/0 (ok/failed/unknown) msgs=1902 dropped=109 partitioned=0 dup=0 delayed=1449
+  seed 5    PASS             ticks=471   ops=19/0/0 (ok/failed/unknown) msgs=1902 dropped=83 partitioned=0 dup=0 delayed=1457
+  seed 8    PASS             ticks=474   ops=19/0/0 (ok/failed/unknown) msgs=1903 dropped=90 partitioned=0 dup=0 delayed=1460
 ```
 
 ```
 many keys under loss and leader changes
   hypothesis: operations on independent keys do not interfere, and each register is individually linearizable through leadership changes
-  seed 1    PASS             ticks=1504  ops=20/0/0 (ok/failed/unknown) msgs=10301 dropped=1550 partitioned=0 dup=0 delayed=6998
-  seed 2    PASS             ticks=1502  ops=20/0/0 (ok/failed/unknown) msgs=10206 dropped=1588 partitioned=0 dup=0 delayed=6921
-  seed 3    PASS             ticks=1504  ops=20/0/0 (ok/failed/unknown) msgs=10231 dropped=1625 partitioned=0 dup=0 delayed=6923
-  seed 5    PASS             ticks=1490  ops=20/0/0 (ok/failed/unknown) msgs=9963 dropped=1534 partitioned=0 dup=0 delayed=6779
-  seed 8    PASS             ticks=1500  ops=20/0/0 (ok/failed/unknown) msgs=10243 dropped=1607 partitioned=0 dup=0 delayed=6990
+  seed 1    PASS             ticks=1512  ops=20/0/0 (ok/failed/unknown) msgs=10170 dropped=1534 partitioned=0 dup=0 delayed=6904
+  seed 2    PASS             ticks=1510  ops=20/0/0 (ok/failed/unknown) msgs=9790 dropped=1510 partitioned=0 dup=0 delayed=6635
+  seed 3    PASS             ticks=1511  ops=20/0/0 (ok/failed/unknown) msgs=9765 dropped=1551 partitioned=0 dup=0 delayed=6630
+  seed 5    PASS             ticks=1502  ops=20/0/0 (ok/failed/unknown) msgs=9903 dropped=1518 partitioned=0 dup=0 delayed=6735
+  seed 8    PASS             ticks=1533  ops=20/0/0 (ok/failed/unknown) msgs=10090 dropped=1587 partitioned=0 dup=0 delayed=6882
 ```
 
 ```
 client keeps reading from a leader that was partitioned away
   hypothesis: a node that still believes it leads, but has lost contact with the majority, must never answer a read; its state may be arbitrarily behind and nothing in the reply would say so
-  seed 1    PASS             ticks=793   ops=20/0/5 (ok/failed/unknown) msgs=7556 dropped=0 partitioned=1816 dup=0 delayed=0
-  seed 2    PASS             ticks=792   ops=20/0/5 (ok/failed/unknown) msgs=7556 dropped=0 partitioned=1816 dup=0 delayed=0
-  seed 3    PASS             ticks=794   ops=20/0/5 (ok/failed/unknown) msgs=7549 dropped=0 partitioned=1815 dup=0 delayed=0
-  seed 5    PASS             ticks=792   ops=20/0/5 (ok/failed/unknown) msgs=7563 dropped=0 partitioned=1817 dup=0 delayed=0
-  seed 8    PASS             ticks=792   ops=20/0/5 (ok/failed/unknown) msgs=7564 dropped=0 partitioned=1816 dup=0 delayed=0
+  seed 1    PASS             ticks=795   ops=20/0/5 (ok/failed/unknown) msgs=7544 dropped=0 partitioned=1812 dup=0 delayed=0
+  seed 2    PASS             ticks=794   ops=20/0/5 (ok/failed/unknown) msgs=7566 dropped=0 partitioned=1814 dup=0 delayed=0
+  seed 3    PASS             ticks=796   ops=20/0/5 (ok/failed/unknown) msgs=7557 dropped=0 partitioned=1815 dup=0 delayed=0
+  seed 5    PASS             ticks=794   ops=20/0/5 (ok/failed/unknown) msgs=7580 dropped=0 partitioned=1816 dup=0 delayed=0
+  seed 8    PASS             ticks=794   ops=20/0/5 (ok/failed/unknown) msgs=7567 dropped=0 partitioned=1813 dup=0 delayed=0
+```
+
+```
+a node joins while clients keep writing
+  hypothesis: admitting a member must not lose or reorder writes; the new node starts with no data and must not be able to serve or vote its way into contradicting what the cluster already agreed
+  seed 1    PASS             ticks=389   ops=24/0/0 (ok/failed/unknown) msgs=2463 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=386   ops=24/0/0 (ok/failed/unknown) msgs=2463 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=392   ops=24/0/0 (ok/failed/unknown) msgs=2471 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=386   ops=24/0/0 (ok/failed/unknown) msgs=2471 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=386   ops=24/0/0 (ok/failed/unknown) msgs=2471 dropped=0 partitioned=0 dup=0 delayed=0
+```
+
+```
+the leader removes itself from the configuration
+  hypothesis: a leader that is no longer a member must give up leadership rather than keep committing on behalf of a cluster it has left
+  seed 1    PASS             ticks=675   ops=20/0/0 (ok/failed/unknown) msgs=4587 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=674   ops=20/0/0 (ok/failed/unknown) msgs=4575 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=676   ops=20/0/0 (ok/failed/unknown) msgs=4573 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=674   ops=20/0/0 (ok/failed/unknown) msgs=4595 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=674   ops=20/0/0 (ok/failed/unknown) msgs=4585 dropped=0 partitioned=0 dup=0 delayed=0
+```
+
+```
+leader crashes during a membership change
+  hypothesis: a crash inside the joint window must not split the cluster into two configurations that can each elect a leader; whoever takes over inherits the transition and finishes or abandons it as one
+  seed 1    PASS             ticks=877   ops=20/0/0 (ok/failed/unknown) msgs=8011 dropped=10 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=876   ops=20/0/0 (ok/failed/unknown) msgs=8001 dropped=10 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=878   ops=20/0/0 (ok/failed/unknown) msgs=7994 dropped=10 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=876   ops=20/0/0 (ok/failed/unknown) msgs=8055 dropped=10 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=876   ops=20/0/0 (ok/failed/unknown) msgs=8018 dropped=10 partitioned=0 dup=0 delayed=0
+```
+
+```
+a removed node keeps running and campaigning
+  hypothesis: a node the cluster has forgotten must not be able to win an election or serve a read; it still holds a plausible log and will keep asking
+  seed 1    PASS             ticks=679   ops=20/3/0 (ok/failed/unknown) msgs=4673 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=678   ops=20/3/0 (ok/failed/unknown) msgs=4673 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=680   ops=20/3/0 (ok/failed/unknown) msgs=4657 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=678   ops=20/3/0 (ok/failed/unknown) msgs=4673 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=678   ops=20/3/0 (ok/failed/unknown) msgs=4689 dropped=0 partitioned=0 dup=0 delayed=0
+```
+
+```
+a node joins while the cluster is partitioned
+  hypothesis: a change proposed to a leader that loses its majority must not take effect anywhere; when the partition heals the cluster must agree on one membership, not two
+  seed 1    PASS             ticks=1099  ops=28/0/0 (ok/failed/unknown) msgs=10595 dropped=0 partitioned=1448 dup=0 delayed=0
+  seed 2    PASS             ticks=1098  ops=28/0/0 (ok/failed/unknown) msgs=10637 dropped=0 partitioned=1450 dup=0 delayed=0
+  seed 3    PASS             ticks=1100  ops=28/0/0 (ok/failed/unknown) msgs=10648 dropped=0 partitioned=1451 dup=0 delayed=0
+  seed 5    PASS             ticks=1098  ops=28/0/0 (ok/failed/unknown) msgs=10651 dropped=0 partitioned=1452 dup=0 delayed=0
+  seed 8    PASS             ticks=1098  ops=28/0/0 (ok/failed/unknown) msgs=10658 dropped=0 partitioned=1449 dup=0 delayed=0
 ```
 
