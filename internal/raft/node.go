@@ -11,6 +11,38 @@ import (
 // node named by Leader.
 var ErrNotLeader = errors.New("raft: node is not the leader")
 
+// DefaultMaxAppendBytes is how much entry payload one AppendEntries carries
+// when nothing else is specified.
+//
+// It is chosen to sit well under the message size limits transports impose by
+// default, gRPC's four megabytes among them, with room for the envelope and
+// for entries whose recorded size underestimates their encoded size.
+const DefaultMaxAppendBytes = 1 << 20 // 1 MiB
+
+// entryOverheadBytes is a rough per-entry allowance for the term, index and
+// type that travel with the payload. The budget only has to be approximately
+// right: it exists to keep messages far from a hard limit, not to predict
+// their encoded size exactly.
+const entryOverheadBytes = 32
+
+// limitEntries returns the longest prefix of entries that fits in budget.
+//
+// It always returns at least one entry. A single entry larger than the whole
+// budget still has to be sent, because the alternative is a follower that can
+// never be given it and therefore never catches up. Refusing to send it would
+// turn a large write into a permanently stuck replica.
+func limitEntries(entries []Entry, budget int) []Entry {
+	total := 0
+	for i, e := range entries {
+		size := len(e.Data) + entryOverheadBytes
+		if i > 0 && total+size > budget {
+			return entries[:i]
+		}
+		total += size
+	}
+	return entries
+}
+
 // Config describes one node's participation in a cluster. Every field except
 // Rand is required.
 type Config struct {
@@ -46,6 +78,17 @@ type Config struct {
 	// heartbeats. It must be well below ElectionTick, or followers will time
 	// out under a perfectly healthy leader.
 	HeartbeatTick int
+
+	// MaxAppendBytes bounds the entry payload the leader puts in one
+	// AppendEntries message. Zero means the default.
+	//
+	// Without a bound, a follower that has fallen behind is sent every entry
+	// it is missing in a single message, and how far behind a follower can
+	// fall has no limit at all. Any transport imposes a maximum message
+	// size, so past some backlog the message is simply undeliverable and the
+	// follower never recovers. Sending the backlog in pieces costs a few
+	// extra round trips and removes the cliff.
+	MaxAppendBytes int
 
 	// PreVote makes a node ask whether an election would be won before
 	// starting one, rather than raising its term and finding out (§9.6).
@@ -136,6 +179,16 @@ type progress struct {
 	// is conservative — only a successful append moves it. Commit decisions
 	// are made from match values, never from next.
 	match Index
+	// heldBack records that the last append to this follower was cut short
+	// by the size budget, so entries are waiting that were deliberately not
+	// sent.
+	//
+	// It is the difference between a follower that is catching up and one
+	// that is merely a batch behind a busy leader. The first should be sent
+	// the rest immediately; the second is already going to receive it with
+	// the next proposal, and chasing it produces an extra message per
+	// response for no gain.
+	heldBack bool
 }
 
 // Node is a single Raft peer, and it is a pure state machine: it never blocks,
@@ -211,8 +264,11 @@ type Node struct {
 	electionTick     int
 
 	// preVote enables the pre-vote round described on Config.PreVote.
-	preVote       bool
-	heartbeatTick int
+	preVote bool
+
+	// maxAppendBytes bounds one AppendEntries payload; see Config.
+	maxAppendBytes int
+	heartbeatTick  int
 	// randomizedElectionTimeout is redrawn on every state change, so a
 	// repeated split vote does not repeat the same timing.
 	randomizedElectionTimeout int
@@ -246,28 +302,34 @@ func NewNode(cfg Config) (*Node, error) {
 	// A restored configuration wins over the static peer list: it reflects
 	// every membership change that committed before the snapshot was taken,
 	// including ones whose log entries have since been compacted away.
+	maxAppendBytes := cfg.MaxAppendBytes
+	if maxAppendBytes <= 0 {
+		maxAppendBytes = DefaultMaxAppendBytes
+	}
+
 	base := newConfig(cfg.Peers)
 	if cfg.InitialConfState != nil && !cfg.InitialConfState.IsEmpty() {
 		base = configFromState(*cfg.InitialConfState)
 	}
 
 	n := &Node{
-		id:            cfg.ID,
-		conf:          base.clone(),
-		baseConf:      base,
-		state:         Follower,
-		term:          hs.Term,
-		vote:          hs.VotedFor,
-		leader:        None,
-		log:           newRaftLog(cfg.Storage),
-		votes:         make(map[NodeID]bool),
-		progress:      make(map[NodeID]*progress),
-		readOnly:      newReadOnly(),
-		electionTick:  cfg.ElectionTick,
-		heartbeatTick: cfg.HeartbeatTick,
-		preVote:       cfg.PreVote,
-		rand:          rng,
-		storage:       cfg.Storage,
+		id:             cfg.ID,
+		conf:           base.clone(),
+		baseConf:       base,
+		state:          Follower,
+		term:           hs.Term,
+		vote:           hs.VotedFor,
+		leader:         None,
+		log:            newRaftLog(cfg.Storage),
+		votes:          make(map[NodeID]bool),
+		progress:       make(map[NodeID]*progress),
+		readOnly:       newReadOnly(),
+		electionTick:   cfg.ElectionTick,
+		heartbeatTick:  cfg.HeartbeatTick,
+		preVote:        cfg.PreVote,
+		maxAppendBytes: maxAppendBytes,
+		rand:           rng,
+		storage:        cfg.Storage,
 	}
 	n.resetElectionTimeout()
 
