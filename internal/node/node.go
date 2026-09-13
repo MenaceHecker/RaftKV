@@ -89,6 +89,13 @@ type Config struct {
 	// optional; a nil Recorder discards everything.
 	Metrics Recorder
 
+	// MaxCommittedEntries caps how many committed entries are applied in one
+	// pass of the loop. Zero means the core's default.
+	//
+	// Applying shares a goroutine with ticking and with reading messages, so
+	// an unbounded batch takes the node off the air for as long as it runs.
+	MaxCommittedEntries int
+
 	// MaxProposalBatch caps how many client writes are grouped into one
 	// durable log write. Zero means the default.
 	//
@@ -239,6 +246,15 @@ type Node struct {
 	// snapshotsReceived counts images installed from a leader.
 	snapshotsReceived uint64
 
+	// applyc wakes the loop when a bounded apply batch left more behind.
+	//
+	// Applying is capped so the loop can tick and read messages between
+	// batches, but the remainder still has to be picked up promptly. Without
+	// this the loop would sit in its select until some unrelated event
+	// arrived, and a replay would proceed one batch per tick instead of as
+	// fast as the state machine can take it.
+	applyc chan struct{}
+
 	// proposalBatch is reused across iterations so grouping writes does not
 	// allocate on every pass of the loop.
 	proposalBatch []proposalRequest
@@ -305,11 +321,12 @@ func Start(cfg Config) (*Node, error) {
 	}
 
 	rn, err := raft.NewNode(raft.Config{
-		ID:               cfg.ID,
-		Peers:            cfg.Peers,
-		InitialConfState: initialConf,
-		ElectionTick:     cfg.ElectionTick,
-		HeartbeatTick:    cfg.HeartbeatTick,
+		ID:                  cfg.ID,
+		Peers:               cfg.Peers,
+		InitialConfState:    initialConf,
+		ElectionTick:        cfg.ElectionTick,
+		HeartbeatTick:       cfg.HeartbeatTick,
+		MaxCommittedEntries: cfg.MaxCommittedEntries,
 		// Always on. A restarting node that deposes a healthy leader costs
 		// real availability, and there is no workload for which paying an
 		// extra round trip before an election is the worse trade.
@@ -332,6 +349,7 @@ func Start(cfg Config) (*Node, error) {
 		statusc:      make(chan chan Status),
 		compactc:     make(chan chan error),
 		confc:        make(chan confChangeRequest),
+		applyc:       make(chan struct{}, 1),
 		stopc:        make(chan struct{}),
 		donec:        make(chan struct{}),
 		pending:      make(map[raft.Index]*proposal),
@@ -507,6 +525,12 @@ func (n *Node) run() {
 
 		case req := <-n.confc:
 			n.handleConfChange(req)
+
+		case <-n.applyc:
+			// More committed entries are waiting from a capped batch. This
+			// case carries no work of its own; it exists so the loop comes
+			// back round rather than blocking, while still letting the
+			// ticker and incoming messages compete for the same select.
 		}
 
 		n.processReady()
@@ -679,6 +703,16 @@ func (n *Node) processReady() {
 	}
 
 	n.maybeSnapshot()
+
+	// A capped batch can leave committed entries behind. Ask the loop to come
+	// straight back for them. The channel holds one token, so a burst of
+	// batches cannot pile up.
+	if n.raft.HasUnapplied() {
+		select {
+		case n.applyc <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // applyEntry hands one committed entry to the state machine and completes the
