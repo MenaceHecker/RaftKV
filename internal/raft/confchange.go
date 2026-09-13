@@ -68,14 +68,35 @@ func (n *Node) ProposeConfChange(cc ConfChange) error {
 		return err
 	}
 
-	n.progress[n.id].match = n.log.lastIndex()
-	n.progress[n.id].next = n.log.lastIndex() + 1
+	// The leader may have just written itself out of the configuration, in
+	// which case adoptConfig has already dropped its progress entry. It is
+	// no longer replicating to itself in any meaningful sense, so there is
+	// nothing to update.
+	if pr := n.progress[n.id]; pr != nil {
+		pr.match = n.log.lastIndex()
+		pr.next = n.log.lastIndex() + 1
+	}
 
 	if n.isSoleVoter() {
 		n.maybeCommit()
 		return nil
 	}
 	n.broadcastAppend()
+
+	// A leader that is no longer a member has to stop leading. It cannot
+	// count itself towards a majority any more, so it could not commit
+	// anything by itself, and a cluster that has removed a node should not
+	// still be taking its orders.
+	//
+	// Standing down after the broadcast rather than before it means the entry
+	// recording the change goes out first. If it fails to reach anyone the
+	// cluster simply falls back to the joint configuration, which still
+	// contains this node, and whoever is elected next finishes the
+	// transition. That is exactly the abandonment joint consensus is built to
+	// tolerate.
+	if !n.conf.hasVoter(n.id) {
+		return n.becomeFollower(n.term, None)
+	}
 	return nil
 }
 
