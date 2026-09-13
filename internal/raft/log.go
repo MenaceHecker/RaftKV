@@ -264,9 +264,18 @@ func (l *raftLog) appliedTo(i Index) {
 
 // nextCommitted returns the committed entries not yet applied, which is what a
 // Ready hands to the state machine.
-func (l *raftLog) nextCommitted() ([]Entry, error) {
+func (l *raftLog) nextCommitted(max int) ([]Entry, error) {
 	if l.committed <= l.applied {
 		return nil, nil
 	}
-	return l.entries(l.applied+1, l.committed+1)
+	hi := l.committed + 1
+	if max > 0 && hi-l.applied-1 > Index(max) {
+		hi = l.applied + 1 + Index(max)
+	}
+	return l.entries(l.applied+1, hi)
 }
+
+// hasUnapplied reports whether anything committed is still waiting to be
+// applied. The caller uses it to know that another batch is ready without
+// having to build one.
+func (l *raftLog) hasUnapplied() bool { return l.committed > l.applied }
