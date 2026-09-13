@@ -1,6 +1,7 @@
 package chaos
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -494,6 +495,223 @@ func scenarioStaleLeaderRead() Scenario {
 	}
 }
 
+// Membership scenarios.
+//
+// Joint consensus is the most delicate part of the algorithm after the commit
+// rules, and until now it was only ever exercised by deterministic unit tests
+// on a healthy cluster. That is the wrong place to be confident: a
+// configuration change is a window in which two different ideas of "a
+// majority" are live at once, and the whole point of requiring both is to
+// survive a fault landing inside that window. These put faults there.
+
+// settleMembership ticks until every live node agrees on the membership.
+func settleMembership(c *Cluster, maxTicks int) error {
+	for range maxTicks {
+		if c.MembershipSettled() {
+			return nil
+		}
+		if err := c.Tick(); err != nil {
+			return err
+		}
+	}
+	return errors.New("membership did not settle")
+}
+
+func scenarioNodeJoinsUnderLoad() Scenario {
+	return Scenario{
+		Name: "a node joins while clients keep writing",
+		Hypothesis: "admitting a member must not lose or reorder writes; the new " +
+			"node starts with no data and must not be able to serve or vote its " +
+			"way into contradicting what the cluster already agreed",
+		Nodes: 3,
+
+		Run: func(c *Cluster) error {
+			if _, err := SettleLeader(c, 300); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "before", 2, 400); err != nil {
+				return err
+			}
+
+			if err := c.AddNode(4); err != nil {
+				return err
+			}
+			// Keep writing across the change rather than around it.
+			if err := Workload(c, 3, "x", "during", 2, 500); err != nil {
+				return err
+			}
+			if err := settleMembership(c, 400); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "after", 2, 500); err != nil {
+				return err
+			}
+			return c.TickN(300)
+		},
+	}
+}
+
+func scenarioLeaderRemovesItself() Scenario {
+	return Scenario{
+		Name: "the leader removes itself from the configuration",
+		Hypothesis: "a leader that is no longer a member must give up leadership " +
+			"rather than keep committing on behalf of a cluster it has left",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			leader, err := SettleLeader(c, 300)
+			if err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "before", 2, 400); err != nil {
+				return err
+			}
+
+			if err := c.RemoveNode(leader); err != nil {
+				return err
+			}
+			if err := c.TickN(300); err != nil {
+				return err
+			}
+
+			// The remaining four must carry on without it.
+			if err := Workload(c, 3, "x", "after", 3, 600); err != nil {
+				return err
+			}
+			return c.TickN(300)
+		},
+	}
+}
+
+func scenarioLeaderCrashesMidMembershipChange() Scenario {
+	return Scenario{
+		Name: "leader crashes during a membership change",
+		Hypothesis: "a crash inside the joint window must not split the cluster " +
+			"into two configurations that can each elect a leader; whoever takes " +
+			"over inherits the transition and finishes or abandons it as one",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			leader, err := SettleLeader(c, 300)
+			if err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "before", 2, 400); err != nil {
+				return err
+			}
+
+			if err := c.AddNode(6); err != nil {
+				return err
+			}
+			// Kill the leader almost immediately, while the change is still
+			// working its way through the log. This is the window joint
+			// consensus exists for.
+			if err := c.TickN(2); err != nil {
+				return err
+			}
+			c.Crash(leader)
+
+			if err := c.TickN(400); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "after", 3, 600); err != nil {
+				return err
+			}
+			return c.TickN(400)
+		},
+	}
+}
+
+func scenarioRemovedNodeKeepsRunning() Scenario {
+	return Scenario{
+		Name: "a removed node keeps running and campaigning",
+		Hypothesis: "a node the cluster has forgotten must not be able to win an " +
+			"election or serve a read; it still holds a plausible log and will " +
+			"keep asking",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			leader, err := SettleLeader(c, 300)
+			if err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "before", 2, 400); err != nil {
+				return err
+			}
+
+			victim := OtherThan(c, leader)
+			if err := c.RemoveNode(victim); err != nil {
+				return err
+			}
+			if err := settleMembership(c, 400); err != nil {
+				return err
+			}
+
+			// It is still running, still has the data, and no longer counts.
+			// Let it time out and campaign repeatedly.
+			if err := c.TickN(300); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "after", 3, 600); err != nil {
+				return err
+			}
+
+			// A client with a stale address asks it directly.
+			for range 3 {
+				if _, err := ReadFromAndSettle(c, 9, victim, "x", 40); err != nil {
+					return err
+				}
+			}
+			return c.TickN(300)
+		},
+	}
+}
+
+func scenarioMembershipChangeDuringPartition() Scenario {
+	return Scenario{
+		Name:          "a node joins while the cluster is partitioned",
+		RequireFaults: requirePartitioned,
+		Hypothesis: "a change proposed to a leader that loses its majority must " +
+			"not take effect anywhere; when the partition heals the cluster must " +
+			"agree on one membership, not two",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			leader, err := SettleLeader(c, 300)
+			if err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "before", 2, 400); err != nil {
+				return err
+			}
+
+			// Propose the change, then immediately strand the leader that
+			// proposed it.
+			if err := c.AddNode(7); err != nil {
+				return err
+			}
+			c.Network().Partition([]raft.NodeID{leader}, MajorityWithout(c, leader))
+			if err := c.TickN(200); err != nil {
+				return err
+			}
+
+			// The majority elects someone else and carries on.
+			if err := Workload(c, 3, "x", "split", 3, 600); err != nil {
+				return err
+			}
+
+			c.Network().Heal()
+			if err := c.TickN(400); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "healed", 2, 500); err != nil {
+				return err
+			}
+			return c.TickN(400)
+		},
+	}
+}
+
 // allScenarios is every adversarial scenario, in report order.
 //
 // The individual tests and the report are built from this one list, so the
@@ -510,6 +728,11 @@ func allScenarios() []Scenario {
 		scenarioConcurrentClients(),
 		scenarioIndependentKeys(),
 		scenarioStaleLeaderRead(),
+		scenarioNodeJoinsUnderLoad(),
+		scenarioLeaderRemovesItself(),
+		scenarioLeaderCrashesMidMembershipChange(),
+		scenarioRemovedNodeKeepsRunning(),
+		scenarioMembershipChangeDuringPartition(),
 	}
 }
 
@@ -522,6 +745,26 @@ func allScenarios() []Scenario {
 // stale file.
 func TestScenarioStaleLeaderRead(t *testing.T) {
 	runScenario(t, scenarioStaleLeaderRead())
+}
+
+func TestScenarioNodeJoinsUnderLoad(t *testing.T) {
+	runScenario(t, scenarioNodeJoinsUnderLoad())
+}
+
+func TestScenarioLeaderRemovesItself(t *testing.T) {
+	runScenario(t, scenarioLeaderRemovesItself())
+}
+
+func TestScenarioLeaderCrashesMidMembershipChange(t *testing.T) {
+	runScenario(t, scenarioLeaderCrashesMidMembershipChange())
+}
+
+func TestScenarioRemovedNodeKeepsRunning(t *testing.T) {
+	runScenario(t, scenarioRemovedNodeKeepsRunning())
+}
+
+func TestScenarioMembershipChangeDuringPartition(t *testing.T) {
+	runScenario(t, scenarioMembershipChangeDuringPartition())
 }
 
 func TestChaosReport(t *testing.T) {
