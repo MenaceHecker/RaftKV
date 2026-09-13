@@ -19,6 +19,15 @@ var ErrNotLeader = errors.New("raft: node is not the leader")
 // for entries whose recorded size underestimates their encoded size.
 const DefaultMaxAppendBytes = 1 << 20 // 1 MiB
 
+// DefaultMaxCommittedEntries is how many committed entries one Ready hands
+// back when nothing else is specified.
+//
+// It is a count rather than a byte budget because the cost of applying is
+// dominated by per-entry work rather than by payload size: twenty thousand
+// tiny entries are slow to apply and would fit comfortably inside any
+// sensible byte limit.
+const DefaultMaxCommittedEntries = 1000
+
 // entryOverheadBytes is a rough per-entry allowance for the term, index and
 // type that travel with the payload. The budget only has to be approximately
 // right: it exists to keep messages far from a hard limit, not to predict
@@ -78,6 +87,18 @@ type Config struct {
 	// heartbeats. It must be well below ElectionTick, or followers will time
 	// out under a perfectly healthy leader.
 	HeartbeatTick int
+
+	// MaxCommittedEntries bounds how many committed entries one Ready hands
+	// back for applying. Zero means the default.
+	//
+	// Applying happens on whatever goroutine drives the node, and that is
+	// the same goroutine that ticks the clock and reads incoming messages.
+	// An unbounded batch therefore stops the node doing anything else for as
+	// long as it takes: measured at 478ms for a 20,000 entry replay, which
+	// is half a default election timeout spent unable to send a heartbeat,
+	// answer one, or even notice its own timer. Handing the work back in
+	// pieces lets the loop breathe between them.
+	MaxCommittedEntries int
 
 	// MaxAppendBytes bounds the entry payload the leader puts in one
 	// AppendEntries message. Zero means the default.
@@ -268,7 +289,10 @@ type Node struct {
 
 	// maxAppendBytes bounds one AppendEntries payload; see Config.
 	maxAppendBytes int
-	heartbeatTick  int
+
+	// maxCommittedEntries bounds one Ready's committed batch; see Config.
+	maxCommittedEntries int
+	heartbeatTick       int
 	// randomizedElectionTimeout is redrawn on every state change, so a
 	// repeated split vote does not repeat the same timing.
 	randomizedElectionTimeout int
@@ -307,29 +331,35 @@ func NewNode(cfg Config) (*Node, error) {
 		maxAppendBytes = DefaultMaxAppendBytes
 	}
 
+	maxCommittedEntries := cfg.MaxCommittedEntries
+	if maxCommittedEntries <= 0 {
+		maxCommittedEntries = DefaultMaxCommittedEntries
+	}
+
 	base := newConfig(cfg.Peers)
 	if cfg.InitialConfState != nil && !cfg.InitialConfState.IsEmpty() {
 		base = configFromState(*cfg.InitialConfState)
 	}
 
 	n := &Node{
-		id:             cfg.ID,
-		conf:           base.clone(),
-		baseConf:       base,
-		state:          Follower,
-		term:           hs.Term,
-		vote:           hs.VotedFor,
-		leader:         None,
-		log:            newRaftLog(cfg.Storage),
-		votes:          make(map[NodeID]bool),
-		progress:       make(map[NodeID]*progress),
-		readOnly:       newReadOnly(),
-		electionTick:   cfg.ElectionTick,
-		heartbeatTick:  cfg.HeartbeatTick,
-		preVote:        cfg.PreVote,
-		maxAppendBytes: maxAppendBytes,
-		rand:           rng,
-		storage:        cfg.Storage,
+		id:                  cfg.ID,
+		conf:                base.clone(),
+		baseConf:            base,
+		state:               Follower,
+		term:                hs.Term,
+		vote:                hs.VotedFor,
+		leader:              None,
+		log:                 newRaftLog(cfg.Storage),
+		votes:               make(map[NodeID]bool),
+		progress:            make(map[NodeID]*progress),
+		readOnly:            newReadOnly(),
+		electionTick:        cfg.ElectionTick,
+		heartbeatTick:       cfg.HeartbeatTick,
+		preVote:             cfg.PreVote,
+		maxAppendBytes:      maxAppendBytes,
+		maxCommittedEntries: maxCommittedEntries,
+		rand:                rng,
+		storage:             cfg.Storage,
 	}
 	n.resetElectionTimeout()
 
@@ -436,13 +466,19 @@ func (n *Node) Ready() Ready {
 	n.readStates = nil
 	n.pendingSnapshot = nil
 
-	committed, err := n.log.nextCommitted()
+	committed, err := n.log.nextCommitted(n.maxCommittedEntries)
 	if err != nil {
 		panic(fmt.Sprintf("raft: reading committed entries: %v", err))
 	}
 	rd.CommittedEntries = committed
 	return rd
 }
+
+// HasUnapplied reports whether committed entries are still waiting.
+//
+// A caller that has just applied a bounded batch uses this to know it should
+// come back for more rather than waiting for the next message or tick.
+func (n *Node) HasUnapplied() bool { return n.log.hasUnapplied() }
 
 // Advance reports that the entries from rd have been applied.
 func (n *Node) Advance(rd Ready) {
