@@ -103,6 +103,16 @@ deliver, and sit there forever. Entries now go out in bounded slices.
 Neither showed up in any latency figure. Both showed up immediately in a test
 that used eight megabytes of data instead of a few hundred bytes.
 
+There is a third message-shaped limit that is not a message at all. Committed
+entries are applied on the same goroutine that ticks the clock and reads
+incoming messages, and that batch was unbounded too. A 20,000 entry replay
+applied in a single pass and blocked the loop for 478ms: half a default
+election timeout during which the node cannot send a heartbeat, answer one, or
+notice its own timer. Capping the batch at a thousand entries brings the
+longest single apply to 29ms while leaving total replay time unchanged at
+about 460ms, so the work is the same and the node stays reachable while it
+happens.
+
 Bounding the append has a cost worth recording. The first version followed up
 with the next slice whenever a follower was still behind, which under load is
 almost always, and that cost about 25% of write throughput at 64 clients by

@@ -128,6 +128,12 @@ wrong rather than merely behind.
 Both ends still hold the whole image in memory while this happens, so plan for
 a node's peak memory to exceed its state machine size during a transfer.
 
+Applying is bounded for a related reason. Committed entries reach the state
+machine a thousand at a time, because that work shares a goroutine with
+ticking the clock and reading messages: a node applying a large backlog in one
+pass stops answering heartbeats for as long as it takes, and a long enough
+pass costs it leadership.
+
 Ordinary replication is bounded the same way and for the same reason. A leader
 sends a lagging follower at most a megabyte of entries at a time rather than
 the whole backlog, since a follower can fall arbitrarily far behind and a

@@ -36,6 +36,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never waits for writes that have not arrived.
 
+**Bounded apply batches.** Committed entries are handed to the state machine a bounded number at a time, because applying shares a goroutine with ticking the clock and reading messages, and a node applying a large backlog is a node that has stopped being a cluster member for the duration.
+
 **Bounded replication messages.** A leader sends a lagging follower its backlog in slices rather than in one message, because how far behind a follower can fall has no limit and every transport has a maximum message size.
 
 **Streamed snapshots.** A state machine image is the one message whose size follows the data rather than the protocol, so it travels over its own streaming RPC in chunks instead of as one message that would fail past the receiver's size limit.
@@ -100,6 +102,10 @@ Not a highlight reel. These are real, and they're the reason the test discipline
 **Compaction could delete your vote.** Hard state records live in WAL segments interleaved with log entries, so deleting an old segment could take the most recent vote with it, and a node that forgets its vote can vote twice in one term and elect two leaders. Found while writing the WAL rather than by a test, which is its own kind of luck.
 
 **Three tests that passed while testing nothing.** The §5.4.2 one above, plus three compaction tests that were "passing" while truncating zero segments. My test setup batched appends, so everything landed in one file and nothing ever rolled over.
+
+**A restarting node went off the air for half an election timeout.** Applying committed entries happens on the same goroutine that ticks the clock and reads messages, and the batch was unbounded, so a 20,000 entry replay applied in one go and blocked the loop for 478ms. During that the node could not send a heartbeat, answer one, or even count its own election timer. On a leader with a larger log that is an availability outage, and nothing about it would look like an apply problem.
+
+Two of my attempts to test the fix were worthless and I nearly kept them. The fix has two halves: cap the batch, and come back for the remainder without waiting. The second half only matters when nothing else wakes the loop, and my tests polled the node's status every two milliseconds, which sends on a channel the loop selects on. The test was supplying the very wake-up it was meant to prove unnecessary, and passed identically with the mechanism removed. Reading the applied index once, at the end, tells the real story: 2002 of 2001 entries applied with it, 200 without.
 
 **Ordinary replication had the same 4 MiB cliff, and I only looked because the snapshot bug had just taught me to.** A leader sent a lagging follower every entry it was missing in a single message, with no bound on how many that could be. A node offline for a couple of minutes came back, was sent a message too large to deliver, and sat at commit 0 forever. The fix has a tail: the first version followed up with the next slice whenever a follower was behind, which under load is always, and cost 25% of write throughput. Following up only when the budget actually held entries back recovers it.
 
