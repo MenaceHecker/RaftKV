@@ -23,11 +23,11 @@ election or cold cache is counted.
 
 | Workload | Throughput | mean | p50 | p99 | p99.9 |
 | --- | --- | --- | --- | --- | --- |
-| Write | 521 ops/s | 30.7ms | 28.9ms | 68.1ms | 80.8ms |
-| Read | 7,332 ops/s | 2.2ms | 2.1ms | 3.6ms | 6.6ms |
-| Mixed, 90% read | 1,616 ops/s | 9.9ms | 8.4ms | 28.1ms | 35.4ms |
+| Write | 564 ops/s | 28.3ms | 27.9ms | 47.3ms | 56.9ms |
+| Read | 8,821 ops/s | 1.8ms | 1.8ms | 2.6ms | 2.9ms |
+| Mixed, 90% read | 1,585 ops/s | 10.1ms | 8.9ms | 28.7ms | 35.2ms |
 
-Reads are 14 times faster than writes. That is the shape you want: a
+Reads are 16 times faster than writes. That is the shape you want: a
 linearizable read costs one round trip to a majority to confirm leadership and
 touches no disk at all, while a write has to reach a majority *and* be made
 durable on the way.
@@ -41,13 +41,13 @@ group commit:
 
 | Clients | Before | After | Before p50 | After p50 |
 | --- | --- | --- | --- | --- |
-| 1 | 125 ops/s | 141 ops/s | 8.9ms | 7.1ms |
-| 2 | 166 ops/s | 166 ops/s | 12.0ms | 12.0ms |
-| 4 | 147 ops/s | 184 ops/s | 27.5ms | 21.3ms |
-| 8 | 157 ops/s | 287 ops/s | 50.6ms | 26.5ms |
-| 16 | 157 ops/s | 571 ops/s | 102.5ms | 26.4ms |
-| 32 | 154 ops/s | 1,101 ops/s | 206.6ms | 28.6ms |
-| 64 | 148 ops/s | 2,114 ops/s | 424.3ms | 29.9ms |
+| 1 | 125 ops/s | 151 ops/s | 8.9ms | 6.3ms |
+| 2 | 166 ops/s | 152 ops/s | 12.0ms | 13.0ms |
+| 4 | 147 ops/s | 156 ops/s | 27.5ms | 25.9ms |
+| 8 | 157 ops/s | 321 ops/s | 50.6ms | 24.9ms |
+| 16 | 157 ops/s | 564 ops/s | 102.5ms | 27.9ms |
+| 32 | 154 ops/s | 1,143 ops/s | 206.6ms | 27.1ms |
+| 64 | 148 ops/s | 2,284 ops/s | 424.3ms | 27.5ms |
 
 **Before.** Throughput was flat from 1 client to 64 while latency grew linearly
 with the client count. That is the signature of a fully serialized resource:
@@ -74,14 +74,41 @@ entries per persist call.
 
 The shape of the curve inverts. Throughput scales with concurrency instead of
 staying flat, and latency stays flat instead of growing: at 64 clients it went
-from 424ms to 30ms while throughput went from 148 to 2,114 ops/s, a factor of
-14. Nothing got faster in absolute terms, the fsync still costs 6.8ms. The
+from 424ms to 27ms while throughput went from 148 to 2,284 ops/s, a factor of
+15. Nothing got faster in absolute terms, the fsync still costs 6.8ms. The
 writes simply stopped queueing for a resource they could have shared.
 
 Two details worth keeping in mind. Batching never waits: a batch contains only
 writes that had already arrived, so a single client talking to an idle cluster
 batches one at a time and pays nothing extra. And the batch is capped, by
 default at 64, because the client that starts a batch waits for all of it.
+
+## Message size is its own limit
+
+Throughput and latency are the obvious things to measure, and they miss an
+entire class of failure. Two messages in this system grow with the data rather
+than with the protocol, and both of them worked perfectly until the data was
+large enough that they did not.
+
+A snapshot was the first. It crossed gRPC as a single message, so once a state
+machine passed the receiver's four megabyte default, a follower that needed one
+could never be caught up. It now streams in chunks.
+
+AppendEntries was the second, and worse, because it is the ordinary path rather
+than the recovery path. The leader sent a follower every entry it was missing
+in one message, and how far behind a follower can fall has no bound at all. A
+node offline for a few minutes would come back, be sent a message too large to
+deliver, and sit there forever. Entries now go out in bounded slices.
+
+Neither showed up in any latency figure. Both showed up immediately in a test
+that used eight megabytes of data instead of a few hundred bytes.
+
+Bounding the append has a cost worth recording. The first version followed up
+with the next slice whenever a follower was still behind, which under load is
+almost always, and that cost about 25% of write throughput at 64 clients by
+adding a message per acknowledgement. Following up only when the size budget
+actually held entries back recovers all of it, because a follower that is one
+entry behind a busy leader is about to receive that entry anyway.
 
 ## Five nodes in Docker
 

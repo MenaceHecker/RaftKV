@@ -128,6 +128,13 @@ wrong rather than merely behind.
 Both ends still hold the whole image in memory while this happens, so plan for
 a node's peak memory to exceed its state machine size during a transfer.
 
+Ordinary replication is bounded the same way and for the same reason. A leader
+sends a lagging follower at most a megabyte of entries at a time rather than
+the whole backlog, since a follower can fall arbitrarily far behind and a
+single message carrying all of it would be undeliverable. The remaining slices
+follow each acknowledgement immediately, so catching up runs at network speed
+rather than at one slice per heartbeat.
+
 ## Configuration that matters
 
 | Flag | Default | Notes |

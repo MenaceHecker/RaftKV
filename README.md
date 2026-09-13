@@ -36,6 +36,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never waits for writes that have not arrived.
 
+**Bounded replication messages.** A leader sends a lagging follower its backlog in slices rather than in one message, because how far behind a follower can fall has no limit and every transport has a maximum message size.
+
 **Streamed snapshots.** A state machine image is the one message whose size follows the data rather than the protocol, so it travels over its own streaming RPC in chunks instead of as one message that would fail past the receiver's size limit.
 
 **Pre-vote.** A node asks whether an election would be won before starting one (§9.6). Without it, a node that restarts or rejoins deposes a perfectly healthy leader simply by campaigning, because its vote request carries a higher term and everyone must step down to it.
@@ -98,6 +100,8 @@ Not a highlight reel. These are real, and they're the reason the test discipline
 **Compaction could delete your vote.** Hard state records live in WAL segments interleaved with log entries, so deleting an old segment could take the most recent vote with it, and a node that forgets its vote can vote twice in one term and elect two leaders. Found while writing the WAL rather than by a test, which is its own kind of luck.
 
 **Three tests that passed while testing nothing.** The §5.4.2 one above, plus three compaction tests that were "passing" while truncating zero segments. My test setup batched appends, so everything landed in one file and nothing ever rolled over.
+
+**Ordinary replication had the same 4 MiB cliff, and I only looked because the snapshot bug had just taught me to.** A leader sent a lagging follower every entry it was missing in a single message, with no bound on how many that could be. A node offline for a couple of minutes came back, was sent a message too large to deliver, and sat at commit 0 forever. The fix has a tail: the first version followed up with the next slice whenever a follower was behind, which under load is always, and cost 25% of write throughput. Following up only when the budget actually held entries back recovers it.
 
 **A cluster with more than 4 MiB of data could never catch up a lagging follower.** Snapshots went over gRPC as a single message, and gRPC's default receive limit is 4 MiB. Every test passed, because every test had a state machine measured in kilobytes. The symptom was about as unhelpful as symptoms get: the follower sat at commit 0 forever while the leader moved on, with nothing anywhere saying "too big". I found it by writing the same snapshot-transfer test again with 8 MiB of data instead of a few hundred bytes. The README had also claimed snapshots were capped at 64 MiB "with a clear error", which was wrong twice over: that number bounds individual length prefixes inside the encoder, not the image, and the real failure was silent.
 
@@ -208,9 +212,9 @@ Three nodes as local processes on an M3 Pro, 16 clients:
 
 | Workload | Throughput | p50 | p99 |
 | --- | --- | --- | --- |
-| Write | 521 ops/s | 28.9ms | 68.1ms |
-| Read | 7,332 ops/s | 2.1ms | 3.6ms |
-| Mixed, 90% read | 1,616 ops/s | 8.4ms | 28.1ms |
+| Write | 564 ops/s | 27.9ms | 47.3ms |
+| Read | 8,821 ops/s | 1.8ms | 2.6ms |
+| Mixed, 90% read | 1,585 ops/s | 8.9ms | 28.7ms |
 
 Five nodes in Docker, where an fsync costs 1.10ms instead of 6.8ms:
 
@@ -225,7 +229,7 @@ Losing two nodes of five costs throughput and nothing else. Losing a third stops
 
 The benchmarks also found that a single pod restart cost 31 leadership changes and drove the term from 3 to 21. That was the missing pre-vote round, and with it a node can now be restarted repeatedly without the cluster noticing: across three full restart cycles the term, the leader, and the leadership-change count all stayed exactly where they were.
 
-The benchmarks earned their keep by finding that every write was getting its own fsync, so write throughput was flat at ~150 ops/s from 1 client to 64 no matter what. Batching the writes that are already waiting into one durable append took 64 clients from 148 ops/s at 424ms to 2,114 ops/s at 30ms, a factor of 14 on both. Every test passed before that fix and every chaos scenario held, which is the argument for measuring a system rather than reasoning about it.
+The benchmarks earned their keep by finding that every write was getting its own fsync, so write throughput was flat at ~150 ops/s from 1 client to 64 no matter what. Batching the writes that are already waiting into one durable append took 64 clients from 148 ops/s at 424ms to 2,284 ops/s at 27ms, a factor of 15 on both. Every test passed before that fix and every chaos scenario held, which is the argument for measuring a system rather than reasoning about it.
 
 ---
 
