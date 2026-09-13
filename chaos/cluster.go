@@ -1,8 +1,10 @@
 package chaos
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"sort"
 
 	"github.com/MenaceHecker/raftkv/internal/raft"
@@ -196,6 +198,10 @@ func (c *Cluster) start(id raft.NodeID) error {
 		ElectionTick:  c.cfg.ElectionTick,
 		HeartbeatTick: c.cfg.HeartbeatTick,
 		Storage:       c.storages[id],
+		// The driver always enables pre-vote, so the chaos suite must too.
+		// Exercising a configuration that never ships would leave the one
+		// that does untested by the only suite built to break it.
+		PreVote: true,
 		// Each node draws from its own source so their election timeouts
 		// differ the way real clocks would, while staying derived from the run
 		// seed so the whole thing remains reproducible.
@@ -212,6 +218,120 @@ func (c *Cluster) start(id raft.NodeID) error {
 	c.machines[id] = statemachine.New()
 	c.down[id] = false
 	return nil
+}
+
+// AddNode starts a new node and proposes its admission to the cluster.
+//
+// The joining node is given the membership it is joining, which is what a real
+// node gets from its peer list. It cannot take leadership from under the
+// cluster while the change is in flight: the existing majority has not adopted
+// this configuration yet, so the newcomer cannot assemble a majority of the
+// one that counts, and pre-vote stops it disturbing the leader by asking.
+//
+// Admission itself goes through the log like any other entry, so this returns
+// once the change has been proposed, not once it has been agreed. A scenario
+// ticks until the membership settles.
+func (c *Cluster) AddNode(id raft.NodeID) error {
+	if _, exists := c.storages[id]; exists {
+		return fmt.Errorf("chaos: node %d already exists", id)
+	}
+
+	leader, ok, err := c.Leader()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("chaos: no leader to propose a membership change to")
+	}
+
+	c.storages[id] = raft.NewMemoryStorage()
+	c.ids = append(c.ids, id)
+	slices.Sort(c.ids)
+	if err := c.start(id); err != nil {
+		return err
+	}
+
+	return c.nodes[leader].ProposeConfChange(raft.ConfChange{
+		Type:   raft.ConfChangeAddNode,
+		NodeID: id,
+	})
+}
+
+// RemoveNode proposes that a node leave the cluster.
+//
+// The node keeps running afterwards. That is deliberate: a decommissioned
+// process does not always stop promptly, and one that keeps campaigning
+// against a cluster that has forgotten it is exactly the sort of thing worth
+// pointing a chaos suite at.
+func (c *Cluster) RemoveNode(id raft.NodeID) error {
+	leader, ok, err := c.Leader()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("chaos: no leader to propose a membership change to")
+	}
+	if leader == id {
+		// Removing the leader is legal and interesting, but the proposal
+		// still has to come from it.
+		_ = leader
+	}
+
+	return c.nodes[leader].ProposeConfChange(raft.ConfChange{
+		Type:   raft.ConfChangeRemoveNode,
+		NodeID: id,
+	})
+}
+
+// Members returns one node's view of the cluster membership.
+func (c *Cluster) Members(id raft.NodeID) []raft.NodeID {
+	n, ok := c.nodes[id]
+	if !ok || c.down[id] {
+		return nil
+	}
+	return n.Members()
+}
+
+// InJoint reports whether a node is still in the joint phase of a membership
+// change, which is the window where both configurations must agree.
+func (c *Cluster) InJoint(id raft.NodeID) bool {
+	n, ok := c.nodes[id]
+	if !ok || c.down[id] {
+		return false
+	}
+	return n.InJointConfiguration()
+}
+
+// MembershipSettled reports whether every live node agrees on the membership
+// and none is mid-transition.
+//
+// Agreement is the property that matters: a cluster where two nodes hold
+// different ideas of who may vote can elect two leaders, one per view.
+func (c *Cluster) MembershipSettled() bool {
+	// Only current members have to agree. A removed node stops being
+	// replicated to, so it is never told about the configuration that
+	// removed it and may sit on the joint one forever. That is correct: the
+	// cluster has no obligation to keep informing a node it has dropped.
+	members := c.currentMembers()
+
+	var reference []raft.NodeID
+	for _, id := range c.ids {
+		if c.down[id] || !members[id] {
+			continue
+		}
+		if c.InJoint(id) {
+			return false
+		}
+		members := c.Members(id)
+		if reference == nil {
+			reference = members
+			continue
+		}
+		if !slices.Equal(members, reference) {
+			return false
+		}
+	}
+	return true
 }
 
 // Network exposes the network, so a scenario can partition, heal, or change
@@ -682,8 +802,15 @@ func (c *Cluster) Converged() (bool, error) {
 	var reference []byte
 	var refID raft.NodeID
 
+	// Only current members are compared. A node the cluster has removed is
+	// no longer sent anything, so its state machine falls behind by design,
+	// and holding it to the same standard as a member would report every
+	// successful removal as a divergence. It is still running, and still
+	// wrong to serve from, which is what the scenario checks separately.
+	members := c.currentMembers()
+
 	for _, id := range c.ids {
-		if c.down[id] {
+		if c.down[id] || !members[id] {
 			continue
 		}
 		snap, err := c.machines[id].Snapshot()
@@ -700,6 +827,43 @@ func (c *Cluster) Converged() (bool, error) {
 		_ = refID
 	}
 	return true, nil
+}
+
+// currentMembers returns the membership as the leader sees it.
+//
+// The leader is asked because it is the only node guaranteed to hold the
+// current configuration. A removed node is never told about the change that
+// removed it, so it goes on believing it is a member indefinitely, and asking
+// any self-described member would let exactly the node that has been dropped
+// answer with the configuration it was dropped from.
+func (c *Cluster) currentMembers() map[raft.NodeID]bool {
+	if leader, ok, err := c.Leader(); err == nil && ok {
+		return memberSet(c.Members(leader))
+	}
+
+	// No leader right now, which happens mid-election. Any node that still
+	// counts itself a member is a better guess than nothing.
+	for _, id := range c.ids {
+		if c.down[id] {
+			continue
+		}
+		members := c.Members(id)
+		if !slices.Contains(members, id) {
+			continue
+		}
+		return memberSet(members)
+	}
+
+	return memberSet(c.ids)
+}
+
+// memberSet turns a member list into a lookup set.
+func memberSet(ids []raft.NodeID) map[raft.NodeID]bool {
+	set := make(map[raft.NodeID]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
 }
 
 // writeCommand encodes a state machine write, for tests that need to inject
