@@ -102,6 +102,13 @@ func (n *Node) sendAppend(to NodeID) {
 		return
 	}
 
+	// Send at most a bounded amount at a time. A follower far behind gets its
+	// backlog over several rounds rather than in one message no transport
+	// would accept.
+	limited := limitEntries(entries, n.maxAppendBytes)
+	pr.heldBack = len(limited) < len(entries)
+	entries = limited
+
 	n.send(Message{
 		Type:         MsgAppendRequest,
 		To:           to,
@@ -214,8 +221,20 @@ func (n *Node) handleAppendResponse(m Message) error {
 
 		// Tell the followers about the new commit index now rather than
 		// waiting for the next heartbeat, so they can apply without that
-		// extra delay.
+		// extra delay. This also carries the next slice of the backlog to
+		// anyone still catching up.
 		n.broadcastAppend()
+	} else if pr.heldBack && pr.next <= n.log.lastIndex() {
+		// The last append to this follower was cut short by the budget, so
+		// it is working through a backlog. Send the next slice now rather
+		// than at the next heartbeat, which would cost one heartbeat
+		// interval per slice and turn a brief absence into a long recovery.
+		//
+		// The heldBack condition is what keeps this from firing constantly.
+		// Under load a follower is almost always an entry or two behind, and
+		// chasing that costs an extra message per response while the next
+		// proposal was about to carry the entries anyway.
+		n.sendAppend(m.From)
 	}
 	return nil
 }
