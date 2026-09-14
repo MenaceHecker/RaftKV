@@ -276,26 +276,43 @@ func TestRetriedWriteIsDeduplicatedThroughTheAPI(t *testing.T) {
 	defer cancel()
 
 	kv := c.kv(leader.Status().ID)
-	put := func(seq uint64, value string) {
+	put := func(client, seq uint64, key, value string) {
 		t.Helper()
 		if _, err := kv.Put(ctx, &raftkvv1.PutRequest{
-			Client: &raftkvv1.ClientRequest{ClientId: 7, Sequence: seq},
-			Key:    "x", Value: []byte(value),
+			Client: &raftkvv1.ClientRequest{ClientId: client, Sequence: seq},
+			Key:    key, Value: []byte(value),
 		}); err != nil {
-			t.Fatalf("Put seq %d: %v", seq, err)
+			t.Fatalf("Put client %d seq %d: %v", client, seq, err)
 		}
 	}
-
-	put(1, "first")
-	put(2, "second")
-	put(1, "first") // the delayed retry
-
-	got, err := kv.Get(ctx, &raftkvv1.GetRequest{Key: "x"})
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+	read := func(key string) string {
+		t.Helper()
+		got, err := kv.Get(ctx, &raftkvv1.GetRequest{Key: key})
+		if err != nil {
+			t.Fatalf("Get %s: %v", key, err)
+		}
+		return string(got.GetValue())
 	}
-	if string(got.GetValue()) != "second" {
-		t.Fatalf("x = %q after a stale retry, want second", got.GetValue())
+
+	// A retry of a request the same client has already superseded.
+	put(7, 1, "x", "first")
+	put(7, 2, "x", "second")
+	put(7, 1, "x", "first") // the delayed retry
+
+	if got := read("x"); got != "second" {
+		t.Fatalf("x = %q after a stale retry, want second", got)
+	}
+
+	// And a retry of the client's most recent request, which is what a
+	// timeout actually produces. Another client writes in between so the
+	// duplicate is observable rather than idempotent; without that, writing
+	// the same value twice looks identical to writing it once.
+	put(7, 3, "y", "mine")
+	put(8, 1, "y", "somebody else")
+	put(7, 3, "y", "mine") // the same request again
+
+	if got := read("y"); got != "somebody else" {
+		t.Fatalf("y = %q after a client resent its latest write, want somebody else", got)
 	}
 }
 

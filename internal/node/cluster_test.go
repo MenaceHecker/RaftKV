@@ -440,12 +440,30 @@ func TestStaleRetryIsDeduplicatedThroughTheFullStack(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 
+	// A retry of a request the same client has already superseded.
 	mustPut(t, leader, 7, 1, "x", "first")
 	mustPut(t, leader, 7, 2, "x", "second")
 	mustPut(t, leader, 7, 1, "x", "first") // the delayed retry
 
 	if got := mustGet(t, leader, "x"); got != "second" {
 		t.Fatalf("x = %q after a stale retry, want second", got)
+	}
+
+	// And a retry of the client's most recent request, which is the case a
+	// timeout actually produces: the client sends something, hears nothing,
+	// and sends the same thing again. Another client writes in between, so a
+	// duplicate is visible rather than idempotent.
+	//
+	// Checking only the superseded case above leaves this one uncovered, and
+	// the two fail differently: a dedup rule that compares sequence numbers
+	// with the wrong strictness still rejects a superseded retry and lets
+	// this one straight through.
+	mustPut(t, leader, 7, 3, "y", "mine")
+	mustPut(t, leader, 8, 1, "y", "somebody else")
+	mustPut(t, leader, 7, 3, "y", "mine") // the same request again
+
+	if got := mustGet(t, leader, "y"); got != "somebody else" {
+		t.Fatalf("y = %q after a client resent its latest write, want somebody else", got)
 	}
 }
 
