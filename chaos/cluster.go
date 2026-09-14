@@ -3,7 +3,9 @@ package chaos
 import (
 	"errors"
 	"fmt"
+	"github.com/MenaceHecker/raftkv/internal/storage"
 	"math/rand"
+	"path/filepath"
 	"slices"
 	"sort"
 
@@ -112,6 +114,20 @@ type Op struct {
 	seq      uint64
 }
 
+// nodeStorage is a node's durable state, as the harness uses it.
+//
+// Both implementations of it are real: the in-memory one keeps runs fast and
+// hermetic, and the on-disk one is the same write-ahead log the server ships
+// with. Running the scenarios against the second is what puts the recovery
+// path, the record framing, segment rotation and snapshot files, under the
+// same adversarial crash sequences as everything else. Until it existed, a
+// node in the chaos suite "crashed" by discarding a map, which cannot
+// misparse a record or lose a segment.
+type nodeStorage interface {
+	raft.Storage
+	CreateSnapshot(index raft.Index, data []byte, conf raft.ConfState) error
+}
+
 // Config describes a chaos cluster.
 type Config struct {
 	// Nodes is how many members the cluster has.
@@ -124,6 +140,18 @@ type Config struct {
 	// ElectionTick and HeartbeatTick are in simulated ticks.
 	ElectionTick  int
 	HeartbeatTick int
+
+	// DataDir, when set, gives every node a real write-ahead log under it
+	// instead of an in-memory one. A crash then closes real files and a
+	// restart recovers from them, which is the path a deployed node takes
+	// and the one the in-memory harness cannot exercise at all.
+	DataDir string
+
+	// Sync selects the durability policy when DataDir is set. The zero value
+	// fsyncs every write, which is correct and slow; scenarios that run
+	// thousands of appends usually do not need it, since what is being tested
+	// is the recovery path rather than power loss.
+	Sync storage.SyncPolicy
 }
 
 func (c *Config) applyDefaults() {
@@ -151,7 +179,7 @@ type Cluster struct {
 	// storages outlive a crash. They stand in for the write-ahead log: a
 	// crashed node loses its in-memory state and rebuilds from here, which is
 	// exactly what a real restart does.
-	storages map[raft.NodeID]*raft.MemoryStorage
+	storages map[raft.NodeID]nodeStorage
 
 	// down records which nodes are crashed. A crashed node neither ticks nor
 	// receives, and anything already on its way to it is discarded.
@@ -185,7 +213,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		net:      net,
 		nodes:    make(map[raft.NodeID]*raft.Node, cfg.Nodes),
 		machines: make(map[raft.NodeID]*statemachine.KV, cfg.Nodes),
-		storages: make(map[raft.NodeID]*raft.MemoryStorage, cfg.Nodes),
+		storages: make(map[raft.NodeID]nodeStorage, cfg.Nodes),
 		down:     make(map[raft.NodeID]bool, cfg.Nodes),
 
 		snapshotsInstalled: make(map[raft.NodeID]int, cfg.Nodes),
@@ -195,12 +223,46 @@ func NewCluster(cfg Config) (*Cluster, error) {
 	}
 
 	for _, id := range c.ids {
-		c.storages[id] = raft.NewMemoryStorage()
+		st, err := c.openStorage(id)
+		if err != nil {
+			return nil, err
+		}
+		c.storages[id] = st
 		if err := c.start(id); err != nil {
 			return nil, err
 		}
 	}
 	return c, nil
+}
+
+// openStorage opens one node's durable state, creating it if this is the
+// first time or recovering it if the node has been here before.
+func (c *Cluster) openStorage(id raft.NodeID) (nodeStorage, error) {
+	if c.cfg.DataDir == "" {
+		return raft.NewMemoryStorage(), nil
+	}
+
+	dir := filepath.Join(c.cfg.DataDir, fmt.Sprintf("node-%d", id))
+	st, _, err := storage.OpenDiskStorage(storage.DiskConfig{
+		Dir:  dir,
+		Sync: c.cfg.Sync,
+		// A small segment so scenarios of a few hundred entries still roll
+		// over several times. Rotation and the recovery that has to stitch
+		// segments back together are the interesting part, and a default
+		// sized segment would never fill.
+		SegmentSize: 16 << 10,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("chaos: opening storage for node %d: %w", id, err)
+	}
+	return st, nil
+}
+
+// closeStorage releases a node's files, which is what its process dying does.
+func (c *Cluster) closeStorage(id raft.NodeID) {
+	if d, ok := c.storages[id].(*storage.DiskStorage); ok {
+		d.Close()
+	}
 }
 
 // start builds a node over its existing storage. It is used both for the
@@ -336,7 +398,11 @@ func (c *Cluster) AddNode(id raft.NodeID) error {
 		return errors.New("chaos: no leader to propose a membership change to")
 	}
 
-	c.storages[id] = raft.NewMemoryStorage()
+	st, err := c.openStorage(id)
+	if err != nil {
+		return err
+	}
+	c.storages[id] = st
 	c.ids = append(c.ids, id)
 	slices.Sort(c.ids)
 	if err := c.start(id); err != nil {
@@ -540,6 +606,10 @@ func (c *Cluster) Crash(id raft.NodeID) {
 	c.down[id] = true
 	delete(c.nodes, id)
 	delete(c.machines, id)
+	// A dying process releases its file handles. Reopening on restart is
+	// what forces recovery to read back what was actually written rather
+	// than whatever happened to be in memory.
+	c.closeStorage(id)
 	c.net.DropAllInFlight(id)
 
 	// Anything this node was waiting on will never be answered by it. The
@@ -568,6 +638,12 @@ func (c *Cluster) Restart(id raft.NodeID) error {
 	// one catches up from a log that no longer exists. That masked the
 	// snapshot path entirely, since the follower never needed an image.
 	c.net.DropAllInFlight(id)
+
+	st, err := c.openStorage(id)
+	if err != nil {
+		return err
+	}
+	c.storages[id] = st
 
 	return c.start(id)
 }
