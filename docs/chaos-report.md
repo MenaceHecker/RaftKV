@@ -19,7 +19,7 @@ works whether or not each one took effect.
 
 ## Summary
 
-19 of 19 scenarios held across all seeds.
+21 of 21 scenarios held across all seeds.
 
 | Scenario | Seeds | Result |
 |---|---|---|
@@ -42,6 +42,8 @@ works whether or not each one took effect.
 | snapshot transfer under sustained loss and delay | 5 | pass |
 | a node joins a cluster that has already compacted | 5 | pass |
 | a snapshot is needed while leadership keeps moving | 5 | pass |
+| a client resends a write it never got an answer to | 5 | pass |
+| resent writes while leadership keeps moving | 5 | pass |
 
 ## Detail
 
@@ -233,5 +235,25 @@ a snapshot is needed while leadership keeps moving
   seed 3    PASS             ticks=1181  ops=20/0/0 (ok/failed/unknown) msgs=8856 dropped=8 partitioned=0 dup=0 delayed=0
   seed 5    PASS             ticks=1179  ops=20/0/0 (ok/failed/unknown) msgs=8893 dropped=12 partitioned=0 dup=0 delayed=0
   seed 8    PASS             ticks=1179  ops=20/0/0 (ok/failed/unknown) msgs=8873 dropped=8 partitioned=0 dup=0 delayed=0
+```
+
+```
+a client resends a write it never got an answer to
+  hypothesis: a resent write must be recognised as the same request; applying it a second time would discard whatever was written in between and leave the store in a state no ordering of these operations explains
+  seed 1    PASS             ticks=953   ops=12/0/0 (ok/failed/unknown) msgs=3874 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=950   ops=12/0/0 (ok/failed/unknown) msgs=3874 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=956   ops=12/0/0 (ok/failed/unknown) msgs=3882 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=950   ops=12/0/0 (ok/failed/unknown) msgs=3882 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=950   ops=12/0/0 (ok/failed/unknown) msgs=3882 dropped=0 partitioned=0 dup=0 delayed=0
+```
+
+```
+resent writes while leadership keeps moving
+  hypothesis: deduplication lives in the state machine, so it must hold when the retry is accepted by a different leader than the original and neither of them has seen the other's acknowledgement
+  seed 1    PASS             ticks=2401  ops=12/0/0 (ok/failed/unknown) msgs=17806 dropped=19 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=2400  ops=12/0/0 (ok/failed/unknown) msgs=17842 dropped=19 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=2402  ops=12/0/0 (ok/failed/unknown) msgs=17847 dropped=19 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=2400  ops=12/0/0 (ok/failed/unknown) msgs=17863 dropped=19 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=2400  ops=12/0/0 (ok/failed/unknown) msgs=17864 dropped=19 partitioned=0 dup=0 delayed=0
 ```
 
