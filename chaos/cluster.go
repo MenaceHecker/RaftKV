@@ -156,6 +156,12 @@ type Cluster struct {
 	pending []*Op
 	history []*Op
 
+	// snapshotsInstalled counts state machine images each node has accepted
+	// from a leader. A scenario about snapshot transfer has to be able to
+	// show one actually happened, or it is testing ordinary replication and
+	// reporting a pass it did not earn.
+	snapshotsInstalled map[raft.NodeID]int
+
 	seq int
 }
 
@@ -175,6 +181,8 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		machines: make(map[raft.NodeID]*statemachine.KV, cfg.Nodes),
 		storages: make(map[raft.NodeID]*raft.MemoryStorage, cfg.Nodes),
 		down:     make(map[raft.NodeID]bool, cfg.Nodes),
+
+		snapshotsInstalled: make(map[raft.NodeID]int, cfg.Nodes),
 	}
 	for i := range cfg.Nodes {
 		c.ids = append(c.ids, raft.NodeID(i+1))
@@ -216,8 +224,86 @@ func (c *Cluster) start(id raft.NodeID) error {
 	// the log, which is what makes a crash a real test of recovery rather than
 	// a pause.
 	c.machines[id] = statemachine.New()
+
+	// Replaying the log is only enough while the log still goes back to the
+	// beginning. Once this node has compacted, the entries before its own
+	// snapshot are gone and the image is the only record of them, so it has
+	// to be restored first and the replay applied on top. This is what the
+	// driver does on startup, and the harness has to match it or a restart
+	// after compaction hands the state machine an entry it has no history
+	// for.
+	if snap, err := c.storages[id].Snapshot(); err == nil && snap.Index > 0 {
+		if err := c.machines[id].Restore(snap.Data); err != nil {
+			return fmt.Errorf("chaos: node %d restoring its own snapshot: %w", id, err)
+		}
+	}
+
 	c.down[id] = false
 	return nil
+}
+
+// Compact snapshots a node's state machine and drops the log up to that
+// point.
+//
+// This is what makes the snapshot machinery reachable at all. A follower only
+// needs an image once the leader has thrown away the entries it was missing,
+// so without compaction the send and install paths are unreachable, and until
+// now the chaos suite could not exercise a line of them.
+func (c *Cluster) Compact(id raft.NodeID) error {
+	n, ok := c.nodes[id]
+	if !ok || c.down[id] {
+		return fmt.Errorf("chaos: node %d is not running", id)
+	}
+
+	applied := c.machines[id].Applied()
+	if applied == 0 {
+		return nil
+	}
+
+	data, err := c.machines[id].Snapshot()
+	if err != nil {
+		return fmt.Errorf("chaos: snapshotting node %d: %w", id, err)
+	}
+
+	// Compacting to an index already covered is not an error worth failing a
+	// scenario over; it just means nothing new has been applied.
+	if err := c.storages[id].CreateSnapshot(applied, data, n.ConfState()); err != nil {
+		return nil
+	}
+	return nil
+}
+
+// CompactAll compacts every running node.
+//
+// Scenarios use this rather than compacting one node, because leadership can
+// move while a follower is away and only a leader that has actually compacted
+// is unable to catch it up from the log. Compacting just the node that
+// happened to lead at the time is how a snapshot test ends up quietly
+// exercising ordinary replication instead.
+func (c *Cluster) CompactAll() error {
+	for _, id := range c.ids {
+		if c.down[id] {
+			continue
+		}
+		if err := c.Compact(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SnapshotsInstalled reports how many images a node has accepted from a
+// leader.
+func (c *Cluster) SnapshotsInstalled(id raft.NodeID) int { return c.snapshotsInstalled[id] }
+
+// TotalSnapshotsInstalled reports how many images the cluster has accepted in
+// total.
+func (c *Cluster) TotalSnapshotsInstalled() int {
+	var total int
+	for _, n := range c.snapshotsInstalled {
+		total += n
+	}
+	return total
 }
 
 // AddNode starts a new node and proposes its admission to the cluster.
@@ -416,6 +502,7 @@ func (c *Cluster) drain(id raft.NodeID) error {
 	c.net.Send(rd.Messages)
 
 	if rd.Snapshot != nil {
+		c.snapshotsInstalled[id]++
 		if err := c.machines[id].Restore(rd.Snapshot.Data); err != nil {
 			return fmt.Errorf("chaos: node %d restoring snapshot: %w", id, err)
 		}
@@ -464,6 +551,18 @@ func (c *Cluster) Restart(id raft.NodeID) error {
 	if !c.down[id] {
 		return nil
 	}
+
+	// Anything still addressed to the dead incarnation is discarded. A real
+	// process takes its connections down with it, so a message sent to it
+	// before it died cannot be delivered to the one that replaces it.
+	//
+	// Leaving them in flight is not merely unrealistic, it is actively
+	// misleading: a message queued before the cluster compacted still carries
+	// entries that no node holds any more, and a restarted node that accepts
+	// one catches up from a log that no longer exists. That masked the
+	// snapshot path entirely, since the follower never needed an image.
+	c.net.DropAllInFlight(id)
+
 	return c.start(id)
 }
 
