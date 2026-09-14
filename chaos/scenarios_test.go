@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1188,4 +1189,96 @@ func TestChaosReport(t *testing.T) {
 	if passed != len(reports) {
 		t.Errorf("%d scenarios did not hold", len(reports)-passed)
 	}
+}
+
+// TestChaosOnDisk runs every scenario again with each node backed by the real
+// write-ahead log instead of an in-memory one.
+//
+// The in-memory runs are the everyday ones because they are fast, but a node
+// that "crashes" by discarding a map cannot misframe a record, lose a segment,
+// or fail to stitch its log back together on recovery. Those failures live in
+// code the rest of the chaos suite never touches: the storage package tests it
+// in isolation, and the driver tests exercise it without adversarial crash
+// sequences.
+//
+// It is worth being exact about what this adds, because the obvious claim is
+// wrong. Measured by breaking the write-ahead log deliberately:
+//
+//   - Replay returning entries out of order is caught here. A corrupted log
+//     produces a state machine nothing in the recorded history explains.
+//   - Replay losing the tail of the log is not caught, and should not be.
+//     An entry that was not on a majority was never committed, and the leader
+//     simply sends it again; tolerating exactly that is the point of the
+//     algorithm.
+//   - Replay losing the whole log is not caught either, for the same reason
+//     one step further: the scenarios restart one node at a time, so a
+//     majority always still holds the data and the empty node is refilled by
+//     replication or a snapshot.
+//
+// So this is largely an exercise of a code path rather than an independent
+// oracle for it, and the storage package's own tests remain where log
+// corruption is actually detected. What it contributes is that the path runs
+// at all under hundreds of adversarial crash, compaction and membership
+// sequences, which is how the compacted-restart panic was found: invisible to
+// either layer alone, because the consensus tests used storage that never
+// compacted and the storage tests never ran the consensus core.
+//
+// One seed rather than five: this is about reaching a different code path, not
+// about exploring more timings.
+func TestChaosOnDisk(t *testing.T) {
+	if testing.Short() {
+		t.Skip("disk-backed chaos runs are slow")
+	}
+
+	dir := t.TempDir()
+	for _, s := range allScenarios() {
+		t.Run(s.Name, func(t *testing.T) {
+			scenarioDir := filepath.Join(dir, sanitize(s.Name))
+			report := RunScenarioOnDisk(s, []int64{1}, scenarioDir)
+			if !report.Passed() {
+				t.Errorf("scenario %q did not hold on disk\n%s", s.Name, report)
+			}
+
+			// Without this the test is worthless. If the data directory ever
+			// stopped reaching the cluster, every scenario would quietly run
+			// in memory again and this whole file would pass while covering
+			// nothing it claims to.
+			files, bytes := countFiles(t, scenarioDir)
+			if files == 0 || bytes == 0 {
+				t.Errorf("scenario %q wrote %d files totalling %d bytes; it did not "+
+					"use disk storage at all", s.Name, files, bytes)
+			}
+		})
+	}
+}
+
+// countFiles reports how much a scenario actually wrote.
+func countFiles(t *testing.T, dir string) (files, bytes int) {
+	t.Helper()
+	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			files++
+			bytes += int(info.Size())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", dir, err)
+	}
+	return files, bytes
+}
+
+// sanitize turns a scenario name into something usable as a directory name.
+func sanitize(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		default:
+			return '-'
+		}
+	}, name)
 }
