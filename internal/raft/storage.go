@@ -266,6 +266,41 @@ func (s *MemoryStorage) Snapshot() (Snapshot, error) {
 	return s.snapshot, nil
 }
 
+// CreateSnapshot records a snapshot of the state machine at index and drops
+// everything up to it out of the log.
+//
+// This is the local counterpart to ApplySnapshot: one is a node compacting its
+// own log, the other is a node being overwritten by a leader's image. The
+// difference that matters is what happens to the entries above index. Here
+// they are kept, because the node compacting is still using them; there they
+// are discarded, because the image supersedes everything.
+//
+// It exists on the in-memory storage so tests and the chaos harness can reach
+// the snapshot machinery at all. Without it nothing ever compacts, and the
+// code that sends and installs images is unreachable by the one suite built
+// to attack it.
+func (s *MemoryStorage) CreateSnapshot(index Index, data []byte, conf ConfState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if index <= s.snapshot.Index {
+		return fmt.Errorf("raft: snapshot at index %d is at or before the last one at %d",
+			index, s.snapshot.Index)
+	}
+	if index > s.lastIndexLocked() {
+		return fmt.Errorf("raft: cannot snapshot index %d, the log ends at %d",
+			index, s.lastIndexLocked())
+	}
+
+	offset := s.firstIndexLocked()
+	term := s.entries[index-offset].Term
+
+	s.snapshot = Snapshot{Index: index, Term: term, Conf: conf, Data: data}
+	// Keep everything after the snapshot point; the node still needs it.
+	s.entries = append([]Entry(nil), s.entries[index-offset+1:]...)
+	return nil
+}
+
 // ApplySnapshot implements Storage.
 func (s *MemoryStorage) ApplySnapshot(snap Snapshot) error {
 	s.mu.Lock()
