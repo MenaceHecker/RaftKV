@@ -2,6 +2,8 @@ package chaos
 
 import (
 	"fmt"
+	"github.com/MenaceHecker/raftkv/internal/storage"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -169,22 +171,44 @@ func (r Report) String() string {
 
 // RunScenario executes a scenario once per seed and checks the results.
 func RunScenario(s Scenario, seeds []int64) Report {
+	return RunScenarioOnDisk(s, seeds, "")
+}
+
+// RunScenarioOnDisk runs a scenario with every node backed by a real
+// write-ahead log under dir.
+//
+// It is the same scenarios against the storage the server actually ships,
+// so a crash closes real files and a restart recovers by reading them back.
+// An empty dir gives the in-memory storage, which is what the everyday runs
+// use because they are far faster.
+func RunScenarioOnDisk(s Scenario, seeds []int64, dir string) Report {
 	report := Report{Scenario: s.Name, Hypothesis: s.Hypothesis}
 
 	for _, seed := range seeds {
-		report.Runs = append(report.Runs, runOnce(s, seed))
+		seedDir := dir
+		if seedDir != "" {
+			// Each seed gets its own tree, or a later run would recover the
+			// previous one's log and start from somewhere unintended.
+			seedDir = filepath.Join(dir, fmt.Sprintf("seed-%d", seed))
+		}
+		report.Runs = append(report.Runs, runOnce(s, seed, seedDir))
 	}
 	return report
 }
 
 // runOnce executes a scenario against one seed.
-func runOnce(s Scenario, seed int64) RunResult {
+func runOnce(s Scenario, seed int64, dataDir string) RunResult {
 	res := RunResult{Seed: seed}
 
 	c, err := NewCluster(Config{
-		Nodes:  s.Nodes,
-		Seed:   seed,
-		Faults: s.Faults,
+		Nodes:   s.Nodes,
+		Seed:    seed,
+		Faults:  s.Faults,
+		DataDir: dataDir,
+		// Durability against power loss is not what these runs are testing,
+		// and fsyncing every append makes them an order of magnitude slower
+		// for no extra coverage of the recovery path.
+		Sync: storage.SyncNever,
 	})
 	if err != nil {
 		res.Err = err
