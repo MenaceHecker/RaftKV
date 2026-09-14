@@ -712,6 +712,210 @@ func scenarioMembershipChangeDuringPartition() Scenario {
 	}
 }
 
+// Snapshot scenarios.
+//
+// A follower needs a state machine image exactly when the leader has already
+// thrown away the entries it was missing. Until the harness could compact,
+// that never happened here, so the code that sends and installs images, some
+// of the most consequential in the system, was reachable only by deterministic
+// unit tests on a healthy cluster. These put it under faults.
+//
+// Each of these insists an image was actually transferred. Without that guard
+// a scenario passes by ordinary log replication and proves nothing, which is a
+// mistake this project has made before.
+
+// requireSnapshotInstalled fails a run that never transferred an image.
+func requireSnapshotInstalled(c *Cluster, id raft.NodeID) error {
+	if c.SnapshotsInstalled(id) == 0 {
+		return fmt.Errorf("node %d caught up without installing a snapshot, so this "+
+			"scenario exercised ordinary replication", id)
+	}
+	return nil
+}
+
+func scenarioSnapshotCatchUp() Scenario {
+	return Scenario{
+		Name: "a crashed node is caught up by a snapshot",
+		Hypothesis: "a node that was away while the log was compacted past it must " +
+			"be rebuilt from an image and end up agreeing exactly, not approximately",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			leader, err := SettleLeader(c, 300)
+			if err != nil {
+				return err
+			}
+			victim := OtherThan(c, leader)
+			c.Crash(victim)
+
+			// The cluster moves on and compacts past where the victim was.
+			if err := Workload(c, 3, "x", "away", 4, 600); err != nil {
+				return err
+			}
+			if err := c.CompactAll(); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "more", 2, 400); err != nil {
+				return err
+			}
+			if err := c.CompactAll(); err != nil {
+				return err
+			}
+
+			if err := c.Restart(victim); err != nil {
+				return err
+			}
+			if err := c.TickN(500); err != nil {
+				return err
+			}
+			if err := requireSnapshotInstalled(c, victim); err != nil {
+				return err
+			}
+
+			if err := Workload(c, 3, "x", "after", 2, 500); err != nil {
+				return err
+			}
+			return c.TickN(300)
+		},
+	}
+}
+
+func scenarioSnapshotUnderLoss() Scenario {
+	return Scenario{
+		Name:          "snapshot transfer under sustained loss and delay",
+		RequireFaults: requireDropped,
+		Faults: Faults{
+			LossRate: 0.15,
+			MinDelay: 1,
+			MaxDelay: 4,
+		},
+		Hypothesis: "an image that is dropped or delayed on the way must be retried " +
+			"until it lands; a partially transferred snapshot must never be applied",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			leader, err := SettleLeader(c, 400)
+			if err != nil {
+				return err
+			}
+			victim := OtherThan(c, leader)
+			c.Crash(victim)
+
+			if err := Workload(c, 3, "x", "away", 4, 900); err != nil {
+				return err
+			}
+			if err := c.CompactAll(); err != nil {
+				return err
+			}
+
+			if err := c.Restart(victim); err != nil {
+				return err
+			}
+			if err := c.TickN(900); err != nil {
+				return err
+			}
+			if err := requireSnapshotInstalled(c, victim); err != nil {
+				return err
+			}
+
+			if err := Workload(c, 3, "x", "after", 2, 700); err != nil {
+				return err
+			}
+			return c.TickN(500)
+		},
+	}
+}
+
+func scenarioNodeJoinsACompactedCluster() Scenario {
+	return Scenario{
+		Name: "a node joins a cluster that has already compacted",
+		Hypothesis: "a new member has no log at all, so it can only be started from " +
+			"an image; it must not be counted towards a majority until it holds one",
+		Nodes: 3,
+
+		Run: func(c *Cluster) error {
+			if _, err := SettleLeader(c, 300); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "before", 4, 600); err != nil {
+				return err
+			}
+			// Compact first, so there is no log left for a newcomer to
+			// replay. An image is the only way in.
+			if err := c.CompactAll(); err != nil {
+				return err
+			}
+
+			if err := c.AddNode(4); err != nil {
+				return err
+			}
+			if err := settleMembership(c, 500); err != nil {
+				return err
+			}
+			if err := c.TickN(400); err != nil {
+				return err
+			}
+			if err := requireSnapshotInstalled(c, 4); err != nil {
+				return err
+			}
+
+			if err := Workload(c, 3, "x", "after", 2, 500); err != nil {
+				return err
+			}
+			return c.TickN(300)
+		},
+	}
+}
+
+func scenarioSnapshotWhileLeadershipMoves() Scenario {
+	return Scenario{
+		Name: "a snapshot is needed while leadership keeps moving",
+		Hypothesis: "an image begun by one leader and finished under another must " +
+			"leave the follower consistent; whoever leads owes the same prefix",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			leader, err := SettleLeader(c, 300)
+			if err != nil {
+				return err
+			}
+			victim := OtherThan(c, leader)
+			c.Crash(victim)
+
+			if err := Workload(c, 3, "x", "away", 3, 600); err != nil {
+				return err
+			}
+			if err := c.CompactAll(); err != nil {
+				return err
+			}
+
+			// Bring the follower back and immediately unseat the leader that
+			// was about to catch it up.
+			if err := c.Restart(victim); err != nil {
+				return err
+			}
+			if err := c.TickN(5); err != nil {
+				return err
+			}
+			c.Crash(leader)
+			if err := c.TickN(600); err != nil {
+				return err
+			}
+
+			if err := requireSnapshotInstalled(c, victim); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "x", "after", 2, 600); err != nil {
+				return err
+			}
+			if err := c.Restart(leader); err != nil {
+				return err
+			}
+			return c.TickN(500)
+		},
+	}
+}
+
 // allScenarios is every adversarial scenario, in report order.
 //
 // The individual tests and the report are built from this one list, so the
@@ -733,6 +937,10 @@ func allScenarios() []Scenario {
 		scenarioLeaderCrashesMidMembershipChange(),
 		scenarioRemovedNodeKeepsRunning(),
 		scenarioMembershipChangeDuringPartition(),
+		scenarioSnapshotCatchUp(),
+		scenarioSnapshotUnderLoss(),
+		scenarioNodeJoinsACompactedCluster(),
+		scenarioSnapshotWhileLeadershipMoves(),
 	}
 }
 
@@ -765,6 +973,22 @@ func TestScenarioRemovedNodeKeepsRunning(t *testing.T) {
 
 func TestScenarioMembershipChangeDuringPartition(t *testing.T) {
 	runScenario(t, scenarioMembershipChangeDuringPartition())
+}
+
+func TestScenarioSnapshotCatchUp(t *testing.T) {
+	runScenario(t, scenarioSnapshotCatchUp())
+}
+
+func TestScenarioSnapshotUnderLoss(t *testing.T) {
+	runScenario(t, scenarioSnapshotUnderLoss())
+}
+
+func TestScenarioNodeJoinsACompactedCluster(t *testing.T) {
+	runScenario(t, scenarioNodeJoinsACompactedCluster())
+}
+
+func TestScenarioSnapshotWhileLeadershipMoves(t *testing.T) {
+	runScenario(t, scenarioSnapshotWhileLeadershipMoves())
 }
 
 func TestChaosReport(t *testing.T) {
