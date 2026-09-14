@@ -916,6 +916,132 @@ func scenarioSnapshotWhileLeadershipMoves() Scenario {
 	}
 }
 
+// Client session scenarios.
+//
+// Every write in the scenarios above carries a fresh sequence number, which
+// means none of them model the one thing client sessions exist for. A client
+// that never learns the outcome of a write has to send it again, and the
+// cluster has to recognise the second copy as the same request rather than a
+// new one. That is §6.3, and until now the chaos suite never asked for it.
+//
+// A duplicate write is invisible by itself: setting a key twice leaves the
+// same value. It becomes visible when another client writes that key in
+// between, because a stale duplicate landing afterwards silently discards the
+// newer write, and no ordering of the recorded history can account for that.
+
+func scenarioRetriedWriteIsNotAppliedTwice() Scenario {
+	return Scenario{
+		Name: "a client resends a write it never got an answer to",
+		Hypothesis: "a resent write must be recognised as the same request; applying " +
+			"it a second time would discard whatever was written in between and " +
+			"leave the store in a state no ordering of these operations explains",
+		Nodes: 3,
+
+		Run: func(c *Cluster) error {
+			if _, err := SettleLeader(c, 300); err != nil {
+				return err
+			}
+
+			for round := range 4 {
+				// One client writes and the write commits.
+				first, err := WriteAndSettle(c, 1, "x", fmt.Sprintf("first-%d", round), 400)
+				if err != nil {
+					return err
+				}
+				if first.Status != StatusOK {
+					continue
+				}
+
+				// Somebody else writes the same key afterwards.
+				if _, err := WriteAndSettle(c, 2, "x", fmt.Sprintf("second-%d", round), 400); err != nil {
+					return err
+				}
+
+				// The first client never saw its acknowledgement and asks
+				// again. The cluster must not let that undo the second write.
+				if err := c.Resend(first); err != nil {
+					return err
+				}
+				if err := c.TickN(150); err != nil {
+					return err
+				}
+
+				if _, err := ReadAndSettle(c, 3, "x", 400); err != nil {
+					return err
+				}
+			}
+			return c.TickN(300)
+		},
+	}
+}
+
+func scenarioRetriesAcrossLeaderChanges() Scenario {
+	return Scenario{
+		Name: "resent writes while leadership keeps moving",
+		Hypothesis: "deduplication lives in the state machine, so it must hold when " +
+			"the retry is accepted by a different leader than the original and " +
+			"neither of them has seen the other's acknowledgement",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			if _, err := SettleLeader(c, 300); err != nil {
+				return err
+			}
+
+			for round := range 3 {
+				first, err := WriteAndSettle(c, 1, "y", fmt.Sprintf("first-%d", round), 500)
+				if err != nil {
+					return err
+				}
+
+				// Unseat the leader that took it, so the retry has to go to
+				// somebody else.
+				leader, ok, err := c.Leader()
+				if err != nil {
+					return err
+				}
+				if ok {
+					c.Crash(leader)
+				}
+				if err := c.TickN(250); err != nil {
+					return err
+				}
+
+				if _, err := WriteAndSettle(c, 2, "y", fmt.Sprintf("second-%d", round), 500); err != nil {
+					return err
+				}
+
+				// Read before and after the retry, so the history pins the
+				// value on both sides of it rather than only afterwards.
+				if _, err := ReadAndSettle(c, 3, "y", 500); err != nil {
+					return err
+				}
+				if first.Status == StatusOK || first.Status == StatusUnknown {
+					if err := c.Resend(first); err != nil {
+						return err
+					}
+					if err := c.TickN(150); err != nil {
+						return err
+					}
+				}
+				if _, err := ReadAndSettle(c, 4, "y", 500); err != nil {
+					return err
+				}
+
+				if ok {
+					if err := c.Restart(leader); err != nil {
+						return err
+					}
+				}
+				if err := c.TickN(250); err != nil {
+					return err
+				}
+			}
+			return c.TickN(400)
+		},
+	}
+}
+
 // allScenarios is every adversarial scenario, in report order.
 //
 // The individual tests and the report are built from this one list, so the
@@ -941,6 +1067,8 @@ func allScenarios() []Scenario {
 		scenarioSnapshotUnderLoss(),
 		scenarioNodeJoinsACompactedCluster(),
 		scenarioSnapshotWhileLeadershipMoves(),
+		scenarioRetriedWriteIsNotAppliedTwice(),
+		scenarioRetriesAcrossLeaderChanges(),
 	}
 }
 
@@ -989,6 +1117,14 @@ func TestScenarioNodeJoinsACompactedCluster(t *testing.T) {
 
 func TestScenarioSnapshotWhileLeadershipMoves(t *testing.T) {
 	runScenario(t, scenarioSnapshotWhileLeadershipMoves())
+}
+
+func TestScenarioRetriedWriteIsNotAppliedTwice(t *testing.T) {
+	runScenario(t, scenarioRetriedWriteIsNotAppliedTwice())
+}
+
+func TestScenarioRetriesAcrossLeaderChanges(t *testing.T) {
+	runScenario(t, scenarioRetriesAcrossLeaderChanges())
 }
 
 func TestChaosReport(t *testing.T) {
