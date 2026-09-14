@@ -104,6 +104,12 @@ type Op struct {
 	readReady bool
 
 	node raft.NodeID
+
+	// clientID and seq are the session identity the write was sent under.
+	// They are kept so the operation can be sent again exactly as it was,
+	// which is what a client does when it never learns the outcome.
+	clientID uint64
+	seq      uint64
 }
 
 // Config describes a chaos cluster.
@@ -643,9 +649,11 @@ func (c *Cluster) Write(client int, key, value string) *Op {
 
 	n := c.nodes[id]
 	c.seq++
+	op.clientID = uint64(client)
+	op.seq = uint64(c.seq)
 	cmd := statemachine.Command{
-		ClientID: uint64(client),
-		Seq:      uint64(c.seq),
+		ClientID: op.clientID,
+		Seq:      op.seq,
 		Op:       statemachine.OpPut,
 		Key:      key,
 		Value:    []byte(value),
@@ -666,6 +674,52 @@ func (c *Cluster) Write(client int, key, value string) *Op {
 	op.term = n.Term()
 	c.pending = append(c.pending, op)
 	return op
+}
+
+// Resend proposes an operation's command again under its original session
+// identity, exactly as a client that never learned the outcome would.
+//
+// Nothing is added to the history, and that is the point. A retry is not a
+// second operation, it is the same one asked again, and the guarantee under
+// test is that the cluster treats it that way. If deduplication fails, the
+// command applies twice, the state machine ends up somewhere the recorded
+// history cannot explain, and the checker says so.
+//
+// A duplicate write of the same value is invisible on its own, since writing
+// a key twice leaves the same value. It becomes visible when somebody else
+// has written that key in between: a stale duplicate landing afterwards
+// throws away the newer write, and no linearization can account for that.
+func (c *Cluster) Resend(op *Op) error {
+	if op.Kind != OpWrite {
+		return errors.New("chaos: only writes can be resent")
+	}
+	if op.clientID == 0 && op.seq == 0 {
+		return errors.New("chaos: the operation was never accepted, so there is nothing to resend")
+	}
+
+	id, ok, err := c.Leader()
+	if err != nil {
+		return err
+	}
+	if !ok || c.down[id] {
+		// No leader to take it. A real client would keep trying; the
+		// scenario decides whether to.
+		return nil
+	}
+
+	cmd := statemachine.Command{
+		ClientID: op.clientID,
+		Seq:      op.seq,
+		Op:       statemachine.OpPut,
+		Key:      op.Key,
+		Value:    []byte(op.Value),
+	}
+	if err := c.nodes[id].Propose(cmd.Encode()); err != nil {
+		// Refused by a node that is not the leader any more. Not a failure
+		// of the scenario; the client would try again.
+		return nil
+	}
+	return nil
 }
 
 // ReadFrom invokes a read against one specific node.
