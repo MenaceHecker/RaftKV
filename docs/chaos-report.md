@@ -19,7 +19,7 @@ works whether or not each one took effect.
 
 ## Summary
 
-15 of 15 scenarios held across all seeds.
+19 of 19 scenarios held across all seeds.
 
 | Scenario | Seeds | Result |
 |---|---|---|
@@ -38,6 +38,10 @@ works whether or not each one took effect.
 | leader crashes during a membership change | 5 | pass |
 | a removed node keeps running and campaigning | 5 | pass |
 | a node joins while the cluster is partitioned | 5 | pass |
+| a crashed node is caught up by a snapshot | 5 | pass |
+| snapshot transfer under sustained loss and delay | 5 | pass |
+| a node joins a cluster that has already compacted | 5 | pass |
+| a snapshot is needed while leadership keeps moving | 5 | pass |
 
 ## Detail
 
@@ -54,21 +58,21 @@ leader partitioned from the majority mid-write
 ```
 leader crashes with a write in flight
   hypothesis: a write whose leader died is either committed everywhere or nowhere; the client cannot tell which, and either answer must be consistent with everything read afterwards
-  seed 1    PASS             ticks=587   ops=24/0/1 (ok/failed/unknown) msgs=4609 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 2    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4631 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 3    PASS             ticks=588   ops=24/0/1 (ok/failed/unknown) msgs=4622 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 5    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4645 dropped=4 partitioned=0 dup=0 delayed=0
-  seed 8    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4632 dropped=4 partitioned=0 dup=0 delayed=0
+  seed 1    PASS             ticks=587   ops=24/0/1 (ok/failed/unknown) msgs=4608 dropped=5 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4630 dropped=5 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=588   ops=24/0/1 (ok/failed/unknown) msgs=4621 dropped=5 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4644 dropped=5 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=586   ops=24/0/1 (ok/failed/unknown) msgs=4631 dropped=5 partitioned=0 dup=0 delayed=0
 ```
 
 ```
 every node restarted in turn while clients keep writing
   hypothesis: a cluster survives losing any single node at any moment, and a restarted node rebuilds its state machine from the log without contradicting what clients already observed
-  seed 1    PASS             ticks=1248  ops=10/0/0 (ok/failed/unknown) msgs=9638 dropped=15 partitioned=0 dup=0 delayed=6411
-  seed 2    PASS             ticks=1249  ops=10/0/0 (ok/failed/unknown) msgs=9658 dropped=19 partitioned=0 dup=0 delayed=6424
-  seed 3    PASS             ticks=1248  ops=10/0/0 (ok/failed/unknown) msgs=9533 dropped=15 partitioned=0 dup=0 delayed=6322
-  seed 5    PASS             ticks=1244  ops=10/0/0 (ok/failed/unknown) msgs=9472 dropped=19 partitioned=0 dup=0 delayed=6284
-  seed 8    PASS             ticks=1246  ops=10/0/0 (ok/failed/unknown) msgs=9631 dropped=18 partitioned=0 dup=0 delayed=6393
+  seed 1    PASS             ticks=1249  ops=10/0/0 (ok/failed/unknown) msgs=9625 dropped=26 partitioned=0 dup=0 delayed=6402
+  seed 2    PASS             ticks=1250  ops=10/0/0 (ok/failed/unknown) msgs=9652 dropped=32 partitioned=0 dup=0 delayed=6419
+  seed 3    PASS             ticks=1247  ops=10/0/0 (ok/failed/unknown) msgs=9517 dropped=32 partitioned=0 dup=0 delayed=6310
+  seed 5    PASS             ticks=1245  ops=10/0/0 (ok/failed/unknown) msgs=9481 dropped=34 partitioned=0 dup=0 delayed=6289
+  seed 8    PASS             ticks=1246  ops=10/0/0 (ok/failed/unknown) msgs=9538 dropped=32 partitioned=0 dup=0 delayed=6332
 ```
 
 ```
@@ -124,11 +128,11 @@ several clients writing the same key at once
 ```
 many keys under loss and leader changes
   hypothesis: operations on independent keys do not interfere, and each register is individually linearizable through leadership changes
-  seed 1    PASS             ticks=1512  ops=20/0/0 (ok/failed/unknown) msgs=10170 dropped=1534 partitioned=0 dup=0 delayed=6904
-  seed 2    PASS             ticks=1510  ops=20/0/0 (ok/failed/unknown) msgs=9790 dropped=1510 partitioned=0 dup=0 delayed=6635
-  seed 3    PASS             ticks=1511  ops=20/0/0 (ok/failed/unknown) msgs=9765 dropped=1551 partitioned=0 dup=0 delayed=6630
-  seed 5    PASS             ticks=1502  ops=20/0/0 (ok/failed/unknown) msgs=9903 dropped=1518 partitioned=0 dup=0 delayed=6735
-  seed 8    PASS             ticks=1533  ops=20/0/0 (ok/failed/unknown) msgs=10090 dropped=1587 partitioned=0 dup=0 delayed=6882
+  seed 1    PASS             ticks=1503  ops=20/0/0 (ok/failed/unknown) msgs=10072 dropped=1537 partitioned=0 dup=0 delayed=6840
+  seed 2    PASS             ticks=1512  ops=20/0/0 (ok/failed/unknown) msgs=10135 dropped=1561 partitioned=0 dup=0 delayed=6875
+  seed 3    PASS             ticks=1499  ops=20/0/0 (ok/failed/unknown) msgs=9447 dropped=1504 partitioned=0 dup=0 delayed=6426
+  seed 5    PASS             ticks=1502  ops=20/0/0 (ok/failed/unknown) msgs=10108 dropped=1549 partitioned=0 dup=0 delayed=6882
+  seed 8    PASS             ticks=1531  ops=20/0/0 (ok/failed/unknown) msgs=10205 dropped=1621 partitioned=0 dup=0 delayed=6962
 ```
 
 ```
@@ -189,5 +193,45 @@ a node joins while the cluster is partitioned
   seed 3    PASS             ticks=1100  ops=28/0/0 (ok/failed/unknown) msgs=10648 dropped=0 partitioned=1451 dup=0 delayed=0
   seed 5    PASS             ticks=1098  ops=28/0/0 (ok/failed/unknown) msgs=10651 dropped=0 partitioned=1452 dup=0 delayed=0
   seed 8    PASS             ticks=1098  ops=28/0/0 (ok/failed/unknown) msgs=10658 dropped=0 partitioned=1449 dup=0 delayed=0
+```
+
+```
+a crashed node is caught up by a snapshot
+  hypothesis: a node that was away while the log was compacted past it must be rebuilt from an image and end up agreeing exactly, not approximately
+  seed 1    PASS             ticks=911   ops=32/0/0 (ok/failed/unknown) msgs=7545 dropped=3 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=910   ops=32/0/0 (ok/failed/unknown) msgs=7553 dropped=3 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=912   ops=32/0/0 (ok/failed/unknown) msgs=7537 dropped=3 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=910   ops=32/0/0 (ok/failed/unknown) msgs=7553 dropped=7 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=910   ops=32/0/0 (ok/failed/unknown) msgs=7561 dropped=3 partitioned=0 dup=0 delayed=0
+```
+
+```
+snapshot transfer under sustained loss and delay
+  hypothesis: an image that is dropped or delayed on the way must be retried until it lands; a partially transferred snapshot must never be applied
+  seed 1    PASS             ticks=1549  ops=24/0/0 (ok/failed/unknown) msgs=11595 dropped=1707 partitioned=0 dup=0 delayed=9890
+  seed 2    PASS             ticks=3140  ops=23/0/1 (ok/failed/unknown) msgs=22599 dropped=3425 partitioned=0 dup=0 delayed=19178
+  seed 3    PASS             ticks=2244  ops=24/0/0 (ok/failed/unknown) msgs=16737 dropped=2490 partitioned=0 dup=0 delayed=14255
+  seed 5    PASS             ticks=1551  ops=24/0/0 (ok/failed/unknown) msgs=11618 dropped=1733 partitioned=0 dup=0 delayed=9890
+  seed 8    PASS             ticks=3339  ops=24/0/0 (ok/failed/unknown) msgs=23351 dropped=3484 partitioned=0 dup=0 delayed=19872
+```
+
+```
+a node joins a cluster that has already compacted
+  hypothesis: a new member has no log at all, so it can only be started from an image; it must not be counted towards a majority until it holds one
+  seed 1    PASS             ticks=793   ops=24/0/0 (ok/failed/unknown) msgs=4817 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=790   ops=24/0/0 (ok/failed/unknown) msgs=4817 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=796   ops=24/0/0 (ok/failed/unknown) msgs=4825 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=790   ops=24/0/0 (ok/failed/unknown) msgs=4825 dropped=0 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=790   ops=24/0/0 (ok/failed/unknown) msgs=4825 dropped=0 partitioned=0 dup=0 delayed=0
+```
+
+```
+a snapshot is needed while leadership keeps moving
+  hypothesis: an image begun by one leader and finished under another must leave the follower consistent; whoever leads owes the same prefix
+  seed 1    PASS             ticks=1180  ops=20/0/0 (ok/failed/unknown) msgs=8857 dropped=8 partitioned=0 dup=0 delayed=0
+  seed 2    PASS             ticks=1179  ops=20/0/0 (ok/failed/unknown) msgs=8879 dropped=8 partitioned=0 dup=0 delayed=0
+  seed 3    PASS             ticks=1181  ops=20/0/0 (ok/failed/unknown) msgs=8856 dropped=8 partitioned=0 dup=0 delayed=0
+  seed 5    PASS             ticks=1179  ops=20/0/0 (ok/failed/unknown) msgs=8893 dropped=12 partitioned=0 dup=0 delayed=0
+  seed 8    PASS             ticks=1179  ops=20/0/0 (ok/failed/unknown) msgs=8873 dropped=8 partitioned=0 dup=0 delayed=0
 ```
 

@@ -50,7 +50,7 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Cluster membership changes.** Joint consensus, so a node can be added or removed while the cluster keeps serving, with both the old and new configurations required to agree during the transition.
 
-**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Fifteen scenarios, run across multiple seeds.
+**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Nineteen scenarios covering membership changes and snapshot transfer as well, run across multiple seeds.
 
 **Observability.** Prometheus metrics, health and readiness endpoints, a Grafana dashboard and alert rules. Details in [docs/observability.md](docs/observability.md).
 
@@ -102,6 +102,10 @@ Not a highlight reel. These are real, and they're the reason the test discipline
 **Compaction could delete your vote.** Hard state records live in WAL segments interleaved with log entries, so deleting an old segment could take the most recent vote with it, and a node that forgets its vote can vote twice in one term and elect two leaders. Found while writing the WAL rather than by a test, which is its own kind of luck.
 
 **Three tests that passed while testing nothing.** The §5.4.2 one above, plus three compaction tests that were "passing" while truncating zero segments. My test setup batched appends, so everything landed in one file and nothing ever rolled over.
+
+**The chaos harness was quietly delivering messages to dead processes.** A node that crashed had its in-flight messages dropped, but anything sent to it while it was down stayed queued and was handed to the process that replaced it. Real machines do not work that way: connections die with the process.
+
+That sounds like a detail and it hid an entire subsystem. A message queued before the cluster compacted still carries entries no node holds any more, so a restarting node kept catching up from a log that no longer existed and never needed a snapshot. Finding it took a long chain of wrong guesses, and what finally settled it was hooking the storage write itself rather than reasoning about what should have been sent. A second gap turned up immediately behind it: the harness rebuilt a restarted node's state machine by replaying the log, which stops being enough once the node has compacted and the entries before its own snapshot are gone.
 
 **A leader that removed itself from the cluster crashed the process.** Finishing the transition dereferenced the leader's own replication progress, which adopting the new configuration had just deleted, because the leader was no longer a member of it. A nil pointer, in the consensus core, on an operation an operator would reasonably run.
 
