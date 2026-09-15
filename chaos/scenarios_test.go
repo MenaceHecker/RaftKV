@@ -47,6 +47,14 @@ func requireDropped(st Stats) error {
 	return nil
 }
 
+// requireDelayed insists messages were actually held back.
+func requireDelayed(st Stats) error {
+	if st.Delayed == 0 {
+		return fmt.Errorf("no messages were delayed")
+	}
+	return nil
+}
+
 // requirePartitioned insists a partition actually blocked traffic.
 func requirePartitioned(st Stats) error {
 	if st.Partitions == 0 {
@@ -1043,6 +1051,134 @@ func scenarioRetriesAcrossLeaderChanges() Scenario {
 	}
 }
 
+// Durable vote scenarios.
+//
+// A node's term and its vote are the only things Raft insists are on disk
+// before it acts on them, and the reason is Election Safety. A node that
+// grants a vote, restarts, forgets it, and grants another in the same term has
+// let two candidates each collect a majority, and a cluster with two leaders
+// in one term can commit two different entries at the same index.
+//
+// Producing that needs an unlucky sequence rather than an unlucky moment: a
+// contested election, a voter restarting inside it, and a second candidate
+// still asking. The scenarios below spend their time trying to arrange it.
+
+func scenarioVotersRestartDuringElections() Scenario {
+	return Scenario{
+		Name:          "voters restart while an election is being contested",
+		RequireFaults: requireDelayed,
+		Faults: Faults{
+			// Slow, variable delivery keeps elections open for long enough
+			// that a restart can land in the middle of one.
+			MinDelay: 2,
+			MaxDelay: 9,
+		},
+		Hypothesis: "a node's vote must survive its restart; forgetting it would let " +
+			"two candidates each collect a majority of the same term, and two leaders " +
+			"in one term can commit different entries at the same index",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			if _, err := SettleLeader(c, 600); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "v", "before", 2, 700); err != nil {
+				return err
+			}
+
+			// Repeatedly unseat the leader so the cluster is almost always
+			// mid-election, and restart voters while it is.
+			for round := range 6 {
+				leader, ok, err := c.Leader()
+				if err != nil {
+					return err
+				}
+				if ok {
+					c.Crash(leader)
+				}
+
+				// Give the election a moment to start, then restart a voter
+				// in the middle of it.
+				if err := c.TickN(6); err != nil {
+					return err
+				}
+				voter := c.IDs()[round%len(c.IDs())]
+				if !c.IsDown(voter) {
+					c.Crash(voter)
+					if err := c.TickN(3); err != nil {
+						return err
+					}
+					if err := c.Restart(voter); err != nil {
+						return err
+					}
+				}
+
+				if err := c.TickN(120); err != nil {
+					return err
+				}
+				if ok {
+					if err := c.Restart(leader); err != nil {
+						return err
+					}
+				}
+				if err := c.TickN(120); err != nil {
+					return err
+				}
+			}
+
+			if err := Workload(c, 3, "v", "after", 3, 900); err != nil {
+				return err
+			}
+			return c.TickN(600)
+		},
+	}
+}
+
+func scenarioWholeClusterRestarts() Scenario {
+	return Scenario{
+		Name: "every node restarts at once, repeatedly",
+		Hypothesis: "a cluster that loses every node at the same moment must come " +
+			"back agreeing on what was committed; nothing acknowledged may be " +
+			"missing, and no term may end up with two leaders",
+		Nodes: 5,
+
+		Run: func(c *Cluster) error {
+			if _, err := SettleLeader(c, 400); err != nil {
+				return err
+			}
+
+			for round := range 3 {
+				if err := Workload(c, 3, "w", fmt.Sprintf("round-%d", round), 2, 600); err != nil {
+					return err
+				}
+
+				// Everything goes down together. No majority survives to
+				// remind anyone what happened, so recovery depends entirely
+				// on what each node wrote down before it died.
+				for _, id := range c.IDs() {
+					c.Crash(id)
+				}
+				if err := c.TickN(20); err != nil {
+					return err
+				}
+				for _, id := range c.IDs() {
+					if err := c.Restart(id); err != nil {
+						return err
+					}
+				}
+				if _, err := SettleLeader(c, 800); err != nil {
+					return err
+				}
+			}
+
+			if err := Workload(c, 3, "w", "after", 2, 700); err != nil {
+				return err
+			}
+			return c.TickN(500)
+		},
+	}
+}
+
 // allScenarios is every adversarial scenario, in report order.
 //
 // The individual tests and the report are built from this one list, so the
@@ -1070,6 +1206,8 @@ func allScenarios() []Scenario {
 		scenarioSnapshotWhileLeadershipMoves(),
 		scenarioRetriedWriteIsNotAppliedTwice(),
 		scenarioRetriesAcrossLeaderChanges(),
+		scenarioVotersRestartDuringElections(),
+		scenarioWholeClusterRestarts(),
 	}
 }
 
@@ -1126,6 +1264,14 @@ func TestScenarioRetriedWriteIsNotAppliedTwice(t *testing.T) {
 
 func TestScenarioRetriesAcrossLeaderChanges(t *testing.T) {
 	runScenario(t, scenarioRetriesAcrossLeaderChanges())
+}
+
+func TestScenarioVotersRestartDuringElections(t *testing.T) {
+	runScenario(t, scenarioVotersRestartDuringElections())
+}
+
+func TestScenarioWholeClusterRestarts(t *testing.T) {
+	runScenario(t, scenarioWholeClusterRestarts())
 }
 
 func TestChaosReport(t *testing.T) {
