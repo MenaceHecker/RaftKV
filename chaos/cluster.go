@@ -550,6 +550,54 @@ func (c *Cluster) Tick() error {
 
 	c.resolve()
 	c.net.Advance()
+
+	// Election Safety, checked on every tick rather than whenever a scenario
+	// happens to ask.
+	//
+	// To be straight about what this is worth: Leader() reports the same
+	// violation, and every client write and read calls it, so a scenario
+	// doing any work samples the property constantly. Breaking the vote so
+	// that a node grants two in one term is caught either way, and no
+	// mutation has yet been found that the sampled version misses.
+	//
+	// It is kept because the sampling is incidental rather than intended.
+	// Scenarios spend long stretches inside TickN with no client operations
+	// at all, and two leaders in one term is a transient state: the loser
+	// finds out and steps down within an election timeout. A violation that
+	// began and ended inside one of those stretches would leave no trace.
+	// The check costs a walk over five nodes per tick, which is nothing
+	// against the chance of silently missing the property the whole algorithm
+	// rests on.
+	return c.checkElectionSafety()
+}
+
+// checkElectionSafety reports an error if two nodes lead the same term.
+//
+// It is the one invariant worth paying for on every tick. Everything else the
+// suite checks is a property of the recorded history, examined afterwards;
+// this one is a property of the cluster at an instant, and an instant is
+// exactly what it takes to be violated and then tidied away.
+func (c *Cluster) checkElectionSafety() error {
+	// Keyed by term rather than tracking the highest one seen. Two leaders in
+	// some older term are just as much a violation as two in the newest, and
+	// a check that only remembers the best term would walk straight past
+	// them.
+	leaders := make(map[raft.Term]raft.NodeID, len(c.ids))
+
+	for _, id := range c.ids {
+		if c.down[id] {
+			continue
+		}
+		n := c.nodes[id]
+		if n.State() != raft.Leader {
+			continue
+		}
+		if other, dup := leaders[n.Term()]; dup {
+			return fmt.Errorf("chaos: election safety violated at tick %d: nodes %d and %d "+
+				"both lead term %d", c.net.Now(), other, id, n.Term())
+		}
+		leaders[n.Term()] = id
+	}
 	return nil
 }
 
