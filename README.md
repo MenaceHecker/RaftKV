@@ -50,7 +50,7 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Cluster membership changes.** Joint consensus, so a node can be added or removed while the cluster keeps serving, with both the old and new configurations required to agree during the transition.
 
-**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Twenty-one scenarios covering membership changes, snapshot transfer and client retries as well, run across multiple seeds.
+**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Twenty-three scenarios covering membership changes, snapshot transfer, client retries and whole-cluster restarts, run across multiple seeds, and Election Safety checked on every tick.
 
 **Observability.** Prometheus metrics, health and readiness endpoints, a Grafana dashboard and alert rules. Details in [docs/observability.md](docs/observability.md).
 
