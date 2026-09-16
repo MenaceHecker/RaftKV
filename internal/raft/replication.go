@@ -75,6 +75,19 @@ func (n *Node) broadcastAppend() {
 // write.
 func (n *Node) broadcastHeartbeat() {
 	n.broadcastAppend()
+
+	// Retry the outstanding read confirmation, if there is one.
+	//
+	// Batching reads behind a single round makes one lost heartbeat more
+	// expensive than it used to be: previously it stalled the one read that
+	// sent it, now it stalls every read queued behind that round. Resending
+	// on the beat the leader is already paying for costs nothing and bounds
+	// the delay to a heartbeat interval.
+	if n.readOnly.outstanding != "" {
+		if round, ok := n.readOnly.rounds[n.readOnly.outstanding]; ok {
+			n.sendReadHeartbeats(round.context)
+		}
+	}
 }
 
 // sendAppend sends one follower the entries from its next index onward, along
