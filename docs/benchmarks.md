@@ -24,10 +24,10 @@ election or cold cache is counted.
 | Workload | Throughput | mean | p50 | p99 | p99.9 |
 | --- | --- | --- | --- | --- | --- |
 | Write | 564 ops/s | 28.3ms | 27.9ms | 47.3ms | 56.9ms |
-| Read | 8,821 ops/s | 1.8ms | 1.8ms | 2.6ms | 2.9ms |
+| Read | 27,226 ops/s | 0.6ms | 0.5ms | 1.2ms | 2.2ms |
 | Mixed, 90% read | 1,585 ops/s | 10.1ms | 8.9ms | 28.7ms | 35.2ms |
 
-Reads are 16 times faster than writes. That is the shape you want: a
+Reads are roughly fifty times faster than writes. That is the shape you want: a
 linearizable read costs one round trip to a majority to confirm leadership and
 touches no disk at all, while a write has to reach a majority *and* be made
 durable on the way.
@@ -82,6 +82,35 @@ Two details worth keeping in mind. Batching never waits: a batch contains only
 writes that had already arrived, so a single client talking to an idle cluster
 batches one at a time and pays nothing extra. And the batch is capped, by
 default at 64, because the client that starts a batch waits for all of it.
+
+## Reads were paying for a broadcast each
+
+The read-index protocol confirms leadership with a round of heartbeats before
+answering, and the first version sent one such round per read. Measured on the
+leader that came to 2.03 peer messages per read on three nodes: exactly one
+heartbeat to each follower, every time.
+
+Only one round is needed at a time. A read arriving while a round is in flight
+cannot be confirmed by it, since those heartbeats went out before the read
+existed, but it can wait and be covered by the next. Sharing rounds costs a
+queued read part of a round trip and saves a broadcast. Both figures below were
+measured back to back on the same machine:
+
+| | Before | After |
+| --- | --- | --- |
+| Read, 16 clients | 7,615 ops/s at 2.1ms | 27,226 ops/s at 0.5ms |
+| Read, 64 clients | not measured | 56,997 ops/s at 1.1ms |
+| Messages per read | 2.03 | 0.39 at 16 clients, 0.15 at 64 |
+
+Latency improving alongside throughput is the interesting part, because
+queuing behind a round should make an individual read slower, and it does. It
+is swamped by what the broadcasts were costing. Those messages were not
+saturating the network; they were saturating the single loop that also ticks
+the clock, replicates entries and applies them. Removing most of them made
+everything that loop does faster.
+
+Writes are unaffected at 575 ops/s and the mixed workload is unchanged within
+noise, since both are bounded by the fsync rather than by message handling.
 
 ## Message size is its own limit
 

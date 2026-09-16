@@ -36,6 +36,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never waits for writes that have not arrived.
 
+**Batched read confirmation.** Concurrent linearizable reads share one leadership confirmation round instead of each sending its own, which took reads from 7,600 to 27,000 a second and cut median latency from 2ms to 0.5ms. A read arriving mid-round waits for the next one, because heartbeats sent before it existed cannot prove anything about it.
+
 **Bounded apply batches.** Committed entries are handed to the state machine a bounded number at a time, because applying shares a goroutine with ticking the clock and reading messages, and a node applying a large backlog is a node that has stopped being a cluster member for the duration.
 
 **Bounded replication messages.** A leader sends a lagging follower its backlog in slices rather than in one message, because how far behind a follower can fall has no limit and every transport has a maximum message size.
@@ -235,7 +237,7 @@ Three nodes as local processes on an M3 Pro, 16 clients:
 | Workload | Throughput | p50 | p99 |
 | --- | --- | --- | --- |
 | Write | 564 ops/s | 27.9ms | 47.3ms |
-| Read | 8,821 ops/s | 1.8ms | 2.6ms |
+| Read | 27,226 ops/s | 0.5ms | 1.2ms |
 | Mixed, 90% read | 1,585 ops/s | 8.9ms | 28.7ms |
 
 Five nodes in Docker, where an fsync costs 1.10ms instead of 6.8ms:
