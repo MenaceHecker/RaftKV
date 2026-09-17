@@ -8,7 +8,7 @@ A distributed key-value store with the Raft consensus algorithm implemented from
 go test ./...
 ```
 
-177 tests, all green, and clean under `-race`.
+434 tests, all green, and clean under `-race`.
 
 ---
 
@@ -158,7 +158,8 @@ internal/
 │   └── session.go      client dedup (§6.3)
 ├── node/           the driver, where goroutines and real time live
 ├── transport/      gRPC wire protocol, peer transport, KV server
-└── metrics/        Prometheus collectors, the only package that knows them
+├── metrics/        Prometheus collectors, the only package that knows them
+└── determinism/    enforces that the core and state machine stay pure
 
 chaos/              fault injection and the linearizability checker
 ├── network.go          partitions, loss, delay, duplication on a virtual clock
@@ -177,7 +178,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 10,000 lines of implementation and 12,000 of tests, across 367 tests. The ratio is not an accident.
+Roughly 11,800 lines of implementation and 15,300 of tests, across 434 tests. The ratio is not an accident.
 
 ---
 
@@ -187,13 +188,15 @@ The paper names five. Here's what covers each:
 
 | Property | Test |
 |---|---|
-| Election Safety | asserted continuously by the harness, so *every* test checks it |
+| Election Safety | asserted continuously by both harnesses, so *every* test and *every* chaos scenario checks it |
 | Leader Append-Only | `TestLeaderNeverOverwritesItsOwnLog` |
 | Log Matching | `TestFollowerWithConflictingLogIsRepaired` |
 | Leader Completeness | `TestCommittedEntrySurvivesLeaderChange` |
 | State Machine Safety | `assertAppliedConsistent`, called throughout |
 
 Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFromCurrentTerm`, for §5.4.2.
+
+The property underneath all of them is that the consensus core and the state machine are pure: no clock, no network, no goroutines, and no randomness a seed cannot reproduce. Everything above depends on it, and a plausible one-line fix breaks it without failing anything, so `internal/determinism` parses both packages and enforces it rather than trusting the comments that claim it.
 
 ---
 
