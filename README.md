@@ -8,7 +8,7 @@ A distributed key-value store with the Raft consensus algorithm implemented from
 go test ./...
 ```
 
-442 tests and seven fuzz targets, all green and clean under `-race`, run on every push by CI.
+448 tests and seven fuzz targets, all green and clean under `-race`, run on every push by CI.
 
 ---
 
@@ -184,7 +184,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 11,941 lines of implementation and 15,661 of tests, across 442 tests. The ratio is not an accident.
+Roughly 11,966 lines of implementation and 15,976 of tests, across 448 tests. The ratio is not an accident.
 
 ---
 
@@ -201,6 +201,8 @@ The paper names five. Here's what covers each:
 | State Machine Safety | `assertAppliedConsistent`, called throughout |
 
 Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFromCurrentTerm`, for §5.4.2.
+
+The numbers in this README are checked too. They had drifted twice, once claiming 177 tests in one paragraph and 367 in another when there were 434, so `internal/determinism` counts the tests, the fuzz targets and the lines and fails if the text disagrees. A document that is confidently wrong about something checkable invites doubt about the parts that are harder to check.
 
 The property underneath all of them is that the consensus core and the state machine are pure: no clock, no network, no goroutines, and no randomness a seed cannot reproduce. Everything above depends on it, and a plausible one-line fix breaks it without failing anything, so `internal/determinism` parses both packages and enforces it rather than trusting the comments that claim it.
 
@@ -222,7 +224,7 @@ The property underneath all of them is that the consensus core and the state mac
 
 ## Things that are honestly not done
 
-- **Snapshots are still materialized in memory** at both ends. They now travel over the wire in chunks, so size no longer breaks transfer, but the sender holds the whole image and the receiver assembles the whole image before handing it over. Making the state machine serialize and restore through an `io.Reader` and `io.Writer` would remove that, and would ripple through the storage layer and the core's `Snapshot` type.
+- **Snapshots are still materialized in memory** at both ends, though far less wastefully than they were: sizing the buffer exactly took producing a 64 MB snapshot from 353 MB of allocation down to 65 MB, leaving one copy rather than six. They now travel over the wire in chunks, so size no longer breaks transfer, but the sender holds the whole image and the receiver assembles the whole image before handing it over. Making the state machine serialize and restore through an `io.Reader` and `io.Writer` would remove that, and would ripple through the storage layer and the core's `Snapshot` type.
 
 ---
 

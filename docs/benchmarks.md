@@ -176,6 +176,29 @@ Reads are slower here than on three local nodes, which is expected. A read
 confirms leadership with a majority, and a majority of five spread across
 container networking costs more than a majority of three on loopback.
 
+## Snapshots cost more memory than they should have
+
+Compaction is the operation a node performs while it is already busy, so what
+it costs in memory matters. Measured on a store of sixteen thousand four
+kilobyte values, about 66 MB resident:
+
+| | Before | After |
+| --- | --- | --- |
+| Allocated to produce a 64.5 MB snapshot | 352.6 MB | 64.8 MB |
+| Peak heap during the snapshot | 194.1 MB (2.9x the store) | 131.0 MB (2.0x) |
+
+The buffer was sized from a guess of thirty-two bytes per key and value pair,
+which is about right for tiny values and wrong by two orders of magnitude for
+real ones. A 64 MB snapshot started from a 0.5 MB buffer and doubled seven
+times, copying itself on each one. The store already knows the exact size, so
+it computes it and allocates once.
+
+The 2.0x that remains is the store plus the snapshot of it, which is inherent
+until the state machine can serialize straight to the file rather than to a
+buffer first. That is the one structural limitation still documented rather
+than fixed, and the measurement above is what says how much of it is left:
+a single extra copy, rather than the six that were there.
+
 ## What fsync costs
 
 The write path is bounded by making the log durable, so the obvious question is
