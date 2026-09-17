@@ -132,6 +132,20 @@ func DecodeCommand(b []byte) (Command, error) {
 		return Command{}, fmt.Errorf("%w: reading value: %w", ErrMalformedCommand, err)
 	}
 
+	// Nothing may follow the value. A decoder that ignored trailing bytes
+	// would accept two different encodings of the same command, which costs
+	// the encoding its only useful structural property: that a command and
+	// its bytes determine each other. It also throws away a free corruption
+	// check, since damage that happens to leave the prefix intact would be
+	// applied as though the entry were sound.
+	//
+	// The snapshot decoder below has always rejected trailing bytes. This
+	// one did not, which a fuzzer noticed in about fifty milliseconds.
+	if r.pos != len(r.b) {
+		return Command{}, fmt.Errorf("%w: %d trailing bytes after the value",
+			ErrMalformedCommand, len(r.b)-r.pos)
+	}
+
 	return Command{
 		ClientID: clientID,
 		Seq:      seq,
@@ -355,7 +369,24 @@ func (kv *KV) Restore(b []byte) error {
 		return fmt.Errorf("%w: implausible key count %d", ErrMalformedSnapshot, count)
 	}
 
+	// The count has to be consistent with the bytes that follow it before a
+	// single one of them is trusted. Every pair costs at least two eight byte
+	// length prefixes, so a payload cannot hold more than a sixteenth of its
+	// remaining length in keys.
+	//
+	// Without this the count alone decides how large a map to allocate, and
+	// it arrives from a peer or off a disk. A sixteen byte payload declaring
+	// fifty million keys allocated three gigabytes before the very next read
+	// failed and rejected it, which is a node lost to a message too small to
+	// bother checking.
+	const minBytesPerPair = 16
+	if remaining := uint64(len(r.b) - r.pos); count > remaining/minBytesPerPair {
+		return fmt.Errorf("%w: %d keys declared but only %d bytes remain",
+			ErrMalformedSnapshot, count, remaining)
+	}
+
 	data := make(map[string][]byte, count)
+	var previous string
 	for i := uint64(0); i < count; i++ {
 		key, err := r.bytes()
 		if err != nil {
@@ -365,6 +396,22 @@ func (kv *KV) Restore(b []byte) error {
 		if err != nil {
 			return fmt.Errorf("%w: reading value for key %q: %w", ErrMalformedSnapshot, key, err)
 		}
+
+		// Keys must arrive strictly ascending, which is the order Snapshot
+		// writes them in. Accepting any other order would mean several
+		// different byte strings encode the same state, and the encoding's
+		// one structural guarantee is that they do not: comparing two
+		// replicas' snapshots directly is how convergence is checked, here
+		// and in the chaos suite.
+		//
+		// Strictness also rules out a repeated key, which would otherwise be
+		// resolved silently by whichever copy happened to be written last.
+		if i > 0 && string(key) <= previous {
+			return fmt.Errorf("%w: key %q follows %q, but keys must ascend",
+				ErrMalformedSnapshot, key, previous)
+		}
+		previous = string(key)
+
 		data[string(key)] = value
 	}
 

@@ -187,12 +187,33 @@ func decodeSessions(r *reader, max int) (*sessions, error) {
 		return nil, fmt.Errorf("implausible session count %d", count)
 	}
 
+	// As with the key count above, the number has to fit the bytes that
+	// follow before anything is sized from it. Each session is three eight
+	// byte fields.
+	const bytesPerSession = 24
+	if remaining := uint64(len(r.b) - r.pos); count > remaining/bytesPerSession {
+		return nil, fmt.Errorf("%d sessions declared but only %d bytes remain",
+			count, remaining)
+	}
+
 	s := newSessions(max)
+	var previous uint64
 	for i := uint64(0); i < count; i++ {
 		id, err := r.uint64()
 		if err != nil {
 			return nil, fmt.Errorf("reading session %d client ID: %w", i, err)
 		}
+
+		// Client IDs must ascend strictly, which is the order encode writes
+		// them in. Any other order describes the same table with different
+		// bytes, and a repeated ID would quietly keep whichever copy was
+		// decoded last, discarding a client's real progress and letting its
+		// next retry apply a second time.
+		if i > 0 && id <= previous {
+			return nil, fmt.Errorf("session client ID %d follows %d, but IDs must ascend",
+				id, previous)
+		}
+		previous = id
 		seq, err := r.uint64()
 		if err != nil {
 			return nil, fmt.Errorf("reading session %d sequence: %w", i, err)
