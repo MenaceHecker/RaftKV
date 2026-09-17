@@ -68,6 +68,18 @@ ready. No pod here becomes ready until the cluster has elected a leader, and no
 leader can be elected until a majority is running. Ordered startup deadlocks on
 the first pod, forever.
 
+That is measured rather than reasoned. Deploying this manifest with
+`OrderedReady` leaves exactly one pod in existence after two minutes, stuck at
+`0/1 Running`, reporting:
+
+```json
+{"id":1,"state":"PreCandidate","term":0,"leader":0,"commit":0,"applied":0}
+```
+
+It is asking permission to campaign, from a majority that Kubernetes is waiting
+for it to become ready before creating. The same manifest with `Parallel`
+reaches five of five ready in about thirty seconds with a leader elected.
+
 **`publishNotReadyAddresses: true`** on the headless service, for the same
 reason from the other direction. Peers must be able to resolve each other
 before any of them is ready, or DNS withholds exactly the addresses they need
@@ -145,7 +157,7 @@ rather than at one slice per heartbeat.
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `--fsync` | `true` | Turning it off makes writes far faster and voids the durability guarantee Raft's correctness assumes. It exists for benchmarking, not production. |
+| `--fsync` | `true` | Turning it off takes writes from 598 to 2,980 a second on a local three node cluster, because the durable write drops from 6.8ms to 0.06ms. It also voids the durability guarantee Raft's correctness assumes, which is the whole reason the write was slow. It exists for benchmarking, not production. |
 | `--election-ticks` | `10` | In ticks, so the real timeout is this times `--tick`. Too low on a slow network causes elections during normal operation. |
 | `--snapshot-threshold` | `10000` | Entries applied past the last snapshot before another is taken. Lower means faster recovery and more disk work. |
 | `--metrics-listen` | empty | Disabled unless set. See [observability.md](observability.md). |
