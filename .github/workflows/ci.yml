@@ -1,0 +1,104 @@
+# Continuous verification of the claims this repository makes about itself.
+#
+# The README says the suite is green, clean under the race detector, and that
+# the chaos scenarios hold. Those were true each time somebody ran them by
+# hand, which is a weaker statement than it sounds: the interesting failures
+# here have all been ones that no existing test noticed, and a suite nobody
+# runs on a schedule is a suite that rots quietly.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The chaos suite and the fuzzers explore, so running them again on
+  # unchanged code is not wasted: a different seed or a longer fuzz budget
+  # reaches inputs the last run did not.
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Taken from go.mod so the toolchain cannot drift from what the
+          # module declares.
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        # Generated protobuf code is excluded: it is formatted by its
+        # generator and reformatting it would only produce a diff against the
+        # next regeneration.
+        run: |
+          unformatted=$(gofmt -l . | grep -v '\.pb\.go$' || true)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+      - name: test with the race detector
+        # The driver, the transport and the chaos harness all run real
+        # goroutines, and the race detector is the only thing that checks the
+        # boundary between them is respected.
+        run: go test -race ./...
+
+  fuzz:
+    name: fuzz the decoders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: fuzz
+        # Every decoder that parses bytes from a disk that may be damaged or
+        # from another node. Six bugs came out of these in the first ten
+        # minutes of fuzzing, including a sixteen byte snapshot that allocated
+        # three gigabytes, so a minute each on every push is cheap insurance.
+        #
+        # Failing inputs are kept as a corpus and replayed by `go test`, so a
+        # regression found here fails the job above from then on.
+        run: |
+          set -e
+          fuzz() {
+            echo "::group::$2 ($1)"
+            go test "$1" -run xxx -fuzz "$2" -fuzztime 60s
+            echo "::endgroup::"
+          }
+          fuzz ./internal/statemachine/ FuzzDecodeCommand
+          fuzz ./internal/statemachine/ FuzzRestore
+          fuzz ./internal/storage/ FuzzReadRecord
+          fuzz ./internal/storage/ FuzzDecodeEntry
+          fuzz ./internal/storage/ FuzzDecodeHardState
+          fuzz ./internal/storage/ FuzzDecodeSnapshotMeta
+          fuzz ./internal/raft/ FuzzDecodeConfChange
+
+      - name: upload any failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore
