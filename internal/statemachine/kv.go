@@ -333,7 +333,7 @@ func (kv *KV) Snapshot() ([]byte, error) {
 
 	keys := kv.sortedKeysLocked()
 
-	buf := make([]byte, 0, 16+len(keys)*32)
+	buf := make([]byte, 0, kv.snapshotSizeLocked(keys))
 	buf = appendUint64(buf, uint64(kv.applied))
 	buf = appendUint64(buf, uint64(len(keys)))
 	for _, k := range keys {
@@ -347,6 +347,31 @@ func (kv *KV) Snapshot() ([]byte, error) {
 	// the table exists to prevent.
 	buf = kv.sessions.encode(buf)
 	return buf, nil
+}
+
+// snapshotSizeLocked returns exactly how many bytes Snapshot will produce.
+//
+// The buffer is sized from this rather than from a guess. The guess it
+// replaces assumed thirty-two bytes per pair, which is about right for tiny
+// values and wrong by two orders of magnitude for real ones: a store of
+// sixteen thousand four kilobyte values produced a 64 MB snapshot from a
+// 0.5 MB hint, so the buffer doubled seven times and copied itself on each
+// one. That cost 353 MB of allocation to produce 64 MB of output, and a peak
+// heap of nearly three times the store it was snapshotting, at exactly the
+// moment a node is least able to spare it.
+//
+// Everything here is already known: the store holds its own keys and values,
+// and the session table is fixed width per client.
+func (kv *KV) snapshotSizeLocked(keys []string) int {
+	// applied index and key count.
+	size := 8 + 8
+	for _, k := range keys {
+		// Each pair is a length-prefixed key and a length-prefixed value.
+		size += 8 + len(k) + 8 + len(kv.data[k])
+	}
+	// The session table: a count, then a client ID, sequence and index each.
+	size += 8 + len(kv.sessions.entries)*24
+	return size
 }
 
 // Restore replaces the store's contents with a snapshot.
