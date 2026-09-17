@@ -87,6 +87,21 @@ const (
 	EntryConfChange
 )
 
+// Valid reports whether t is a type this implementation defines.
+//
+// Decoders need it because the type is written in a fixed width field wider
+// than the type itself, so a damaged field can hold a value that truncates
+// into a perfectly legal one and decodes as an ordinary entry. Checking the
+// decoded value against the defined set turns that into an error instead.
+func (t EntryType) Valid() bool {
+	switch t {
+	case EntryNormal, EntryNoOp, EntryConfChange:
+		return true
+	default:
+		return false
+	}
+}
+
 // Entry is a single record in the replicated log. The pair (Term, Index)
 // uniquely identifies an entry across the whole cluster: if two logs hold an
 // entry with the same index and term, those entries are identical and every
