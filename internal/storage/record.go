@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"math"
 
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
@@ -175,6 +176,21 @@ func (r *reader) uint64() (uint64, error) {
 	return v, nil
 }
 
+// atEnd reports an error if anything follows what has been read.
+//
+// Every record decoder is handed a payload whose length the framing already
+// established exactly, so leftover bytes mean the payload does not match the
+// shape it claims. Ignoring them would let a record that cannot have been
+// written by this encoder decode as though it had been, and would quietly
+// give the encoding more than one spelling per value.
+func (r *reader) atEnd(what string) error {
+	if r.pos != len(r.b) {
+		return fmt.Errorf("%w: %d trailing bytes after the %s",
+			ErrCorruptRecord, len(r.b)-r.pos, what)
+	}
+	return nil
+}
+
 func (r *reader) bytes() ([]byte, error) {
 	n, err := r.uint64()
 	if err != nil {
@@ -228,6 +244,18 @@ func decodeEntry(payload []byte) (raft.Entry, error) {
 	if err != nil {
 		return raft.Entry{}, fmt.Errorf("decoding entry data: %w", err)
 	}
+	if err := r.atEnd("entry"); err != nil {
+		return raft.Entry{}, err
+	}
+
+	// The type travels in a field eight times its own width, so a damaged
+	// one can hold a value that truncates into a legal type and decodes as a
+	// perfectly ordinary entry. Checking the whole field is what makes that
+	// an error instead.
+	if typ > math.MaxUint8 || !raft.EntryType(typ).Valid() {
+		return raft.Entry{}, fmt.Errorf("%w: entry type %d is not a known type",
+			ErrCorruptRecord, typ)
+	}
 
 	return raft.Entry{
 		Term:  raft.Term(term),
@@ -254,6 +282,9 @@ func decodeHardState(payload []byte) (raft.HardState, error) {
 	vote, err := r.uint64()
 	if err != nil {
 		return raft.HardState{}, fmt.Errorf("decoding hard state vote: %w", err)
+	}
+	if err := r.atEnd("hard state"); err != nil {
+		return raft.HardState{}, err
 	}
 
 	return raft.HardState{
@@ -290,6 +321,9 @@ func decodeSnapshotMeta(payload []byte) (SnapshotMeta, error) {
 	term, err := r.uint64()
 	if err != nil {
 		return SnapshotMeta{}, fmt.Errorf("decoding snapshot term: %w", err)
+	}
+	if err := r.atEnd("snapshot meta"); err != nil {
+		return SnapshotMeta{}, err
 	}
 
 	return SnapshotMeta{Index: raft.Index(index), Term: raft.Term(term)}, nil
