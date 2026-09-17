@@ -329,6 +329,20 @@ const (
 	ConfChangeLeaveJoint
 )
 
+// Valid reports whether t is a change this implementation defines.
+//
+// A conf change decides who may vote, so a byte that names no known operation
+// must be refused rather than carried into the configuration machinery to be
+// interpreted by whichever branch happens to catch it.
+func (t ConfChangeType) Valid() bool {
+	switch t {
+	case ConfChangeAddNode, ConfChangeRemoveNode, ConfChangeLeaveJoint:
+		return true
+	default:
+		return false
+	}
+}
+
 // ConfChange is the payload stored in an EntryConfChange log entry. Every
 // cluster reconfiguration — add, remove, or finalise — travels through the
 // log as a ConfChange so the transition is replicated and durable before
@@ -367,12 +381,22 @@ func DecodeConfChange(b []byte) (ConfChange, error) {
 		return ConfChange{}, fmt.Errorf("raft: conf change payload too short (%d bytes)", len(b))
 	}
 	addrLen := int(binary.BigEndian.Uint32(b[9:13]))
-	if len(b) < minLen+addrLen {
-		return ConfChange{}, fmt.Errorf("raft: conf change payload truncated: have %d bytes, need %d",
-			len(b), minLen+addrLen)
+	if len(b) != minLen+addrLen {
+		// Exactly, not at least. A payload longer than its own declared
+		// address is not this encoding with something appended, it is a
+		// payload that does not describe itself, and reading it anyway would
+		// let two different byte strings name the same membership change.
+		return ConfChange{}, fmt.Errorf("raft: conf change payload is %d bytes, but its "+
+			"address length declares %d", len(b), minLen+addrLen)
 	}
+
+	typ := ConfChangeType(b[0])
+	if !typ.Valid() {
+		return ConfChange{}, fmt.Errorf("raft: conf change type %d is not a known type", b[0])
+	}
+
 	return ConfChange{
-		Type:   ConfChangeType(b[0]),
+		Type:   typ,
 		NodeID: NodeID(binary.BigEndian.Uint64(b[1:9])),
 		Addr:   string(b[13 : 13+addrLen]),
 	}, nil
