@@ -176,6 +176,24 @@ Reads are slower here than on three local nodes, which is expected. A read
 confirms leadership with a majority, and a majority of five spread across
 container networking costs more than a majority of three on loopback.
 
+## What fsync costs
+
+The write path is bounded by making the log durable, so the obvious question is
+what the guarantee is worth. Measured on the same three node cluster, 16
+clients:
+
+| | Throughput | p50 | Durable write |
+| --- | --- | --- | --- |
+| `--fsync=true` | 598 ops/s | 26.5ms | 6.82ms |
+| `--fsync=false` | 2,980 ops/s | 5.4ms | 0.06ms |
+
+Five times the throughput, and the durable write becomes essentially free
+because it is no longer durable. That is the trade in its entirety: the flag
+does not make the system faster, it makes it stop promising the thing that was
+slow. A committed write is only committed because a majority wrote it down, and
+without the fsync a power cut takes back writes that clients were told had
+succeeded.
+
 ## Losing nodes
 
 Five nodes, writes throughout:
