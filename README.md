@@ -2,7 +2,7 @@
 
 A distributed key-value store with the Raft consensus algorithm implemented from scratch. No `etcd/raft`, no `hashicorp/raft`, no consensus library underneath.
 
-**Status: in progress.** Phases 1 and 2 are done. Phase 3 is most of the way there. Everything below describes what actually exists and passes tests today; the roadmap at the bottom is honest about what doesn't.
+**Status: in progress.** Phases 1 and 2 are done. Phase 3 is almost completed. Everything below describes what actually exists and passes tests today; the roadmap at the bottom is honest about what doesn't.
 
 ```
 go test ./...
