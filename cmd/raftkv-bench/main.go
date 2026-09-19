@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"sort"
@@ -401,6 +402,33 @@ func classify(err error) string {
 	return "unknown"
 }
 
+// percentile returns the nearest-rank percentile of an ascending slice.
+//
+// Nearest rank is ceil(f*n), counting from one, so the index is that minus
+// one. Taking int(f*n) instead is the same number except when f*n lands
+// exactly on a whole number, and then it is one too high: with a hundred
+// samples it reports the fifty-first as the median and the hundredth, the
+// maximum, as the ninety-ninth percentile.
+//
+// The error is a single sample either way and made no visible difference to
+// the figures published from this tool, which come from tens of thousands of
+// operations. It is fixed because a benchmark is an instrument, and an
+// instrument that is slightly wrong in a way nobody has measured is one
+// nobody can calibrate against.
+func percentile(sorted []time.Duration, f float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	rank := int(math.Ceil(f * float64(len(sorted))))
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > len(sorted) {
+		rank = len(sorted)
+	}
+	return sorted[rank-1]
+}
+
 func (r *result) print(opt *options) {
 	total := r.reads + r.writes
 	if total == 0 {
@@ -412,17 +440,6 @@ func (r *result) print(opt *options) {
 	}
 
 	sort.Slice(r.latencies, func(i, j int) bool { return r.latencies[i] < r.latencies[j] })
-
-	pct := func(f float64) time.Duration {
-		if len(r.latencies) == 0 {
-			return 0
-		}
-		i := int(f * float64(len(r.latencies)))
-		if i >= len(r.latencies) {
-			i = len(r.latencies) - 1
-		}
-		return r.latencies[i]
-	}
 
 	var sum time.Duration
 	for _, d := range r.latencies {
@@ -438,7 +455,7 @@ func (r *result) print(opt *options) {
 		name string
 		f    float64
 	}{{"p50", 0.50}, {"p95", 0.95}, {"p99", 0.99}, {"p99.9", 0.999}} {
-		fmt.Printf("%-22s %v\n", "latency "+p.name, pct(p.f).Round(time.Microsecond))
+		fmt.Printf("%-22s %v\n", "latency "+p.name, percentile(r.latencies, p.f).Round(time.Microsecond))
 	}
 	fmt.Printf("%-22s %v\n", "latency max", r.latencies[len(r.latencies)-1].Round(time.Microsecond))
 
