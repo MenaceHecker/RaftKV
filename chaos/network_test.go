@@ -471,3 +471,106 @@ func TestStatsAccountForEveryMessage(t *testing.T) {
 			st.Sent, st.Delivered, st.Dropped, st.Partitions, st.Duplicated)
 	}
 }
+
+// The tests above establish that each fault happens at all. These establish
+// that it happens as often as it was asked to.
+//
+// The distinction matters because every scenario states its faults as
+// magnitudes, and the report repeats them: "sustained loss, delay,
+// duplication and reordering" at fifteen percent means something different
+// from the same words at one percent. A guard like requireDropped only asks
+// whether anything was lost, so an injector applying a tenth of the
+// configured rate would keep every scenario green while quietly making the
+// suite far gentler than it claims to be.
+
+// observedRate runs n messages through a network and returns how often the
+// counted fault occurred.
+func observedRate(t *testing.T, seed int64, f Faults, n int, count func(Stats) int) float64 {
+	t.Helper()
+
+	net, err := NewNetwork(seed, f)
+	if err != nil {
+		t.Fatalf("creating the network: %v", err)
+	}
+	for i := range n {
+		net.Send([]raft.Message{{From: 1, To: 2, Term: raft.Term(i)}})
+	}
+	return float64(count(net.Stats())) / float64(n)
+}
+
+// assertClose fails if observed is not within tolerance of want, relatively.
+func assertClose(t *testing.T, what string, want, got, tolerance float64) {
+	t.Helper()
+
+	drift := got - want
+	if drift < 0 {
+		drift = -drift
+	}
+	if drift > want*tolerance {
+		t.Errorf("%s configured at %.3f but observed at %.4f, which is %.0f%% out",
+			what, want, got, drift/want*100)
+	}
+}
+
+func TestLossRateMatchesItsConfiguration(t *testing.T) {
+	// Twenty thousand messages per rate, with a fixed seed, so the figures
+	// are reproducible and the tolerance can be tight. Ten percent relative
+	// leaves room for the generator being consumed in a different order
+	// without leaving room for the rate being wrong.
+	const (
+		messages  = 20000
+		tolerance = 0.10
+	)
+	for _, want := range []float64{0.05, 0.15, 0.30, 0.50} {
+		got := observedRate(t, 1, Faults{LossRate: want}, messages,
+			func(s Stats) int { return s.Dropped })
+		assertClose(t, "loss", want, got, tolerance)
+	}
+}
+
+func TestDuplicateRateMatchesItsConfiguration(t *testing.T) {
+	const (
+		messages  = 20000
+		tolerance = 0.10
+	)
+	for _, want := range []float64{0.10, 0.25, 0.50} {
+		got := observedRate(t, 2, Faults{DuplicateRate: want}, messages,
+			func(s Stats) int { return s.Duplicated })
+		assertClose(t, "duplication", want, got, tolerance)
+	}
+}
+
+func TestDelaysStayWithinTheirBoundsAndReachThem(t *testing.T) {
+	// Both ends have to be reachable, not just respected. A generator that
+	// never produced the maximum would make a scenario's worst case
+	// unreachable, and one that never produced the minimum would make every
+	// message slower than configured.
+	const (
+		min      = 2
+		max      = 6
+		messages = 2000
+	)
+
+	net, err := NewNetwork(3, Faults{MinDelay: min, MaxDelay: max})
+	if err != nil {
+		t.Fatalf("creating the network: %v", err)
+	}
+	for i := range messages {
+		net.Send([]raft.Message{{From: 1, To: 2, Term: raft.Term(i)}})
+	}
+
+	seen := map[int64]int{}
+	for _, q := range net.queue {
+		d := q.at - net.Now()
+		if d < min || d > max {
+			t.Fatalf("a message was delayed %d ticks, outside the configured [%d, %d]", d, min, max)
+		}
+		seen[d]++
+	}
+	for d := int64(min); d <= max; d++ {
+		if seen[d] == 0 {
+			t.Errorf("no message was delayed by %d ticks, so that end of [%d, %d] is unreachable",
+				d, min, max)
+		}
+	}
+}
