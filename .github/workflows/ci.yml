@@ -94,6 +94,7 @@ jobs:
           fuzz ./internal/storage/ FuzzDecodeHardState
           fuzz ./internal/storage/ FuzzDecodeSnapshotMeta
           fuzz ./internal/raft/ FuzzDecodeConfChange
+          fuzz ./internal/transport/ FuzzMessageFromWire
 
       - name: upload any failing inputs
         if: failure()
