@@ -10,6 +10,14 @@ thing that makes them worth publishing.
 Every node runs on the one machine, so network latency is close to zero and
 these figures are a ceiling rather than a prediction for a real network.
 
+**The instrument.** `cmd/raftkv-bench` produced every figure here, so its
+arithmetic is tested rather than assumed. It had no tests until that was
+noticed, and it was computing percentiles as floor(f*n) rather than nearest
+rank, which is one sample too high whenever f*n lands on a whole number. At
+these sample sizes, tens of thousands of operations, that moves a percentile
+by less than a microsecond and changes nothing quoted below. It is fixed
+because an instrument nobody has calibrated is one nobody can argue with.
+
 **Method.** Closed loop: each client sends one request, waits for the reply,
 and sends the next. That measures latency honestly and throughput
 conservatively. An open loop generator would report bigger throughput numbers
