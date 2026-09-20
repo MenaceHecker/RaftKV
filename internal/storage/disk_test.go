@@ -32,6 +32,20 @@ import (
 var testConf = raft.ConfState{Voters: []raft.NodeID{1, 2, 3}}
 
 // openDisk opens a DiskStorage, failing the test on error.
+// crash models the process dying rather than shutting down.
+//
+// Whatever reached the disk stays there and the write-ahead log is never
+// closed cleanly, which is the point of these tests. The one thing that does
+// have to happen is releasing the directory lock, because a kernel drops it
+// when the process holding it goes away, and without that the reopen below
+// would be refused for a process that no longer exists.
+func crash(t *testing.T, s *DiskStorage) {
+	t.Helper()
+	if err := s.lock.release(); err != nil {
+		t.Fatalf("releasing the directory lock: %v", err)
+	}
+}
+
 func openDisk(t *testing.T, dir string) (*DiskStorage, Snapshot) {
 	t.Helper()
 	s, snap, err := OpenDiskStorage(DiskConfig{Dir: dir})
@@ -160,7 +174,8 @@ func TestDiskStorageSurvivesCrash(t *testing.T) {
 	if err := first.Append(want); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	// Deliberately not closed.
+	// Deliberately not closed: the process died rather than shut down.
+	crash(t, first)
 
 	second, _ := openDisk(t, dir)
 
@@ -206,6 +221,7 @@ func TestConflictingAppendSurvivesCrash(t *testing.T) {
 		t.Fatalf("conflicting Append: %v", err)
 	}
 
+	crash(t, s)
 	recovered, _ := openDisk(t, dir)
 
 	if got := recovered.LastIndex(); got != 4 {
@@ -308,6 +324,7 @@ func TestCompactionSurvivesCrash(t *testing.T) {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 	// Crash here.
+	crash(t, s)
 
 	recovered, snap := openDisk(t, dir)
 
@@ -371,6 +388,7 @@ func TestRepeatedCompaction(t *testing.T) {
 	}
 
 	// It must still recover after all that.
+	crash(t, s)
 	recovered, snap := openDisk(t, dir)
 	if snap.Meta.Index != 96 {
 		t.Fatalf("recovered snapshot index %d, want 96", snap.Meta.Index)
