@@ -26,6 +26,10 @@ type DiskStorage struct {
 	wal       *WAL
 	snapshots *Snapshotter
 
+	// lock is this process's exclusive claim on the data directory, released
+	// when the storage closes or when the process dies.
+	lock *dirLock
+
 	hardState raft.HardState
 
 	// entries holds the log in index order, with one subtlety: entries[0] is
@@ -97,8 +101,17 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 			cfg.SnapshotsKept)
 	}
 
+	// Claim the directory before touching anything in it. Two processes
+	// sharing one interleave their logs and overwrite each other's votes,
+	// and neither notices.
+	lock, err := lockDir(cfg.Dir)
+	if err != nil {
+		return nil, Snapshot{}, err
+	}
+
 	snapshots, err := NewSnapshotter(filepath.Join(cfg.Dir, snapshotSubdir))
 	if err != nil {
+		lock.release()
 		return nil, Snapshot{}, err
 	}
 
@@ -106,6 +119,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 	// no longer interesting.
 	snap, err := snapshots.Load()
 	if err != nil && !errors.Is(err, ErrNoSnapshot) {
+		lock.release()
 		return nil, Snapshot{}, err
 	}
 
@@ -115,6 +129,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 		SegmentSize: cfg.SegmentSize,
 	})
 	if err != nil {
+		lock.release()
 		return nil, Snapshot{}, err
 	}
 
@@ -124,6 +139,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 	// silently lose committed data.
 	if replay.Snapshot.Index > snap.Meta.Index {
 		wal.Close()
+		lock.release()
 		return nil, Snapshot{}, fmt.Errorf(
 			"%w: the log records a snapshot at index %d but the newest readable snapshot is at %d",
 			ErrCorruptWAL, replay.Snapshot.Index, snap.Meta.Index)
@@ -131,6 +147,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 
 	s := &DiskStorage{
 		wal:       wal,
+		lock:      lock,
 		snapshots: snapshots,
 		hardState: replay.HardState,
 		entries:   []raft.Entry{{Index: snap.Meta.Index, Term: snap.Meta.Term}},
@@ -146,6 +163,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 
 	if err := s.validateContiguous(); err != nil {
 		wal.Close()
+		lock.release()
 		return nil, Snapshot{}, err
 	}
 
@@ -464,7 +482,15 @@ func (s *DiskStorage) Close() error {
 		return nil
 	}
 	s.closed = true
-	return s.wal.Close()
+
+	// The write-ahead log is closed before the claim on the directory is
+	// dropped, so the next process to take the lock cannot begin reading
+	// while this one is still writing.
+	err := s.wal.Close()
+	if lerr := s.lock.release(); err == nil {
+		err = lerr
+	}
+	return err
 }
 
 // DiskStorage must satisfy the interface the Raft core depends on. Asserting
