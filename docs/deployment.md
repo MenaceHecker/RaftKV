@@ -153,6 +153,21 @@ single message carrying all of it would be undeliverable. The remaining slices
 follow each acknowledgement immediately, so catching up runs at network speed
 rather than at one slice per heartbeat.
 
+## One process per data directory
+
+A node takes an exclusive lock on its data directory and refuses to start if
+another process holds it. Two processes sharing one used to be accepted in
+silence, and it is quietly the worst thing in this document: both append to
+the same write-ahead log and the last hard state written wins, so each node
+records a vote in the same term and the survivor inherits the other's. A node
+restarting there believes it voted for a candidate it never heard from, and
+that record is the only thing standing between a term and two leaders.
+
+The lock lives on a file descriptor rather than in a file, so the kernel drops
+it when the process dies however it dies. A crashed node restarts without
+anyone deleting anything, which a lock file holding a process ID would not
+allow.
+
 ## Shutting down
 
 A SIGTERM on an idle node releases its files in about a sixth of a second. A
