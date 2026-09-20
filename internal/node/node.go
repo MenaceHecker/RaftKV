@@ -327,6 +327,10 @@ func Start(cfg Config) (*Node, error) {
 		ElectionTick:        cfg.ElectionTick,
 		HeartbeatTick:       cfg.HeartbeatTick,
 		MaxCommittedEntries: cfg.MaxCommittedEntries,
+		// Always on, for the same reason as pre-vote: a leader that cannot
+		// reach a majority should find that out rather than keep telling
+		// everything that routes by leadership that it is still in charge.
+		CheckQuorum: true,
 		// Always on. A restarting node that deposes a healthy leader costs
 		// real availability, and there is no workload for which paying an
 		// extra round trip before an election is the worse trade.
@@ -644,6 +648,15 @@ func (n *Node) retryDeferredReads() {
 
 // processReady drains the effects the core produced and acts on them.
 func (n *Node) processReady() {
+	// Leadership is a property of the node, not of this batch of work, so it
+	// is observed before anything might return early. A leader that stands
+	// down because it cannot reach a majority produces no messages and no
+	// entries, so its Ready is empty and the metrics would otherwise go on
+	// reporting it as the leader indefinitely: the gauge that says whether
+	// this node leads would be wrong exactly when someone is looking at it
+	// to find out why nothing is being served.
+	n.observeLeadership()
+
 	rd := n.raft.Ready()
 	if rd.IsEmpty() {
 		return
@@ -694,6 +707,8 @@ func (n *Node) processReady() {
 	n.resolveReads()
 
 	n.raft.Advance(rd)
+	// Advancing can change leadership too, so it is checked again rather
+	// than waiting for the next pass.
 	n.observeLeadership()
 
 	// Leadership changes invalidate everything in flight: a follower cannot
