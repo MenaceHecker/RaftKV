@@ -339,6 +339,8 @@ func parsePeers(spec string) (map[raft.NodeID]string, error) {
 	}
 
 	peers := make(map[raft.NodeID]string)
+	// Addresses are tracked alongside IDs so a collision in either is caught.
+	addresses := make(map[string]raft.NodeID)
 	for _, part := range strings.Split(spec, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -365,6 +367,17 @@ func parsePeers(spec string) (map[raft.NodeID]string, error) {
 		if _, exists := peers[raft.NodeID(id)]; exists {
 			return nil, fmt.Errorf("peer %d appears more than once", id)
 		}
+		if other, taken := addresses[addr]; taken {
+			// Two members advertising one address is a typo with an
+			// expensive failure mode. The second node to start cannot bind
+			// the port and dies, and everyone else dialing it reaches the
+			// first node's process instead, so the cluster believes it has a
+			// member it does not. Quorum is still met by the survivors, which
+			// is the problem: nothing looks broken, and the fault tolerance
+			// that was paid for is quietly gone.
+			return nil, fmt.Errorf("peers %d and %d are both at %s", other, id, addr)
+		}
+		addresses[addr] = raft.NodeID(id)
 		peers[raft.NodeID(id)] = addr
 	}
 
