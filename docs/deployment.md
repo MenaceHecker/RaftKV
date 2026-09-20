@@ -153,6 +153,27 @@ single message carrying all of it would be undeliverable. The remaining slices
 follow each acknowledgement immediately, so catching up runs at network speed
 rather than at one slice per heartbeat.
 
+## Shutting down
+
+A SIGTERM on an idle node releases its files in about a sixth of a second. A
+node under load used to take as long as its slowest client was prepared to
+wait, which is worth understanding because the cause is not obvious.
+
+Stopping the gRPC server gracefully refuses new calls on every service at
+once, and one of those services is Raft. A leader that can no longer receive
+follower responses cannot commit, so the client writes already in its hands
+can never finish, and they sit there until the client gives up. Measured,
+shutdown took 3, 10 and 20 seconds against clients whose request timeouts were
+3, 10 and 20 seconds: the server was not in control of its own shutdown at
+all.
+
+It is now bounded at five seconds, after which remaining connections are
+closed and those clients get an error to retry against the new leader. That
+matters for the `terminationGracePeriodSeconds: 30` above: a client patient
+enough to outlast the grace period would otherwise turn an orderly stop into a
+kill, and a killed node comes back with a torn log tail to recover rather than
+a clean one.
+
 ## Getting the peer list wrong
 
 Every node learns the cluster from `--peers`, and the ways that list can be
