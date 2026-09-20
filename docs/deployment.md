@@ -153,6 +153,21 @@ single message carrying all of it would be undeliverable. The remaining slices
 follow each acknowledgement immediately, so catching up runs at network speed
 rather than at one slice per heartbeat.
 
+## Getting the peer list wrong
+
+Every node learns the cluster from `--peers`, and the ways that list can be
+wrong mostly fail late rather than at startup. The parser refuses each of them
+with a reason: a missing or unreadable ID, the reserved ID zero, a member
+listed twice, an address that is blank.
+
+Two members sharing an address is the one worth calling out, because it used
+to be accepted. The second node to start cannot bind the port and dies, while
+everyone else dialing it reaches the first node's process, so the cluster
+believes it has a member it does not. Quorum is still met by the survivors,
+which is exactly the problem: nothing looks broken and the fault tolerance you
+paid for is gone. The error now names both IDs and the address they collide
+on.
+
 ## Configuration that matters
 
 | Flag | Default | Notes |
