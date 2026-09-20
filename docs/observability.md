@@ -37,6 +37,12 @@ The metrics are chosen to answer, in order, the questions an operator actually
 has during an incident. A metric that does not help answer one of them is not
 worth its cardinality.
 
+A leader that loses contact with a majority steps down within an election
+timeout, so `raftkv_is_leader` and `/ready` both stop claiming it can serve.
+Without that a partitioned leader reported itself ready indefinitely, and the
+gauge said so too: the one that had lost the cluster was the one still
+insisting it ran it.
+
 **Is there a leader?** `raftkv_is_leader` is 1 on the leader and 0 elsewhere,
 so summed across the cluster it should be exactly 1. Zero means nothing can
 commit. `raftkv_leader_id` is what each node believes, and nodes disagreeing is

@@ -8,7 +8,7 @@ A distributed key-value store with the Raft consensus algorithm implemented from
 go test ./...
 ```
 
-467 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
+472 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
 
 ---
 
@@ -43,6 +43,8 @@ The bar I set for myself: **every safety property in the paper should have a tes
 **Bounded replication messages.** A leader sends a lagging follower its backlog in slices rather than in one message, because how far behind a follower can fall has no limit and every transport has a maximum message size.
 
 **Streamed snapshots.** A state machine image is the one message whose size follows the data rather than the protocol, so it travels over its own streaming RPC in chunks instead of as one message that would fail past the receiver's size limit.
+
+**Check quorum.** A leader that has not heard from a majority within an election timeout steps down. Raft does not require it and is safe without it, but a leader cut off from everyone otherwise never finds out: it keeps advertising itself, so a readiness probe asking whether there is a leader gets yes forever and traffic keeps arriving at the one node that cannot serve it.
 
 **Pre-vote.** A node asks whether an election would be won before starting one (§9.6). Without it, a node that restarts or rejoins deposes a perfectly healthy leader simply by campaigning, because its vote request carries a higher term and everyone must step down to it.
 
@@ -184,7 +186,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 12,145 lines of implementation and 16,607 of tests, across 467 tests. The ratio is not an accident.
+Roughly 12,241 lines of implementation and 16,710 of tests, across 472 tests. The ratio is not an accident.
 
 ---
 
