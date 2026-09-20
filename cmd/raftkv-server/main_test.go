@@ -1,8 +1,17 @@
 package main
 
 import (
+	"context"
+	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
@@ -126,5 +135,101 @@ func TestNewLoggerRejectsAnUnknownLevel(t *testing.T) {
 	}
 	if _, err := newLogger("chatty"); err == nil {
 		t.Error("an unknown log level was accepted")
+	}
+}
+
+// blockingRaft is a RaftService whose Deliver never returns until released.
+// It stands in for the situation that made shutdown unbounded: a request the
+// node can no longer finish, held open by a client that has not given up.
+type blockingRaft struct {
+	raftkvv1.UnimplementedRaftServiceServer
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingRaft) Deliver(ctx context.Context, _ *raftkvv1.DeliverRequest) (*raftkvv1.DeliverResponse, error) {
+	b.once.Do(func() { close(b.entered) })
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
+	return &raftkvv1.DeliverResponse{}, nil
+}
+
+func TestStopServerDoesNotWaitForeverOnAStuckRequest(t *testing.T) {
+	// GracefulStop refuses new calls on every service at once, Raft's
+	// included, so a leader stops being able to commit and the client writes
+	// already in its hands cannot finish. Before this was bounded, shutdown
+	// lasted exactly as long as the client was willing to wait: measured at
+	// 3, 10 and 20 seconds for clients configured with those timeouts.
+	blocker := &blockingRaft{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(blocker.release)
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+	srv := grpc.NewServer()
+	raftkvv1.RegisterRaftServiceServer(srv, blocker)
+	go srv.Serve(lis)
+
+	conn, err := grpc.NewClient(lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dialing: %v", err)
+	}
+	defer conn.Close()
+
+	// A call that will still be in flight when the shutdown begins. Its
+	// context outlives the grace period, which is the case that used to
+	// hold the process open.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*shutdownGrace)
+	defer cancel()
+	go raftkvv1.NewRaftServiceClient(conn).Deliver(ctx, &raftkvv1.DeliverRequest{
+		Message: &raftkvv1.Message{
+			Type: raftkvv1.MessageType_MESSAGE_TYPE_HEARTBEAT, From: 1, To: 2, Term: 1,
+		},
+	})
+
+	select {
+	case <-blocker.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the blocking call never reached the server, so nothing was held open")
+	}
+
+	start := time.Now()
+	stopServer(srv)
+	took := time.Since(start)
+
+	// Bounded by the grace period rather than by the caller's patience. The
+	// slack absorbs scheduling on a loaded machine without admitting the
+	// failure this guards against, which was an order of magnitude larger.
+	if limit := shutdownGrace + 3*time.Second; took > limit {
+		t.Errorf("stopping took %v with one request stuck; it should give up after about %v",
+			took, shutdownGrace)
+	}
+	if took < shutdownGrace/2 {
+		t.Errorf("stopping took only %v, so the in-flight request was cut off immediately "+
+			"rather than being given the grace period", took)
+	}
+}
+
+func TestStopServerReturnsImmediatelyWhenIdle(t *testing.T) {
+	// The common case must not pay the grace period.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+	srv := grpc.NewServer()
+	raftkvv1.RegisterRaftServiceServer(srv, &blockingRaft{
+		entered: make(chan struct{}), release: make(chan struct{}),
+	})
+	go srv.Serve(lis)
+
+	start := time.Now()
+	stopServer(srv)
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("stopping an idle server took %v", took)
 	}
 }
