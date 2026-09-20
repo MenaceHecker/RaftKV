@@ -72,6 +72,10 @@ type clusterOpts struct {
 	// maxAppendBytes bounds one AppendEntries payload. Zero takes the
 	// package default, which is far larger than any test backlog.
 	maxAppendBytes int
+	// checkQuorum makes a leader step down when it cannot reach a majority.
+	// Off by default so the existing tests, many of which strand a leader on
+	// purpose and expect it to stay one, keep testing what they did.
+	checkQuorum bool
 	// preVote enables the pre-vote round. It is off by default here so the
 	// existing tests keep exercising the plain election path, and the tests
 	// that care about pre-vote turn it on explicitly.
@@ -117,6 +121,7 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 			ElectionTick:   opts.electionTick,
 			HeartbeatTick:  opts.heartbeatTick,
 			PreVote:        opts.preVote,
+			CheckQuorum:    opts.checkQuorum,
 			MaxAppendBytes: opts.maxAppendBytes,
 			Storage:        storage,
 			Rand:           rng,
@@ -306,6 +311,7 @@ func (c *cluster) restart(id NodeID, opts clusterOpts) {
 		ElectionTick:   opts.electionTick,
 		HeartbeatTick:  opts.heartbeatTick,
 		PreVote:        opts.preVote,
+		CheckQuorum:    opts.checkQuorum,
 		MaxAppendBytes: opts.maxAppendBytes,
 		Storage:        c.storages[id],
 		Rand:           rand.New(rand.NewSource(opts.seed + int64(id)*7919)),
