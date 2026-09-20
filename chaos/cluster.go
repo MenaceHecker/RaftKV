@@ -274,6 +274,7 @@ func (c *Cluster) start(id raft.NodeID) error {
 		ElectionTick:  c.cfg.ElectionTick,
 		HeartbeatTick: c.cfg.HeartbeatTick,
 		Storage:       c.storages[id],
+		CheckQuorum:   true,
 		// The driver always enables pre-vote, so the chaos suite must too.
 		// Exercising a configuration that never ships would leave the one
 		// that does untested by the only suite built to break it.
