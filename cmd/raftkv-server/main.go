@@ -231,7 +231,7 @@ func run() error {
 
 	// Stop accepting work before stopping the node, so nothing arrives for a
 	// node that is on its way down and would only fail it.
-	grpcServer.GracefulStop()
+	stopServer(grpcServer)
 
 	if metricsServer != nil {
 		// Close rather than Shutdown: a scrape in flight has nothing worth
@@ -245,6 +245,46 @@ func run() error {
 	}
 	slog.Info("stopped", "id", self)
 	return nil
+}
+
+// shutdownGrace is how long in-flight requests are given to finish before the
+// server stops waiting for them.
+//
+// It has to exist because GracefulStop alone is not bounded by anything this
+// process controls. It refuses new calls on every service at once, Raft's
+// included, so a leader stops receiving the follower responses it needs to
+// commit and the client writes already in its hands can no longer finish.
+// They then sit there until the client gives up, and GracefulStop waits for
+// them: measured, shutdown took 3, 10 and 20 seconds for clients whose
+// request timeouts were 3, 10 and 20 seconds. A client that waits longer than
+// the orchestrator's grace period turns an orderly stop into a kill.
+//
+// Five seconds is comfortably longer than a healthy write and comfortably
+// shorter than the thirty second grace period the Kubernetes manifest asks
+// for, leaving room for the node to close its files afterwards.
+const shutdownGrace = 5 * time.Second
+
+// stopServer stops accepting work, waiting a bounded time for calls already
+// in progress.
+func stopServer(srv *grpc.Server) {
+	done := make(chan struct{})
+	go func() {
+		srv.GracefulStop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(shutdownGrace):
+		// Whatever is still outstanding is waiting on something this node
+		// has already stopped being able to provide. Cutting it off returns
+		// an error to those clients, which is the honest answer and one they
+		// will retry against the new leader.
+		slog.Warn("in-flight requests did not finish in time; closing connections",
+			"grace", shutdownGrace)
+		srv.Stop()
+		<-done
+	}
 }
 
 // serveMetrics starts the observability endpoint, or returns nil if no
