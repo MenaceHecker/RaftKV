@@ -208,6 +208,10 @@ func (n *Node) handleAppendResponse(m Message) error {
 		return nil
 	}
 
+	// Any message from a follower proves it is reachable and still
+	// recognises this leader, which is all the quorum check needs.
+	pr.active = true
+
 	if !m.Success {
 		n.backoff(pr, m)
 		n.sendAppend(m.From)

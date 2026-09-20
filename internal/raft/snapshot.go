@@ -156,6 +156,10 @@ func (n *Node) handleInstallSnapshotResponse(m Message) error {
 		return nil
 	}
 
+	// Any message from a follower proves it is reachable and still
+	// recognises this leader, which is all the quorum check needs.
+	pr.active = true
+
 	if !m.Success {
 		// The follower could not install it. Back the optimistic guess out so
 		// the next attempt starts from what is actually known.

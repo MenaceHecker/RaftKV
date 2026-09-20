@@ -111,6 +111,22 @@ type Config struct {
 	// extra round trips and removes the cliff.
 	MaxAppendBytes int
 
+	// CheckQuorum makes a leader step down if it has not heard from a
+	// majority within an election timeout.
+	//
+	// Raft does not require this. A leader that loses contact with everyone
+	// keeps believing it leads, and that is safe: it cannot commit anything
+	// without a majority, and read-index will not let it answer a read. What
+	// it cannot do is notice. It goes on advertising itself as the leader,
+	// so anything routing by that signal keeps sending it work it is unable
+	// to finish, and a readiness probe asking "is there a leader" gets the
+	// wrong answer indefinitely.
+	//
+	// With this set, a leader that cannot reach a majority discovers it
+	// within an election timeout and becomes a follower, which is the same
+	// conclusion the rest of the cluster reached the moment it disappeared.
+	CheckQuorum bool
+
 	// PreVote makes a node ask whether an election would be won before
 	// starting one, rather than raising its term and finding out (§9.6).
 	//
@@ -210,6 +226,11 @@ type progress struct {
 	// the next proposal, and chasing it produces an extra message per
 	// response for no gain.
 	heldBack bool
+	// active records that this follower has been heard from since the last
+	// quorum check. Any message counts: what is being established is that
+	// the node is reachable and still recognises this leader, not that any
+	// particular exchange completed.
+	active bool
 }
 
 // Node is a single Raft peer, and it is a pure state machine: it never blocks,
@@ -287,6 +308,9 @@ type Node struct {
 	// preVote enables the pre-vote round described on Config.PreVote.
 	preVote bool
 
+	// checkQuorum enables the step-down described on Config.CheckQuorum.
+	checkQuorum bool
+
 	// maxAppendBytes bounds one AppendEntries payload; see Config.
 	maxAppendBytes int
 
@@ -356,6 +380,7 @@ func NewNode(cfg Config) (*Node, error) {
 		electionTick:        cfg.ElectionTick,
 		heartbeatTick:       cfg.HeartbeatTick,
 		preVote:             cfg.PreVote,
+		checkQuorum:         cfg.CheckQuorum,
 		maxAppendBytes:      maxAppendBytes,
 		maxCommittedEntries: maxCommittedEntries,
 		rand:                rng,
@@ -474,6 +499,32 @@ func (n *Node) Ready() Ready {
 	return rd
 }
 
+// quorumActive reports whether a majority has been heard from since the last
+// check.
+//
+// The tally goes through the configuration rather than a raw count, for the
+// same reason elections do: during a joint transition a majority of one voter
+// set is not a majority, and a leader that counted it as one would keep
+// believing it led a cluster the other set had already moved past.
+func (n *Node) quorumActive() bool {
+	active := make(map[NodeID]bool, len(n.progress))
+	// A leader is trivially in touch with itself.
+	active[n.id] = true
+	for id, pr := range n.progress {
+		if pr.active {
+			active[id] = true
+		}
+	}
+	return n.conf.voteGranted(active)
+}
+
+// clearActive starts a new observation interval.
+func (n *Node) clearActive() {
+	for _, pr := range n.progress {
+		pr.active = false
+	}
+}
+
 // HasUnapplied reports whether committed entries are still waiting.
 //
 // A caller that has just applied a bounded batch uses this to know it should
@@ -504,6 +555,21 @@ func (n *Node) Advance(rd Ready) {
 func (n *Node) Tick() error {
 	switch n.state {
 	case Leader:
+		if n.checkQuorum {
+			n.electionElapsed++
+			if n.electionElapsed >= n.randomizedElectionTimeout {
+				n.electionElapsed = 0
+				if !n.quorumActive() {
+					// Nobody has been in touch for a whole election timeout,
+					// so this node is on the wrong side of a partition or
+					// the rest of the cluster is gone. Either way it is not
+					// leading anything.
+					return n.becomeFollower(n.term, None)
+				}
+				n.clearActive()
+			}
+		}
+
 		n.heartbeatElapsed++
 		if n.heartbeatElapsed >= n.heartbeatTick {
 			n.heartbeatElapsed = 0

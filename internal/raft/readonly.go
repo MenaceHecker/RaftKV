@@ -262,6 +262,12 @@ func (n *Node) handleHeartbeatResponse(m Message) error {
 		return nil
 	}
 
+	// A heartbeat response proves the follower is reachable, whether or not
+	// it belongs to a read round this leader still cares about.
+	if pr := n.progress[m.From]; pr != nil {
+		pr.active = true
+	}
+
 	key := string(m.Context)
 	round, ok := n.readOnly.rounds[key]
 	if !ok {
