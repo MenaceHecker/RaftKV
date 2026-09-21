@@ -462,17 +462,6 @@ func (s *DiskStorage) SnapshotMeta() SnapshotMeta {
 	return SnapshotMeta{Index: s.entries[0].Index, Term: s.entries[0].Term}
 }
 
-// Sync flushes the write-ahead log.
-func (s *DiskStorage) Sync() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if s.closed {
-		return errClosed
-	}
-	return s.wal.Sync()
-}
-
 // Close releases the underlying files.
 func (s *DiskStorage) Close() error {
 	s.mu.Lock()
