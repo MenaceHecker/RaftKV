@@ -186,7 +186,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 12,241 lines of implementation and 16,872 of tests, across 474 tests. The ratio is not an accident.
+Roughly 12,230 lines of implementation and 16,998 of tests, across 474 tests. The ratio is not an accident.
 
 ---
 
@@ -203,6 +203,8 @@ The paper names five. Here's what covers each:
 | State Machine Safety | `assertAppliedConsistent`, called throughout |
 
 Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFromCurrentTerm`, for §5.4.2.
+
+The core's usage contract has two runnable examples rather than only prose. Go compiles them and compares their printed output, so an example that stopped describing the code fails the suite: breaking a sole voter's ability to commit its own proposals makes one of them fail with a diff. They are the answer to "how do I drive this thing", in a form that cannot quietly stop being true.
 
 The numbers in this README are checked too. They had drifted twice, once claiming 177 tests in one paragraph and 367 in another when there were 434, so `internal/determinism` counts the tests, the fuzz targets and the lines and fails if the text disagrees. A document that is confidently wrong about something checkable invites doubt about the parts that are harder to check.
 
