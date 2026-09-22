@@ -5,6 +5,7 @@
 # the repository.
 /bin/
 /raftkv-server
+/raftkv-bench
 
 # Test artifacts
 *.test

@@ -395,11 +395,20 @@ func getOnce(p *pool, opt *options, key string, local *result) error {
 	return errors.New("gave up following redirects")
 }
 
+// classify buckets a failure for the error breakdown.
+//
+// A gRPC failure is named by its code. Anything else came from this side:
+// a context that expired before the call returned, or running out of
+// redirects to follow. Those used to be labelled "unknown", which collides
+// with gRPC's own Unknown code by everything except capitalisation, so a run
+// could report two buckets that read as the same thing and were not. Worse,
+// a timeout landed in one or the other depending on whether the server
+// answered or the client gave up first.
 func classify(err error) string {
 	if st, ok := status.FromError(err); ok {
 		return st.Code().String()
 	}
-	return "unknown"
+	return "local:" + err.Error()
 }
 
 // percentile returns the nearest-rank percentile of an ascending slice.
