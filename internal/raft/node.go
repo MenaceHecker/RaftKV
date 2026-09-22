@@ -253,6 +253,10 @@ type Node struct {
 	// voter sets and a majority of one is not a decision.
 	conf config
 
+	// confSeq counts configuration changes, so a driver can notice one
+	// without rebuilding and comparing a ConfState on every pass.
+	confSeq uint64
+
 	// jointEntryIndex is the log index of the entry that opened the current
 	// transition, or zero when none is open. The leader waits for it to commit
 	// before finishing the transition.

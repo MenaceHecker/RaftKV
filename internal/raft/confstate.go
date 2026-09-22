@@ -49,8 +49,36 @@ func (cs ConfState) String() string {
 	return fmt.Sprintf("joint old=%v new=%v", cs.Voters, cs.Incoming)
 }
 
+// Members returns every node in the configuration, sorted.
+//
+// During a joint transition that is the union of both sides. A leader has to
+// be able to reach all of them: the outgoing majority and the incoming
+// majority must each agree before the transition can complete, so a member of
+// either one that cannot be contacted stalls the change.
+func (cs ConfState) Members() []NodeID {
+	seen := make(map[NodeID]struct{}, len(cs.Voters)+len(cs.Incoming))
+	for _, id := range cs.Voters {
+		seen[id] = struct{}{}
+	}
+	for _, id := range cs.Incoming {
+		seen[id] = struct{}{}
+	}
+	return sortedNodeIDs(seen)
+}
+
 // ConfState returns this node's current configuration.
 func (n *Node) ConfState() ConfState { return n.conf.toState() }
+
+// ConfSeq returns a counter that increases every time this node's
+// configuration changes.
+//
+// A driver watches it to learn that the membership moved. It is a counter
+// rather than a comparison of two ConfStates because the driver checks on
+// every pass through its loop, and building a ConfState to diff would
+// allocate two slices and a map each time. The value means nothing to any
+// other node and nothing across a restart: it is only ever compared against
+// one this same node reported earlier.
+func (n *Node) ConfSeq() uint64 { return n.confSeq }
 
 // toState converts the internal configuration into its portable form.
 //

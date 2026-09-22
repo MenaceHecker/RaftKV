@@ -126,7 +126,22 @@ type PeerTransport struct {
 	localMu sync.RWMutex
 	local   Stepper
 
-	peers map[raft.NodeID]*peer
+	// peers is guarded because membership changes add and remove members
+	// while the Raft loop is already calling Send. Send holds the read lock
+	// only long enough to look one peer up, so reconfiguration never delays
+	// replication to anybody else.
+	peersMu sync.RWMutex
+	peers   map[raft.NodeID]*peer
+
+	// closed stops AddPeer from dialling after shutdown. Without it a change
+	// arriving during Close would start a goroutine nothing would ever stop.
+	closed bool
+
+	// The dial settings are kept so that a member admitted at runtime is
+	// built exactly like one that was configured at startup.
+	dialOpts    []grpc.DialOption
+	queueSize   int
+	sendTimeout time.Duration
 
 	closeOnce sync.Once
 }
@@ -180,45 +195,112 @@ func NewPeerTransport(cfg PeerConfig) (*PeerTransport, error) {
 	}
 
 	t := &PeerTransport{
-		self:  cfg.Self,
-		local: cfg.Local,
-		peers: make(map[raft.NodeID]*peer, len(cfg.Addresses)),
+		self:        cfg.Self,
+		local:       cfg.Local,
+		peers:       make(map[raft.NodeID]*peer, len(cfg.Addresses)),
+		dialOpts:    dialOpts,
+		queueSize:   cfg.QueueSize,
+		sendTimeout: cfg.SendTimeout,
 	}
 
 	for id, addr := range cfg.Addresses {
-		if id == cfg.Self {
-			// A node does not dial itself; those messages are handed
-			// straight to the local Stepper.
-			continue
-		}
-		if addr == "" {
+		if err := t.AddPeer(id, addr); err != nil {
 			t.Close()
-			return nil, fmt.Errorf("transport: node %d has no address", id)
+			return nil, err
 		}
-
-		conn, err := grpc.NewClient(addr, dialOpts...)
-		if err != nil {
-			t.Close()
-			return nil, fmt.Errorf("transport: creating client for node %d at %s: %w", id, addr, err)
-		}
-
-		pctx, pcancel := context.WithCancel(context.Background())
-		p := &peer{
-			id:      id,
-			addr:    addr,
-			conn:    conn,
-			client:  raftkvv1.NewRaftServiceClient(conn),
-			queue:   make(chan *raftkvv1.Message, cfg.QueueSize),
-			done:    make(chan struct{}),
-			ctx:     pctx,
-			cancel:  pcancel,
-			timeout: cfg.SendTimeout,
-		}
-		t.peers[id] = p
-		go p.run()
 	}
 
 	return t, nil
+}
+
+// AddPeer makes a node reachable, dialling it unless it is already known at
+// the same address.
+//
+// This is where the address in a configuration change becomes a connection.
+// Without it a member admitted at runtime commits into the configuration and
+// is then never heard from: the leader counts it toward every majority while
+// having no way to reach it, so admitting one node to a three-node cluster
+// takes it from tolerating one failure to tolerating none.
+//
+// It is idempotent, so a caller can reconcile the entire membership after
+// every change without churning healthy connections.
+func (t *PeerTransport) AddPeer(id raft.NodeID, addr string) error {
+	if id == t.self {
+		// A node does not dial itself; those messages are handed straight to
+		// the local Stepper.
+		return nil
+	}
+	if addr == "" {
+		return fmt.Errorf("transport: node %d has no address", id)
+	}
+
+	t.peersMu.Lock()
+	if t.closed {
+		t.peersMu.Unlock()
+		return errors.New("transport: cannot add a peer to a closed transport")
+	}
+	existing, moved := t.peers[id]
+	if moved && existing.addr == addr {
+		t.peersMu.Unlock()
+		return nil
+	}
+	p, err := t.dial(id, addr)
+	if err != nil {
+		t.peersMu.Unlock()
+		return err
+	}
+	t.peers[id] = p
+	t.peersMu.Unlock()
+
+	if moved {
+		// The member is at a new address. Retire the stale link out here
+		// rather than under the lock, because closing waits for an in-flight
+		// delivery to abort and Send must not queue behind that.
+		existing.close()
+	}
+	return nil
+}
+
+// RemovePeer drops a node that is no longer a member and closes its link.
+//
+// Correctness does not depend on this, since the core stops addressing
+// messages to a node it has removed, but a departed member would otherwise
+// keep a socket and a goroutine for the lifetime of the process and go on
+// appearing in the stats as though it were still part of the cluster.
+func (t *PeerTransport) RemovePeer(id raft.NodeID) {
+	t.peersMu.Lock()
+	p, ok := t.peers[id]
+	delete(t.peers, id)
+	t.peersMu.Unlock()
+
+	if ok {
+		p.close()
+	}
+}
+
+// dial creates one peer connection and starts the goroutine that drains it.
+// The caller holds peersMu; grpc.NewClient does no I/O, so nothing slow
+// happens while it is held.
+func (t *PeerTransport) dial(id raft.NodeID, addr string) (*peer, error) {
+	conn, err := grpc.NewClient(addr, t.dialOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("transport: creating client for node %d at %s: %w", id, addr, err)
+	}
+
+	pctx, pcancel := context.WithCancel(context.Background())
+	p := &peer{
+		id:      id,
+		addr:    addr,
+		conn:    conn,
+		client:  raftkvv1.NewRaftServiceClient(conn),
+		queue:   make(chan *raftkvv1.Message, t.queueSize),
+		done:    make(chan struct{}),
+		ctx:     pctx,
+		cancel:  pcancel,
+		timeout: t.sendTimeout,
+	}
+	go p.run()
+	return p, nil
 }
 
 // Send implements the driver's Transport interface.
@@ -241,10 +323,12 @@ func (t *PeerTransport) Send(msgs []raft.Message) {
 			continue
 		}
 
+		t.peersMu.RLock()
 		p, ok := t.peers[m.To]
+		t.peersMu.RUnlock()
 		if !ok {
-			// Not a known peer. Phase 4's membership changes make this
-			// reachable; for now it means a stray message.
+			// Either not a member, or a member whose address this node has
+			// not learned yet. Dropping is safe because Raft retransmits.
 			continue
 		}
 
@@ -365,7 +449,16 @@ func (p *peer) close() {
 // Close shuts down every peer connection. It is safe to call more than once.
 func (t *PeerTransport) Close() error {
 	t.closeOnce.Do(func() {
+		t.peersMu.Lock()
+		closing := make([]*peer, 0, len(t.peers))
 		for _, p := range t.peers {
+			closing = append(closing, p)
+		}
+		t.peers = nil
+		t.closed = true
+		t.peersMu.Unlock()
+
+		for _, p := range closing {
 			p.close()
 		}
 	})
@@ -394,6 +487,9 @@ type PeerStats struct {
 // that silently drops messages is otherwise impossible to distinguish from one
 // that is working.
 func (t *PeerTransport) Stats() []PeerStats {
+	t.peersMu.RLock()
+	defer t.peersMu.RUnlock()
+
 	out := make([]PeerStats, 0, len(t.peers))
 	for _, p := range t.peers {
 		out = append(out, PeerStats{

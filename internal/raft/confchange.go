@@ -226,6 +226,10 @@ func applyConfChange(c config, cc ConfChange) (config, error) {
 func (n *Node) adoptConfig(c config) {
 	n.conf = c
 
+	// Both paths that change the configuration come through here, which makes
+	// this the one place that can tell a driver the membership moved.
+	n.confSeq++
+
 	if n.state != Leader {
 		// Only a leader tracks replication progress; a follower that later
 		// wins an election rebuilds it from scratch in becomeLeader.

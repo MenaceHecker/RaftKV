@@ -8,7 +8,7 @@ A distributed key-value store with the Raft consensus algorithm implemented from
 go test ./...
 ```
 
-474 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
+477 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
 
 ---
 
@@ -131,6 +131,10 @@ That sounds like a detail and it hid an entire subsystem. A message queued befor
 
 Nothing in the existing tests could have found it. Membership changes were covered by deterministic unit tests on a healthy cluster, and the chaos suite, which is the thing built to break the algorithm, had ten scenarios and not one of them changed the membership. The bug appeared on the first run of the first scenario that did. It also needed a second fix beyond not crashing: a leader that is no longer a member cannot count itself towards a majority, so it has to stand down rather than keep issuing orders to a cluster it has left.
 
+**`AddNode` reported success while the new member sat unreachable forever.** The address of a node admitted at runtime arrives in the configuration change, and the gRPC transport built its connection map once at startup and never looked at it again. So the change committed, the leader counted the new node towards every majority, and every message addressed to it was dropped by a map lookup that missed. A three node cluster that admitted a fourth went from tolerating one failure to tolerating none, and the operator was told it had worked. The deployment guide documents raising a StatefulSet's replica count and calling `AddNode`, which is exactly the sequence that could not work.
+
+Nothing was going to find it. Joint consensus is covered by deterministic tests in the core, and the chaos suite drives membership changes through a network that routes by node ID, where every node it was built with is reachable by construction and always has been. Both layers were correct and the one between them was never asked. The transport now learns members as the configuration changes, which has to happen when the entry is appended rather than when it commits: growing a single node cluster produces a joint configuration needing a majority of both {1} and {1, 2}, so the entry admitting the second node cannot commit until that node answers, and it cannot answer until somebody is able to reach it.
+
 **A restarting node went off the air for half an election timeout.** Applying committed entries happens on the same goroutine that ticks the clock and reads messages, and the batch was unbounded, so a 20,000 entry replay applied in one go and blocked the loop for 478ms. During that the node could not send a heartbeat, answer one, or even count its own election timer. On a leader with a larger log that is an availability outage, and nothing about it would look like an apply problem.
 
 Two of my attempts to test the fix were worthless and I nearly kept them. The fix has two halves: cap the batch, and come back for the remainder without waiting. The second half only matters when nothing else wakes the loop, and my tests polled the node's status every two milliseconds, which sends on a channel the loop selects on. The test was supplying the very wake-up it was meant to prove unnecessary, and passed identically with the mechanism removed. Reading the applied index once, at the end, tells the real story: 2002 of 2001 entries applied with it, 200 without.
@@ -188,7 +192,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 12,250 lines of implementation and 17,021 of tests, across 474 tests. The ratio is not an accident.
+Roughly 12,250 lines of implementation and 17,021 of tests, across 477 tests. The ratio is not an accident.
 
 ---
 
