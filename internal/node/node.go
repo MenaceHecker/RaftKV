@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -566,6 +567,7 @@ func (n *Node) handleProposal(req proposalRequest) {
 	// waiting its turn. Grouping them costs those writes nothing and saves
 	// the cluster one fsync each.
 	batch := append(n.proposalBatch[:0], req)
+	yielded := false
 collect:
 	for len(batch) < n.cfg.MaxProposalBatch {
 		select {
@@ -576,6 +578,24 @@ collect:
 			// receive succeeds here only when a client is already blocked
 			// sending. That is the precise condition worth batching on:
 			// never wait for writes that have not arrived.
+			//
+			// Finding nobody, though, can mean two different things. It can
+			// mean there genuinely is one writer, or it can mean the others
+			// are runnable and have simply not reached their send yet, which
+			// is what happens whenever there are fewer processors than
+			// writers. On a single core that was every time: batches were
+			// always one entry and group commit quietly did nothing.
+			//
+			// So an empty first look yields once and asks again. Under load
+			// this costs nothing, because the batch is already larger than
+			// one by the time it empties and there is nothing to gain from
+			// waiting; yielding on every batch regardless measured a third
+			// of the write throughput at sixty-four clients.
+			if len(batch) == 1 && !yielded {
+				yielded = true
+				runtime.Gosched()
+				continue
+			}
 			break collect
 		}
 	}

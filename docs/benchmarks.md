@@ -86,7 +86,22 @@ from 424ms to 27ms while throughput went from 148 to 2,284 ops/s, a factor of
 15. Nothing got faster in absolute terms, the fsync still costs 6.8ms. The
 writes simply stopped queueing for a resource they could have shared.
 
-Two details worth keeping in mind. Batching never waits: a batch contains only
+Batching depends on the writes genuinely overlapping, and that is the
+scheduler's decision rather than the code's. The first version only looked for
+waiting writes once, without blocking, so when there were fewer processors
+than writers it usually found nobody: the others were runnable but had not yet
+reached their send. On a single core that happened every time, batches were
+always one entry, and group commit did nothing at all while appearing to work.
+CI found it, on a runner with fewer cores than the machine these numbers come
+from.
+
+An empty first look now yields once and asks again. On a single core that
+takes the largest batch from 1 to about 28; under load it costs nothing, since
+the batch is already larger than one by the time it empties. Yielding
+unconditionally instead, which was the obvious fix, cost a third of the write
+throughput at sixty-four clients.
+
+Two further details worth keeping in mind. Batching never waits: a batch contains only
 writes that had already arrived, so a single client talking to an idle cluster
 batches one at a time and pays nothing extra. And the batch is capped, by
 default at 64, because the client that starts a batch waits for all of it.

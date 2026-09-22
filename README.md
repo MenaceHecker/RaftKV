@@ -34,7 +34,7 @@ The bar I set for myself: **every safety property in the paper should have a tes
 
 **Client deduplication.** Client ID plus sequence number, checked inside the state machine so every replica reaches the same verdict.
 
-**Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never waits for writes that have not arrived.
+**Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never blocks waiting for writes that have not arrived, though it does yield once before concluding there are none: whether concurrent writes are actually waiting is the scheduler's decision, and with fewer processors than writers they are usually runnable rather than ready.
 
 **Batched read confirmation.** Concurrent linearizable reads share one leadership confirmation round instead of each sending its own, which took reads from 7,600 to 27,000 a second and cut median latency from 2ms to 0.5ms. A read arriving mid-round waits for the next one, because heartbeats sent before it existed cannot prove anything about it.
 
@@ -113,6 +113,8 @@ Not a highlight reel. These are real, and they're the reason the test discipline
 
 Fuzzing the decoders found that, a three gigabyte allocation, and four more of the same shape in a few minutes of machine time, all of them accepting input the encoder could never produce. `DecodeCommand` ignored trailing bytes, so two byte strings decoded to one command. `Restore` accepted keys in any order and repeated keys, silently keeping whichever copy came last, even though the encoder sorts them precisely so two replicas' snapshots can be compared directly. None of it was a safety violation, and all of it threw away corruption checks that were free.
 
+**Group commit did nothing at all on a single core, and looked fine.** It collected the writes already waiting on an unbuffered channel, with one non-blocking look. Where there are fewer processors than writers the others are runnable but have not reached their send yet, so the look found nobody and every batch was one entry. Tuned on eleven cores, measured on eleven cores, broken on one. CI caught it on a smaller runner, which is the entire reason for having CI rather than a habit of running the tests. The fix yields once before giving up, but only when the batch would otherwise be a single entry: yielding unconditionally, which was the obvious version, cost a third of the write throughput at sixty-four clients. There is now a single-processor run in CI so the next thing like it is caught deliberately.
+
 **The chaos suite crashed nodes hundreds of times against storage that cannot lose anything.** Every run used an in-memory log, so a "crash" discarded a map. Real recovery, reading segments back, checking frames, stitching the log together, was covered by the storage package alone and never by an adversarial crash sequence. Every scenario now runs a second time against the write-ahead log the server actually ships.
 
 Worth stating exactly what that buys, because the obvious claim is wrong and I measured it rather than assuming. Breaking replay so it returns entries out of order is caught. Breaking it so it loses the tail of the log is not, and should not be: an entry that never reached a majority was never committed, and the leader simply sends it again. Losing the entire log on restart is not caught either, because the scenarios restart one node at a time and a majority still holds the data. So the disk runs are mostly an exercise of that code path rather than an independent oracle for it, and the storage tests remain where corruption is detected. What they add is that the path runs at all under hundreds of crash, compaction and membership sequences, which is how the compacted-restart panic was originally found.
@@ -186,7 +188,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 12,230 lines of implementation and 16,998 of tests, across 474 tests. The ratio is not an accident.
+Roughly 12,250 lines of implementation and 17,021 of tests, across 474 tests. The ratio is not an accident.
 
 ---
 
