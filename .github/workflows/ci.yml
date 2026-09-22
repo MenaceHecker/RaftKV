@@ -55,6 +55,18 @@ jobs:
       - name: test
         run: go test ./...
 
+      - name: test on a single processor
+        # Concurrency here is not incidental: group commit batches the writes
+        # that are already waiting, and whether any are waiting is the
+        # scheduler's decision. Tuned on a machine with eleven cores, the
+        # batching silently stopped happening on one, because the other
+        # writers were runnable but had not yet reached their send. The
+        # feature went on looking like it worked.
+        #
+        # This is cheap and it is the only thing that would have caught that
+        # deliberately rather than by luck of whatever the runner had.
+        run: GOMAXPROCS=1 go test -count=1 ./...
+
       - name: test with the race detector
         # The driver, the transport and the chaos harness all run real
         # goroutines, and the race detector is the only thing that checks the
