@@ -8,7 +8,7 @@ A distributed key-value store with the Raft consensus algorithm implemented from
 go test ./...
 ```
 
-517 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
+526 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
 
 ---
 
@@ -192,7 +192,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 12,500 lines of implementation and 19,000 of tests, across 517 tests. The ratio is not an accident.
+Roughly 12,500 lines of implementation and 19,000 of tests, across 526 tests. The ratio is not an accident.
 
 ---
 

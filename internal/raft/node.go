@@ -835,7 +835,7 @@ func (n *Node) becomeLeader() error {
 // dangerous direction.
 func (n *Node) persist(term Term, vote NodeID) error {
 	if err := n.storage.SetHardState(HardState{Term: term, VotedFor: vote}); err != nil {
-		return fmt.Errorf("raft: persisting hard state: %w", err)
+		return fmt.Errorf("raft: persisting hard state: %w: %w", ErrStorage, err)
 	}
 	n.term = term
 	n.vote = vote

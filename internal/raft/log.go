@@ -180,7 +180,7 @@ func (l *raftLog) maybeAppend(prevIdx Index, prevTerm Term, leaderCommit Index, 
 
 		offset := conflict - (prevIdx + 1)
 		if err := l.storage.Append(entries[offset:]); err != nil {
-			return appendResult{}, false, err
+			return appendResult{}, false, fmt.Errorf("raft: appending entries: %w: %w", ErrStorage, err)
 		}
 	}
 

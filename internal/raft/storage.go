@@ -80,6 +80,17 @@ var (
 	// ErrSnapshotUnavailable means no snapshot has been taken yet, so there is
 	// nothing to send a lagging follower. The leader falls back to the log.
 	ErrSnapshotUnavailable = errors.New("raft: no snapshot is available")
+
+	// ErrStorage marks a failure that came from the Storage implementation
+	// rather than from anything wrong with what was being handled.
+	//
+	// The distinction is the caller's whole decision. A message that makes no
+	// sense is one message, and dropping it costs nothing. A write that did
+	// not land means durability is gone, and every safety property above this
+	// point assumes it is not. Without a marker the two arrive identically,
+	// and a driver that reasonably ignores the first silently ignores the
+	// second.
+	ErrStorage = errors.New("raft: storage failure")
 )
 
 // HardState is the subset of a node's state that Raft requires to be on stable

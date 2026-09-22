@@ -30,6 +30,10 @@ type brokenStorage struct {
 	attempts    int
 	appendsFail bool
 	appends     int
+
+	snapshotWritesFail bool
+	snapshotWrites     int
+	snapshotReadsFail  bool
 }
 
 func (b *brokenStorage) SetHardState(hs HardState) error {
@@ -46,6 +50,21 @@ func (b *brokenStorage) Append(e []Entry) error {
 		return errDiskGone
 	}
 	return b.Storage.Append(e)
+}
+
+func (b *brokenStorage) ApplySnapshot(snap Snapshot) error {
+	b.snapshotWrites++
+	if b.snapshotWritesFail {
+		return errDiskGone
+	}
+	return b.Storage.ApplySnapshot(snap)
+}
+
+func (b *brokenStorage) Snapshot() (Snapshot, error) {
+	if b.snapshotReadsFail {
+		return Snapshot{}, errDiskGone
+	}
+	return b.Storage.Snapshot()
 }
 
 // newFragileNode returns a follower in a three-node cluster whose storage can
@@ -304,5 +323,208 @@ func TestAnAppendIsAcknowledgedOnceItIsDurable(t *testing.T) {
 	}
 	if got := n.log.lastIndex(); got != 1 {
 		t.Errorf("the log ends at %d, want 1", got)
+	}
+}
+
+// snapshotResponses returns the acknowledgements for an installed image.
+//
+// Not appendResponses: a snapshot is answered with its own message type, and
+// filtering for the wrong one makes "nothing was acknowledged" true no matter
+// what the code does. The paired test on a working disk is what caught that.
+func snapshotResponses(n *Node) []Message {
+	var out []Message
+	for _, m := range n.Ready().Messages {
+		if m.Type == MsgInstallSnapshotResponse {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// anImage is a state machine image a leader in term 1 would install on a
+// follower that has fallen too far behind to catch up from the log.
+func anImage() Snapshot {
+	return Snapshot{
+		Index: 5, Term: 1,
+		Conf: ConfState{Voters: []NodeID{1, 2, 3}},
+		Data: []byte("state"),
+	}
+}
+
+func TestASnapshotIsNotAcknowledgedUntilItIsStored(t *testing.T) {
+	// A snapshot moves everything at once: the log is replaced and the commit
+	// and applied cursors jump to its index. Acknowledging one that was not
+	// stored would tell the leader this node holds a prefix it would lose on
+	// restart, and the leader would then send only what follows it.
+	n, st := newFragileNode(t)
+	atTerm(t, n, 1)
+	st.snapshotWritesFail = true
+
+	snap := anImage()
+	err := n.Step(Message{Type: MsgInstallSnapshot, From: 2, To: 1, Term: 1, Snapshot: &snap})
+	if err == nil {
+		t.Fatal("a snapshot was handled although it could not be stored")
+	}
+	if !errors.Is(err, errDiskGone) {
+		t.Errorf("error is %v, which does not report the storage failure", err)
+	}
+	if st.snapshotWrites == 0 {
+		t.Fatal("no write was attempted, so this test proves nothing about failing to write")
+	}
+
+	if sent := snapshotResponses(n); len(sent) != 0 {
+		t.Fatalf("the follower acknowledged a snapshot it did not store: %+v", sent)
+	}
+	if n.log.committed != 0 || n.log.applied != 0 {
+		t.Errorf("cursors moved to commit %d applied %d on a snapshot that was never stored",
+			n.log.committed, n.log.applied)
+	}
+}
+
+func TestASnapshotIsAcknowledgedOnceItIsStored(t *testing.T) {
+	// The same path with a working disk, so the test above is known to be
+	// reaching the write rather than failing earlier.
+	n, st := newFragileNode(t)
+	atTerm(t, n, 1)
+
+	snap := anImage()
+	if err := n.Step(Message{Type: MsgInstallSnapshot, From: 2, To: 1, Term: 1, Snapshot: &snap}); err != nil {
+		t.Fatalf("stepping a snapshot: %v", err)
+	}
+	if st.snapshotWrites == 0 {
+		t.Fatal("the snapshot was never written")
+	}
+
+	sent := snapshotResponses(n)
+	if len(sent) != 1 {
+		t.Fatalf("got %d acknowledgements, want 1", len(sent))
+	}
+	if !sent[0].Success || sent[0].MatchIndex != snap.Index {
+		t.Errorf("acknowledgement is success=%v match=%d, want success at %d",
+			sent[0].Success, sent[0].MatchIndex, snap.Index)
+	}
+	if n.log.committed != snap.Index {
+		t.Errorf("commit index is %d, want %d", n.log.committed, snap.Index)
+	}
+}
+
+// electLeader wins an election for node 1 through the ordinary path, so the
+// leader state under test is one the code actually produces.
+func electLeader(t *testing.T, n *Node) {
+	t.Helper()
+
+	if err := n.becomeCandidate(); err != nil {
+		t.Fatalf("campaigning: %v", err)
+	}
+	if err := n.Step(Message{
+		Type: MsgVoteResponse, From: 2, To: 1, Term: n.term, Granted: true,
+	}); err != nil {
+		t.Fatalf("counting a vote: %v", err)
+	}
+	if n.state != Leader {
+		t.Fatalf("node is %v after a majority granted, want Leader", n.state)
+	}
+	n.Ready()
+}
+
+func TestASnapshotThatCannotBeReadIsNotCountedAsSent(t *testing.T) {
+	// The leader assumes a snapshot it sends will be installed and moves the
+	// follower's next index past it. If the image could not be read, nothing
+	// was sent, and moving the index anyway would have the leader resume from
+	// a point the follower never reached. The entries in between would never
+	// be sent again: a hole, in the one direction the log-matching check
+	// cannot see.
+	n, st := newFragileNode(t)
+	electLeader(t, n)
+
+	pr := n.progress[2]
+	if pr == nil {
+		t.Fatal("the leader has no progress for node 2")
+	}
+	before := pr.next
+	st.snapshotReadsFail = true
+
+	n.sendSnapshot(2)
+
+	if pr.next != before {
+		t.Errorf("next index for node 2 moved from %d to %d although nothing was sent",
+			before, pr.next)
+	}
+	for _, m := range n.Ready().Messages {
+		if m.Type == MsgInstallSnapshot {
+			t.Errorf("a snapshot message went out although the image could not be read: %+v", m)
+		}
+	}
+}
+
+func TestStorageFailuresAreMarkedAsSuch(t *testing.T) {
+	// The marker is what lets a caller tell "this message was nonsense" from
+	// "this node can no longer store anything". Every path that touches the
+	// disk has to carry it, or the caller silently makes the wrong choice on
+	// whichever one was missed.
+	cases := []struct {
+		name string
+		arm  func(*brokenStorage)
+		step func(*Node) error
+	}{
+		{
+			"a vote that cannot be persisted",
+			func(b *brokenStorage) { b.armed = true },
+			func(n *Node) error {
+				return n.Step(Message{Type: MsgVoteRequest, From: 2, To: 1, Term: 1})
+			},
+		},
+		{
+			"an append that cannot be written",
+			func(b *brokenStorage) { b.appendsFail = true },
+			func(n *Node) error { return n.Step(oneEntry()) },
+		},
+		{
+			"a snapshot that cannot be stored",
+			func(b *brokenStorage) { b.snapshotWritesFail = true },
+			func(n *Node) error {
+				snap := anImage()
+				return n.Step(Message{
+					Type: MsgInstallSnapshot, From: 2, To: 1, Term: 1, Snapshot: &snap,
+				})
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, st := newFragileNode(t)
+			atTerm(t, n, 1)
+			c.arm(st)
+
+			err := c.step(n)
+			if err == nil {
+				t.Fatal("the step succeeded, so there is no error to classify")
+			}
+			if !errors.Is(err, ErrStorage) {
+				t.Errorf("error %v is not marked as a storage failure, so a caller "+
+					"cannot tell it from a bad message", err)
+			}
+			if !errors.Is(err, errDiskGone) {
+				t.Errorf("error %v lost the underlying cause", err)
+			}
+		})
+	}
+}
+
+func TestAnUnusableMessageIsNotAStorageFailure(t *testing.T) {
+	// The other half of the distinction. If everything were marked, a caller
+	// acting on the marker would stop the node over one bad message, which is
+	// exactly what a hostile peer would want.
+	n, _ := newFragileNode(t)
+	atTerm(t, n, 1)
+
+	empty := Snapshot{}
+	err := n.Step(Message{Type: MsgInstallSnapshot, From: 2, To: 1, Term: 1, Snapshot: &empty})
+	if err == nil {
+		t.Fatal("an empty snapshot was accepted")
+	}
+	if errors.Is(err, ErrStorage) {
+		t.Errorf("a malformed message was reported as a storage failure: %v", err)
 	}
 }

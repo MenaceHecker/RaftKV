@@ -536,6 +536,10 @@ func (n *Node) run() {
 
 		case m := <-n.recvc:
 			if err := n.raft.Step(m); err != nil {
+				if fatal(err) {
+					n.failAllPending(fmt.Errorf("node: %w", err))
+					return
+				}
 				// A malformed or unexpected message is not fatal; the
 				// cluster carries on without it.
 				continue
@@ -779,6 +783,25 @@ func (n *Node) processReady() {
 		default:
 		}
 	}
+}
+
+// fatal reports whether an error from the consensus core means this node must
+// stop rather than carry on.
+//
+// Stepping a message fails for two unrelated reasons and the difference is
+// the entire decision. A message that makes no sense is one message: the
+// cluster drops it and continues, which is what a hostile or buggy peer
+// should cost. A write that did not land means this node can no longer
+// promise anything it stores, and every safety property above it assumes it
+// can.
+//
+// The two arrived indistinguishably until the core started marking the
+// second, so the loop dropped both. A tick that could not persist a term
+// already stopped the node; the same failure carried in on a vote request, an
+// append or a snapshot did not, and the node went on looking healthy while
+// being unable to record a single thing.
+func fatal(err error) bool {
+	return errors.Is(err, raft.ErrStorage)
 }
 
 // applyEntry hands one committed entry to the state machine and completes the

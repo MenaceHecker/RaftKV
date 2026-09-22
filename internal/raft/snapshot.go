@@ -120,7 +120,7 @@ func (n *Node) handleInstallSnapshot(m Message) error {
 // own commit index, or a configuration derived from entries that are gone.
 func (n *Node) restore(snap Snapshot) error {
 	if err := n.storage.ApplySnapshot(snap); err != nil {
-		return fmt.Errorf("raft: applying snapshot at index %d: %w", snap.Index, err)
+		return fmt.Errorf("raft: applying snapshot at index %d: %w: %w", snap.Index, ErrStorage, err)
 	}
 
 	// Everything a snapshot covers is committed and applied by definition, so
