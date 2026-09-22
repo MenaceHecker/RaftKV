@@ -329,9 +329,12 @@ func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*ht
 		w.Write([]byte("ok\n"))
 	})
 
-	srv := &http.Server{Handler: mux}
+	// Addr records what was actually bound, which matters when the
+	// configured address asked for port zero. Serve ignores it in favour of
+	// the listener, so this is a label rather than an instruction.
+	srv := &http.Server{Handler: mux, Addr: listener.Addr().String()}
 	go func() {
-		slog.Info("serving metrics", "address", listener.Addr().String())
+		slog.Info("serving metrics", "address", srv.Addr)
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			// The node keeps running: losing observability is bad, but
 			// stopping a healthy cluster member over it is worse.
