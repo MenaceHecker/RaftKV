@@ -26,8 +26,10 @@ var errDiskGone = errors.New("the disk is gone")
 // counts the attempts so a test can tell "refused" from "never tried".
 type brokenStorage struct {
 	Storage
-	armed    bool
-	attempts int
+	armed       bool
+	attempts    int
+	appendsFail bool
+	appends     int
 }
 
 func (b *brokenStorage) SetHardState(hs HardState) error {
@@ -36,6 +38,14 @@ func (b *brokenStorage) SetHardState(hs HardState) error {
 		return errDiskGone
 	}
 	return b.Storage.SetHardState(hs)
+}
+
+func (b *brokenStorage) Append(e []Entry) error {
+	b.appends++
+	if b.appendsFail {
+		return errDiskGone
+	}
+	return b.Storage.Append(e)
 }
 
 // newFragileNode returns a follower in a three-node cluster whose storage can
@@ -200,5 +210,99 @@ func TestSteppingUpATermIsNotRememberedIfItCannotBePersisted(t *testing.T) {
 	}
 	if n.term != 0 {
 		t.Errorf("the node is in term %d although the write failed", n.term)
+	}
+}
+
+// appendResponses returns the acknowledgements the node is trying to send.
+func appendResponses(n *Node) []Message {
+	var out []Message
+	for _, m := range n.Ready().Messages {
+		if m.Type == MsgAppendResponse {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// oneEntry is an append a leader in term 1 would send to an empty follower.
+func oneEntry() Message {
+	return Message{
+		Type: MsgAppendRequest, From: 2, To: 1, Term: 1,
+		PrevLogIndex: 0, PrevLogTerm: 0,
+		Entries:     []Entry{{Index: 1, Term: 1, Type: EntryNormal, Data: []byte("x")}},
+		CommitIndex: 1,
+	}
+}
+
+func TestAnAppendIsNotAcknowledgedUntilItIsDurable(t *testing.T) {
+	// The counterpart to the vote. A leader commits an entry once a majority
+	// has acknowledged it, and then tells clients it is safe. An
+	// acknowledgement from a follower that did not write the entry is a
+	// promise the follower cannot keep: if it restarts, the entry is gone
+	// from a majority that was counted as holding it.
+	n, st := newFragileNode(t)
+	atTerm(t, n, 1)
+	st.appendsFail = true
+
+	err := n.Step(oneEntry())
+	if err == nil {
+		t.Fatal("an append was handled although it could not be written")
+	}
+	if !errors.Is(err, errDiskGone) {
+		t.Errorf("error is %v, which does not report the storage failure", err)
+	}
+	if st.appends == 0 {
+		t.Fatal("no write was attempted, so this test proves nothing about failing to write")
+	}
+
+	if sent := appendResponses(n); len(sent) != 0 {
+		t.Fatalf("the follower acknowledged an entry it did not write: %+v", sent)
+	}
+}
+
+func TestAFailedAppendDoesNotAdvanceTheCommitIndex(t *testing.T) {
+	// The leader's commit index travels with the append. Adopting it while
+	// the entries it refers to were not written would leave this node
+	// reporting as applied a prefix it does not hold.
+	n, st := newFragileNode(t)
+	atTerm(t, n, 1)
+	before := n.log.committed
+	st.appendsFail = true
+
+	if err := n.Step(oneEntry()); err == nil {
+		t.Fatal("the append was accepted")
+	}
+
+	if n.log.committed != before {
+		t.Errorf("commit index moved from %d to %d on an append that was never written",
+			before, n.log.committed)
+	}
+	if got := n.log.lastIndex(); got != 0 {
+		t.Errorf("the log ends at %d, so an unwritten entry was counted as held", got)
+	}
+}
+
+func TestAnAppendIsAcknowledgedOnceItIsDurable(t *testing.T) {
+	// With a working disk, so the two above are known to be failing for the
+	// reason they claim rather than never reaching the write at all.
+	n, st := newFragileNode(t)
+	atTerm(t, n, 1)
+
+	if err := n.Step(oneEntry()); err != nil {
+		t.Fatalf("stepping an append: %v", err)
+	}
+	if st.appends == 0 {
+		t.Fatal("the entry was never written")
+	}
+
+	sent := appendResponses(n)
+	if len(sent) != 1 {
+		t.Fatalf("got %d append responses, want 1", len(sent))
+	}
+	if !sent[0].Success {
+		t.Error("a valid append was rejected")
+	}
+	if got := n.log.lastIndex(); got != 1 {
+		t.Errorf("the log ends at %d, want 1", got)
 	}
 }
