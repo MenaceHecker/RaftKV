@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"path/filepath"
 	"testing"
@@ -198,4 +200,61 @@ func TestARemovedNodeLosesItsLink(t *testing.T) {
 		}
 		return true
 	})
+}
+
+func TestAMemberAddedAfterCompactionCatchesUpBySnapshot(t *testing.T) {
+	// The operator flow the deployment guide describes: compact before
+	// admitting a member, so it does not have to replay everything ever
+	// written. That makes the log useless for catching it up. A node joining
+	// a cluster starts at index zero, which is below any compaction point, so
+	// the only thing that can bring it up to date is an image over gRPC.
+	//
+	// Snapshot transfer is already covered for a member that restarts. This
+	// is the other shape: a member that has never held anything at all, and
+	// whose address the leader only learns from the change that admits it.
+	const (
+		writes    = 32
+		valueSize = 4 << 10
+	)
+
+	c := newGRPCCluster(t, 3)
+	leader := c.awaitLeader()
+
+	ctx, cancel := context.WithTimeout(context.Background(), grpcSettleTimeout)
+	defer cancel()
+
+	value := bytes.Repeat([]byte("x"), valueSize)
+	for i := range writes {
+		err := leader.Propose(ctx, statemachine.Command{
+			ClientID: 1, Seq: uint64(i + 1), Op: statemachine.OpPut,
+			Key: fmt.Sprintf("key-%d", i), Value: value,
+		})
+		if err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+
+	// Every node compacts, not just the one leading now. Leadership can move,
+	// and a leader that still holds the entries would catch the new member up
+	// from the log, which is the path this test exists to avoid.
+	for _, id := range c.ids {
+		if err := c.nodes[id].Compact(ctx); err != nil {
+			t.Fatalf("compacting node %d: %v", id, err)
+		}
+	}
+
+	joiner := c.joinNode(4)
+	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	c.eventually("the added node to catch up", func() bool {
+		return joiner.Status().Applied >= leader.Status().Applied
+	})
+
+	// Without this the test would pass on ordinary replication and say
+	// nothing about the path it is named for.
+	if got := joiner.Status().SnapshotsReceived; got == 0 {
+		t.Fatalf("the added node caught up without receiving a snapshot\n%s", c.dump())
+	}
 }
