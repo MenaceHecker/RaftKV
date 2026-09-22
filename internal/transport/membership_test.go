@@ -258,3 +258,198 @@ func TestAMemberAddedAfterCompactionCatchesUpBySnapshot(t *testing.T) {
 		t.Fatalf("the added node caught up without receiving a snapshot\n%s", c.dump())
 	}
 }
+
+// restartStale stops a node and brings it back knowing only the membership it
+// was originally configured with, which is what its command line still says
+// after somebody added a member at runtime.
+func (c *grpcCluster) restartStale(id raft.NodeID, staticPeers []raft.NodeID) *node.Node {
+	c.t.Helper()
+
+	c.servers[id].Stop()
+	if err := c.nodes[id].Stop(); err != nil {
+		c.t.Fatalf("stopping node %d: %v", id, err)
+	}
+
+	stale := make(map[raft.NodeID]string, len(staticPeers))
+	for _, p := range staticPeers {
+		stale[p] = c.addrs[p]
+	}
+
+	l, err := net.Listen("tcp", c.addrs[id])
+	if err != nil {
+		c.t.Fatalf("re-binding node %d: %v", id, err)
+	}
+
+	tr, err := NewPeerTransport(PeerConfig{Self: id, Addresses: stale})
+	if err != nil {
+		c.t.Fatalf("creating transport for node %d: %v", id, err)
+	}
+	c.transports[id] = tr
+	c.t.Cleanup(func() { tr.Close() })
+
+	n, err := node.Start(node.Config{
+		ID:            id,
+		Peers:         staticPeers,
+		DataDir:       c.dataDirs[id],
+		Transport:     tr,
+		TickInterval:  10 * time.Millisecond,
+		ElectionTick:  10,
+		HeartbeatTick: 1,
+		Sync:          storage.SyncNever,
+	})
+	if err != nil {
+		c.t.Fatalf("restarting node %d: %v", id, err)
+	}
+	c.nodes[id] = n
+	c.t.Cleanup(func() { n.Stop() })
+	tr.SetLocal(n)
+
+	srv, err := NewRaftServer(n)
+	if err != nil {
+		c.t.Fatalf("creating server for node %d: %v", id, err)
+	}
+	gs := grpc.NewServer()
+	srv.Register(gs)
+	c.servers[id] = gs
+	go gs.Serve(l)
+	c.t.Cleanup(gs.Stop)
+
+	return n
+}
+
+// linked reports whether a transport holds a connection to a node.
+func linked(tr *PeerTransport, id raft.NodeID) bool {
+	for _, st := range tr.Stats() {
+		if st.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func TestARestartedNodeRediscoversARuntimeMember(t *testing.T) {
+	// After a member is added at runtime, every other node's configured peer
+	// list is out of date. Restarting one is the ordinary case, not an edge:
+	// a rolling restart, a crash, a pod rescheduled. The node comes back with
+	// the flags it always had, so the only record that the fourth member
+	// exists, and of where it is, is the one in its own log.
+	//
+	// Each layer's half of this is covered by a unit test: the core carries
+	// addresses through a configuration change, the storage layer writes them
+	// into a snapshot, the codec puts them on the wire. What none of them
+	// asks is whether a real node uses any of it to reach anybody.
+	original := []raft.NodeID{1, 2, 3}
+
+	c := newGRPCCluster(t, 3)
+	leader := c.awaitLeader()
+	leaderID := leader.Status().ID
+
+	ctx, cancel := context.WithTimeout(context.Background(), grpcSettleTimeout)
+	defer cancel()
+
+	joiner := c.joinNode(4)
+	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	c.eventually("the added node to catch up", func() bool {
+		return joiner.Status().Applied >= leader.Status().Applied
+	})
+
+	victim := raft.NodeID(0)
+	for _, id := range original {
+		if id != leaderID {
+			victim = id
+			break
+		}
+	}
+
+	restarted := c.restartStale(victim, original)
+
+	// It was told about three nodes and has to come back believing in four.
+	c.eventually("the restarted node to recover the membership", func() bool {
+		for _, id := range restarted.Status().Members.Members() {
+			if id == 4 {
+				return true
+			}
+		}
+		return false
+	})
+
+	// Believing in the member is not the same as being able to reach it. The
+	// address came out of the log, and this is the assertion that says so:
+	// nothing in this node's configuration mentions node 4.
+	c.eventually("the restarted node to link to the runtime member", func() bool {
+		return linked(c.transports[victim], 4)
+	})
+
+	// And the cluster still works, now needing three of four to agree.
+	if err := leader.Propose(ctx, statemachine.Command{
+		ClientID: 2, Seq: 1, Op: statemachine.OpPut, Key: "after", Value: []byte("restart"),
+	}); err != nil {
+		t.Fatalf("Propose after the restart: %v", err)
+	}
+}
+
+func TestARestartedNodeRediscoversARuntimeMemberFromItsSnapshot(t *testing.T) {
+	// The same recovery once the log can no longer help. A cluster that has
+	// been up long enough compacts away the entry that admitted a member, so
+	// the only surviving record of where that member lives is the
+	// configuration stored alongside the snapshot. This is the case a
+	// long-running cluster is always in, and the previous test is the case it
+	// is in for the first few minutes.
+	original := []raft.NodeID{1, 2, 3}
+
+	c := newGRPCCluster(t, 3)
+	leader := c.awaitLeader()
+	leaderID := leader.Status().ID
+
+	ctx, cancel := context.WithTimeout(context.Background(), grpcSettleTimeout)
+	defer cancel()
+
+	joiner := c.joinNode(4)
+	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	c.eventually("the added node to catch up", func() bool {
+		return joiner.Status().Applied >= leader.Status().Applied
+	})
+
+	// Write past the change and compact, so the entry that carried node 4's
+	// address is no longer in anybody's log.
+	for i := range 8 {
+		err := leader.Propose(ctx, statemachine.Command{
+			ClientID: 3, Seq: uint64(i + 1), Op: statemachine.OpPut,
+			Key: fmt.Sprintf("post-%d", i), Value: []byte("v"),
+		})
+		if err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	for _, id := range c.ids {
+		if err := c.nodes[id].Compact(ctx); err != nil {
+			t.Fatalf("compacting node %d: %v", id, err)
+		}
+	}
+
+	victim := raft.NodeID(0)
+	for _, id := range original {
+		if id != leaderID {
+			victim = id
+			break
+		}
+	}
+
+	restarted := c.restartStale(victim, original)
+
+	c.eventually("the restarted node to recover the membership", func() bool {
+		for _, id := range restarted.Status().Members.Members() {
+			if id == 4 {
+				return true
+			}
+		}
+		return false
+	})
+	c.eventually("the restarted node to link to the runtime member", func() bool {
+		return linked(c.transports[victim], 4)
+	})
+}
