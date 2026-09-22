@@ -8,7 +8,7 @@ A distributed key-value store with the Raft consensus algorithm implemented from
 go test ./...
 ```
 
-480 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
+481 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
 
 ---
 
@@ -192,7 +192,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 12,250 lines of implementation and 17,021 of tests, across 480 tests. The ratio is not an accident.
+Roughly 12,250 lines of implementation and 17,021 of tests, across 481 tests. The ratio is not an accident.
 
 ---
 
@@ -213,6 +213,8 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 The core's usage contract has two runnable examples rather than only prose. Go compiles them and compares their printed output, so an example that stopped describing the code fails the suite: breaking a sole voter's ability to commit its own proposals makes one of them fail with a diff. They are the answer to "how do I drive this thing", in a form that cannot quietly stop being true.
 
 The numbers in this README are checked too. They had drifted twice, once claiming 177 tests in one paragraph and 367 in another when there were 434, so `internal/determinism` counts the tests, the fuzz targets and the lines and fails if the text disagrees. A document that is confidently wrong about something checkable invites doubt about the parts that are harder to check.
+
+The comments are checked for one specific lie: deferring to a phase that is finished. The transport dropped every message to a node it had no address for, under a comment saying that Phase 4's membership changes made this reachable and that for now it meant a stray message. Phase 4 had long since landed, so a member added at runtime joined the configuration and was never heard from again, and the sentence excusing it sat directly above the line doing it. Two more said the same kind of thing, one of them claiming the core did not act on configuration changes at all. A test now fails on any comment in shipped code that mentions a phase and then defers to it.
 
 The property underneath all of them is that the consensus core and the state machine are pure: no clock, no network, no goroutines, and no randomness a seed cannot reproduce. Everything above depends on it, and a plausible one-line fix breaks it without failing anything, so `internal/determinism` parses both packages and enforces it rather than trusting the comments that claim it.
 

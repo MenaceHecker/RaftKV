@@ -343,9 +343,9 @@ func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*ht
 
 // watchLeadership logs leadership changes.
 //
-// This is the one piece of observability worth having before Phase 5's metrics
-// exist: a cluster that cannot elect a leader looks identical to one that is
-// merely idle, and this is what distinguishes them.
+// The metrics record the same transitions, but a log line is what somebody
+// reads first when a cluster will not serve: one that cannot elect a leader
+// looks identical to one that is merely idle.
 func watchLeadership(n *node.Node) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()

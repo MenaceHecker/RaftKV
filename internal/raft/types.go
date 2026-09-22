@@ -82,8 +82,9 @@ const (
 	// terms, which is what makes the leader's commit index safe to advance
 	// (§5.4.2).
 	EntryNoOp
-	// EntryConfChange carries a cluster membership change. Reserved for
-	// Phase 4 (joint consensus); the core does not act on it yet.
+	// EntryConfChange carries a cluster membership change (§6). The core
+	// acts on one as soon as it is appended rather than when it commits,
+	// by rebuilding the configuration from the log.
 	EntryConfChange
 )
 

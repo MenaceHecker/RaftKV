@@ -483,9 +483,9 @@ type PeerStats struct {
 // Stats returns per-peer counters.
 //
 // These are the raw material for the replication-lag and connectivity metrics
-// Phase 5 exposes to Prometheus. They are surfaced now because a transport
-// that silently drops messages is otherwise impossible to distinguish from one
-// that is working.
+// exported to Prometheus. They are counted here rather than further out
+// because a transport that silently drops messages is otherwise impossible to
+// distinguish from one that is working.
 func (t *PeerTransport) Stats() []PeerStats {
 	t.peersMu.RLock()
 	defer t.peersMu.RUnlock()

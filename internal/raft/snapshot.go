@@ -18,7 +18,7 @@ import (
 // node's log moves backwards, and it is safe for one reason: a snapshot covers
 // a committed prefix, so nothing being discarded was ever agreed to differ.
 //
-// It matters most for the case Phase 4 introduces. A node added to a
+// It matters most for a membership change (§6). A node added to a
 // long-running cluster starts with an empty log and needs entries the leader
 // compacted away long ago, so without this a membership change could never
 // finish.

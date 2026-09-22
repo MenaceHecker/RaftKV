@@ -203,8 +203,9 @@ func (n *Node) handleAppendResponse(m Message) error {
 	}
 	pr := n.progress[m.From]
 	if pr == nil {
-		// Not a known member. Phase 4 makes this reachable during a
-		// membership change; for now it means a stray message.
+		// Not a member. A node dropped by a configuration change can still
+		// have a response in flight, and a node that was never a member can
+		// send whatever it likes, so this is ignored rather than acted on.
 		return nil
 	}
 

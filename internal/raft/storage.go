@@ -14,9 +14,10 @@ import (
 // fatal. Raft's safety argument assumes that once state is reported persisted
 // it really is, so there is no correct way to carry on after a failed write.
 //
-// Phase 1 ships MemoryStorage, which satisfies the interface without touching
-// disk and keeps the deterministic tests fast. Phase 2 adds a WAL-backed
-// implementation; nothing in the core changes when it is swapped in.
+// MemoryStorage satisfies the interface without touching disk, which is what
+// keeps the deterministic tests fast. The WAL-backed implementation in
+// internal/storage is what a real node runs on, and nothing in the core
+// changes when one is swapped for the other.
 type Storage interface {
 	// InitialState returns the hard state persisted by a previous
 	// incarnation of this node. A fresh node returns the zero HardState.
@@ -28,8 +29,8 @@ type Storage interface {
 	SetHardState(hs HardState) error
 
 	// FirstIndex is the index of the oldest entry still retained. It is 1
-	// for a log that has never been compacted; once snapshotting lands in
-	// Phase 2 it becomes one past the last compacted entry.
+	// for a log that has never been compacted, and one past the last
+	// compacted entry once a snapshot has been taken.
 	FirstIndex() Index
 
 	// LastIndex is the index of the newest entry, or 0 if the log is empty.
@@ -107,8 +108,8 @@ func (h HardState) IsEmpty() bool {
 // deterministic test harness and any node configured without durability.
 //
 // It guards its state with a mutex so a transport layer can read while the
-// core writes, even though the Phase 1 harness drives everything from a single
-// goroutine.
+// core writes, even though the deterministic harness drives everything from a
+// single goroutine.
 type MemoryStorage struct {
 	mu        sync.RWMutex
 	hardState HardState
