@@ -199,3 +199,31 @@ func TestNoMetricsAddressMeansNoServer(t *testing.T) {
 		t.Fatal("an empty address still started a server")
 	}
 }
+
+func TestLivenessFailsOnceTheNodeHasStopped(t *testing.T) {
+	// Liveness is documented as asking whether the Raft loop is answering,
+	// and Status is how it asks. But Status short-circuits when the loop is
+	// gone and returns a zero value, so the reply proves nothing: a node
+	// whose loop has exited answers exactly like a healthy one that has not
+	// yet elected anybody.
+	//
+	// It matters because the loop can now exit on its own. A node that can
+	// no longer write stops rather than carrying on, and if it still passes
+	// liveness nothing ever replaces it: out of the client service for
+	// failing readiness, never restarted, and reported up.
+	n, base := startProbeNode(t, []raft.NodeID{1})
+	awaitLeader(t, n)
+
+	if code, _ := get(t, base+"/health"); code != http.StatusOK {
+		t.Fatalf("/health on a healthy node returned %d, want 200", code)
+	}
+
+	if err := n.Stop(); err != nil {
+		t.Fatalf("stopping the node: %v", err)
+	}
+
+	code, body := get(t, base+"/health")
+	if code == http.StatusOK {
+		t.Fatalf("/health still reports the node as live after its loop exited: %s", body)
+	}
+}

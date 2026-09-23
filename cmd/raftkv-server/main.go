@@ -227,6 +227,17 @@ func run() error {
 			n.Stop()
 			return fmt.Errorf("serving: %w", err)
 		}
+	case <-n.Done():
+		// The node stopped without being asked to, which it does when it can
+		// no longer write. Carrying on would leave a process accepting
+		// connections for a node that is gone: out of the client service for
+		// failing readiness, still passing liveness, and never replaced.
+		// Exiting non-zero is what gets it restarted and noticed.
+		stopServer(grpcServer)
+		if metricsServer != nil {
+			metricsServer.Close()
+		}
+		return errors.New("the consensus loop stopped")
 	}
 
 	// Stop accepting work before stopping the node, so nothing arrives for a
@@ -309,9 +320,23 @@ func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*ht
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler(registry))
 
-	// Liveness: the process is up and its Raft loop is answering. Status goes
-	// through that loop, so a reply here means more than a bare TCP accept.
+	// Liveness: the process is up and its Raft loop is still running.
+	//
+	// The stopped check is not belt and braces. Status answers from the loop
+	// while there is one and returns a zero value once there is not, so on
+	// its own it cannot tell a node whose loop has exited from a healthy one
+	// that has yet to elect anybody. Both would report live, and a node that
+	// stopped because it could no longer write would keep passing liveness
+	// for as long as the process ran.
+	//
+	// It must not depend on there being a leader. During an election nobody
+	// has one, and a liveness probe that checked would fail on every node at
+	// once and have the whole cluster restarted.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if n.Stopped() {
+			http.Error(w, "the consensus loop has stopped", http.StatusServiceUnavailable)
+			return
+		}
 		st := n.Status()
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"id":%d,"state":%q,"term":%d,"leader":%d,"commit":%d,"applied":%d}`+"\n",

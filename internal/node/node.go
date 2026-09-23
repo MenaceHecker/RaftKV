@@ -424,6 +424,24 @@ func (n *Node) Status() Status {
 	}
 }
 
+// Done returns a channel closed once the consensus loop has exited.
+//
+// It closes on Stop, and on its own if the node stopped because it could no
+// longer write. The second case is why this is exported: nothing else tells a
+// caller that its node has gone, and a process that goes on serving a node
+// which has stopped is one an orchestrator has no way to notice is broken.
+func (n *Node) Done() <-chan struct{} { return n.donec }
+
+// Stopped reports whether the consensus loop has exited.
+func (n *Node) Stopped() bool {
+	select {
+	case <-n.donec:
+		return true
+	default:
+		return false
+	}
+}
+
 // Propose submits a command and waits for it to commit and apply.
 //
 // It returns ErrNotLeader if this node cannot accept writes, and

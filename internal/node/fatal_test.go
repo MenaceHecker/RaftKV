@@ -143,9 +143,12 @@ func TestTheLoopStopsWhenTheDiskDies(t *testing.T) {
 	n.Step(raft.Message{Type: raft.MsgVoteRequest, From: 2, To: 1, Term: 1})
 
 	select {
-	case <-n.donec:
+	case <-n.Done():
 	case <-time.After(5 * time.Second):
 		t.Fatal("the node is still running although it can no longer write anything")
+	}
+	if !n.Stopped() {
+		t.Error("the node does not report itself stopped, so nothing above it can tell")
 	}
 
 	// And callers find out, rather than waiting on a node that will never
@@ -158,5 +161,41 @@ func TestTheLoopStopsWhenTheDiskDies(t *testing.T) {
 	})
 	if !errors.Is(err, ErrStopped) {
 		t.Errorf("a write after the node stopped returned %v, want ErrStopped", err)
+	}
+}
+
+func TestARunningNodeIsNotDone(t *testing.T) {
+	// The other half of Done. If it were closed from the start, the process
+	// watching it would exit immediately and every check on it would pass
+	// for the wrong reason.
+	n, err := Start(Config{
+		ID:            1,
+		Peers:         []raft.NodeID{1},
+		DataDir:       t.TempDir(),
+		Transport:     silentTransport{},
+		TickInterval:  5 * time.Millisecond,
+		ElectionTick:  10,
+		HeartbeatTick: 1,
+		Sync:          storage.SyncNever,
+	})
+	if err != nil {
+		t.Fatalf("starting node: %v", err)
+	}
+	t.Cleanup(func() { n.Stop() })
+
+	if n.Stopped() {
+		t.Fatal("a node reports itself stopped immediately after starting")
+	}
+	select {
+	case <-n.Done():
+		t.Fatal("Done is already closed on a running node")
+	default:
+	}
+
+	if err := n.Stop(); err != nil {
+		t.Fatalf("stopping: %v", err)
+	}
+	if !n.Stopped() {
+		t.Error("a stopped node does not report itself stopped")
 	}
 }
