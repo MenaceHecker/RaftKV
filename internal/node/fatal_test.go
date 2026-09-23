@@ -199,3 +199,90 @@ func TestARunningNodeIsNotDone(t *testing.T) {
 		t.Error("a stopped node does not report itself stopped")
 	}
 }
+
+// newLeaderNode returns a single-voter node that has elected itself.
+//
+// One voter is deliberate. A leader of one is its own quorum, so the
+// check-quorum path never makes it stand down and never persists a term
+// behind the test's back. The only write left is the one the test asks for,
+// which is what stops these tests passing for a reason they did not intend.
+func newLeaderNode(t *testing.T) *Node {
+	t.Helper()
+
+	n, err := Start(Config{
+		ID:            1,
+		Peers:         []raft.NodeID{1},
+		DataDir:       t.TempDir(),
+		Transport:     silentTransport{},
+		TickInterval:  5 * time.Millisecond,
+		ElectionTick:  10,
+		HeartbeatTick: 1,
+		Sync:          storage.SyncNever,
+	})
+	if err != nil {
+		t.Fatalf("starting node: %v", err)
+	}
+	t.Cleanup(func() { n.Stop() })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if n.Status().State == raft.Leader {
+			return n
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("the node never became leader")
+	return nil
+}
+
+func TestALeaderThatCannotAppendStandsDown(t *testing.T) {
+	// The worst version of the failure, because a leader holds the cluster.
+	// It keeps heartbeating, so no follower campaigns; it cannot append, so
+	// nothing commits. Telling the client its write failed leaves that in
+	// place indefinitely. Stopping is what lets somebody else take over.
+	n := newLeaderNode(t)
+
+	if err := n.storage.Close(); err != nil {
+		t.Fatalf("closing storage: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := n.Propose(ctx, statemachine.Command{
+		ClientID: 1, Seq: 1, Op: statemachine.OpPut, Key: "k", Value: []byte("v"),
+	})
+	if err == nil {
+		t.Fatal("a write succeeded on a node that cannot write")
+	}
+
+	select {
+	case <-n.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the leader is still leading although it cannot append anything")
+	}
+}
+
+func TestAMembershipChangeThatCannotBeAppendedStopsTheNode(t *testing.T) {
+	// Membership changes go into the log like anything else, so the same
+	// reasoning applies: a leader that cannot write one cannot write
+	// anything.
+	n := newLeaderNode(t)
+
+	if err := n.storage.Close(); err != nil {
+		t.Fatalf("closing storage: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := n.AddNode(ctx, 2, "127.0.0.1:9002"); err == nil {
+		t.Fatal("a membership change succeeded on a node that cannot write")
+	}
+
+	select {
+	case <-n.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the node is still running although it cannot append anything")
+	}
+}

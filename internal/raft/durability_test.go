@@ -464,25 +464,37 @@ func TestStorageFailuresAreMarkedAsSuch(t *testing.T) {
 	// whichever one was missed.
 	cases := []struct {
 		name string
-		arm  func(*brokenStorage)
-		step func(*Node) error
+		// before runs while the disk still works, for a case that needs the
+		// node in a particular state to reach the write under test.
+		before func(*testing.T, *Node)
+		arm    func(*brokenStorage)
+		step   func(*Node) error
 	}{
 		{
-			"a vote that cannot be persisted",
-			func(b *brokenStorage) { b.armed = true },
-			func(n *Node) error {
+			name: "a vote that cannot be persisted",
+			arm:  func(b *brokenStorage) { b.armed = true },
+			step: func(n *Node) error {
 				return n.Step(Message{Type: MsgVoteRequest, From: 2, To: 1, Term: 1})
 			},
 		},
 		{
-			"an append that cannot be written",
-			func(b *brokenStorage) { b.appendsFail = true },
-			func(n *Node) error { return n.Step(oneEntry()) },
+			name: "an append a follower cannot write",
+			arm:  func(b *brokenStorage) { b.appendsFail = true },
+			step: func(n *Node) error { return n.Step(oneEntry()) },
 		},
 		{
-			"a snapshot that cannot be stored",
-			func(b *brokenStorage) { b.snapshotWritesFail = true },
-			func(n *Node) error {
+			// The leader's own append, which is a different function from the
+			// one a follower uses and was missed the first time precisely
+			// because the follower's was the one being tested.
+			name:   "an entry a leader cannot append",
+			before: func(t *testing.T, n *Node) { electLeader(t, n) },
+			arm:    func(b *brokenStorage) { b.appendsFail = true },
+			step:   func(n *Node) error { return n.Propose([]byte("x")) },
+		},
+		{
+			name: "a snapshot that cannot be stored",
+			arm:  func(b *brokenStorage) { b.snapshotWritesFail = true },
+			step: func(n *Node) error {
 				snap := anImage()
 				return n.Step(Message{
 					Type: MsgInstallSnapshot, From: 2, To: 1, Term: 1, Snapshot: &snap,
@@ -495,6 +507,9 @@ func TestStorageFailuresAreMarkedAsSuch(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			n, st := newFragileNode(t)
 			atTerm(t, n, 1)
+			if c.before != nil {
+				c.before(t, n)
+			}
 			c.arm(st)
 
 			err := c.step(n)

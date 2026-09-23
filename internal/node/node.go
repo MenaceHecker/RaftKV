@@ -564,7 +564,10 @@ func (n *Node) run() {
 			}
 
 		case req := <-n.proposec:
-			n.handleProposal(req)
+			if err := n.handleProposal(req); err != nil {
+				n.failAllPending(fmt.Errorf("node: %w", err))
+				return
+			}
 
 		case req := <-n.readc:
 			n.handleRead(req)
@@ -576,7 +579,10 @@ func (n *Node) run() {
 			reply <- n.compact()
 
 		case req := <-n.confc:
-			n.handleConfChange(req)
+			if err := n.handleConfChange(req); err != nil {
+				n.failAllPending(fmt.Errorf("node: %w", err))
+				return
+			}
 
 		case <-n.applyc:
 			// More committed entries are waiting from a capped batch. This
@@ -607,7 +613,7 @@ func (n *Node) status() Status {
 }
 
 // handleProposal appends a client command and registers a waiter for it.
-func (n *Node) handleProposal(req proposalRequest) {
+func (n *Node) handleProposal(req proposalRequest) error {
 	// Take everything else that is already waiting. Clients block on an
 	// unbuffered channel until the loop receives, so anything ready to send
 	// right now is a write that would otherwise sit through a whole fsync
@@ -657,7 +663,15 @@ collect:
 		for _, r := range batch {
 			r.done <- err
 		}
-		return
+		// Telling the clients is not enough when the reason is that nothing
+		// can be written. A leader that cannot append holds the cluster: it
+		// goes on heartbeating, so nobody else campaigns, while refusing
+		// every write and committing nothing. Standing down is the only
+		// thing that lets the cluster carry on without this node.
+		if fatal(err) {
+			return err
+		}
+		return nil
 	}
 
 	// The entries the core just appended occupy the last len(batch) indexes
@@ -670,6 +684,7 @@ collect:
 	for i, r := range batch {
 		n.pending[first+raft.Index(i)] = &proposal{term: term, done: r.done}
 	}
+	return nil
 }
 
 // handleRead starts a read-index round, or defers it if the leader is not yet
@@ -929,21 +944,25 @@ func (n *Node) proposeConfChange(ctx context.Context, cc raft.ConfChange) error 
 
 // handleConfChange proposes a membership change and registers a waiter for the
 // entry it produced.
-func (n *Node) handleConfChange(req confChangeRequest) {
+func (n *Node) handleConfChange(req confChangeRequest) error {
 	before := n.raft.LastIndex()
 
 	if err := n.raft.ProposeConfChange(req.change); err != nil {
 		req.done <- err
-		return
+		if fatal(err) {
+			return err
+		}
+		return nil
 	}
 
 	index := n.raft.LastIndex()
 	if index == before {
 		// Nothing was appended, so there is nothing to wait for.
 		req.done <- nil
-		return
+		return nil
 	}
 	n.pending[index] = &proposal{term: n.raft.Term(), done: req.done}
+	return nil
 }
 
 // Compact takes a snapshot and truncates the log immediately, rather than

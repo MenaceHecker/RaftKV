@@ -120,7 +120,7 @@ func (l *raftLog) append(entries []Entry) (Index, error) {
 		return l.lastIndex(), nil
 	}
 	if err := l.storage.Append(entries); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("raft: appending entries: %w: %w", ErrStorage, err)
 	}
 	return l.lastIndex(), nil
 }
