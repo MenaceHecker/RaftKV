@@ -5,17 +5,6 @@ import (
 	"testing"
 )
 
-// Tests for batched proposals.
-//
-// The property that matters is not that ProposeBatch accepts a slice, it is
-// that the whole batch reaches storage in a single call. A write cannot be
-// acknowledged until it is durable, and the durable write is one fsync
-// regardless of how many entries it covers, so "one storage call per batch"
-// is the entire point. A version that looped and appended one at a time would
-// pass every correctness check here and deliver none of the benefit, which is
-// why the call is counted rather than assumed.
-
-// countingStorage records how the log reaches storage.
 type countingStorage struct {
 	Storage
 	appends int
@@ -28,8 +17,6 @@ func (c *countingStorage) Append(e []Entry) error {
 	return c.Storage.Append(e)
 }
 
-// newLeader returns a single-voter node that has already won its election,
-// with storage counters reset so only the test's own writes are counted.
 func newLeader(t *testing.T) (*Node, *countingStorage) {
 	t.Helper()
 
@@ -94,9 +81,6 @@ func TestProposeBatchAppendsContiguouslyInOrder(t *testing.T) {
 		t.Fatalf("last index is %d, want %d", got, want)
 	}
 
-	// The driver locates a batch by assuming it occupies the final
-	// len(batch) indexes, in order. If that assumption ever broke, clients
-	// would be told about somebody else's write.
 	for i := range size {
 		idx := before + Index(i) + 1
 		entries, err := n.log.entries(idx, idx+1)
@@ -113,8 +97,6 @@ func TestProposeBatchAppendsContiguouslyInOrder(t *testing.T) {
 }
 
 func TestProposeBatchOfOneMatchesPropose(t *testing.T) {
-	// Propose delegates to ProposeBatch, so the single-write path must stay
-	// exactly as cheap as it was before batching existed.
 	n, st := newLeader(t)
 
 	if err := n.Propose([]byte("only")); err != nil {
@@ -137,7 +119,6 @@ func TestProposeBatchEmptyWritesNothing(t *testing.T) {
 }
 
 func TestProposeBatchOnFollowerAppendsNothing(t *testing.T) {
-	// A follower must reject the whole batch rather than write part of it.
 	st := &countingStorage{Storage: NewMemoryStorage()}
 	n, err := NewNode(Config{
 		ID:            1,

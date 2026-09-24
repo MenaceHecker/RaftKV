@@ -9,30 +9,16 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/transport"
 )
 
-// Metrics must satisfy the driver's Recorder. Asserting it here turns a
-// mismatch into a compile error rather than a silently unrecorded metric.
 var _ node.Recorder = (*Metrics)(nil)
 
-// StatusSource is the part of a node this collector reads.
 type StatusSource interface {
 	Status() node.Status
 }
 
-// PeerSource is the part of the transport this collector reads.
 type PeerSource interface {
 	Stats() []transport.PeerStats
 }
 
-// Collector reports the values that are cheaper to read at scrape time than
-// to track as they change.
-//
-// Commit and applied indexes move on every entry; mirroring each step into a
-// gauge would put work on the Raft loop to produce a number only ever read
-// once every scrape interval. Sampling them is both cheaper and sufficient,
-// because unlike an election they cannot move and move back unnoticed.
-//
-// Events that a sample would genuinely miss are counted as they happen
-// instead; see Metrics.LeaderChanged.
 type Collector struct {
 	status StatusSource
 	peers  PeerSource
@@ -46,8 +32,6 @@ type Collector struct {
 	peerFailed   *prometheus.Desc
 }
 
-// NewCollector builds a collector over a node and its transport. The peer
-// source may be nil, in which case no per-peer metrics are reported.
 func NewCollector(status StatusSource, peers PeerSource) *Collector {
 	return &Collector{
 		status: status,
@@ -91,7 +75,6 @@ func NewCollector(status StatusSource, peers PeerSource) *Collector {
 	}
 }
 
-// Describe implements prometheus.Collector.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.commitIndex
 	ch <- c.appliedIndex
@@ -102,16 +85,12 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.peerFailed
 }
 
-// Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	st := c.status.Status()
 
 	ch <- prometheus.MustNewConstMetric(c.commitIndex, prometheus.GaugeValue, float64(st.Commit))
 	ch <- prometheus.MustNewConstMetric(c.appliedIndex, prometheus.GaugeValue, float64(st.Applied))
 
-	// Applied should never exceed commit, but the subtraction is on unsigned
-	// indexes, so a violated assumption would wrap into an enormous gauge
-	// rather than a visible zero. Clamping keeps the failure legible.
 	lag := float64(0)
 	if st.Commit > st.Applied {
 		lag = float64(st.Commit - st.Applied)

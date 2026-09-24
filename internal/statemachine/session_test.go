@@ -8,19 +8,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Tests for client session tracking and request deduplication (§6.3).
-//
-// The interesting failure is not a duplicated write — Put and Delete are
-// idempotent, so applying one twice changes nothing. It is a *reordered*
-// retry: an old request appended after a newer one from the same client,
-// quietly undoing work the client already believes is done. Most of these
-// tests are built around that shape.
-//
-// The second theme is determinism. The session table is part of the state
-// machine, so every decision it makes — including which client to forget when
-// it is full — has to come out the same on every replica.
-
-// clientPut builds a Put carrying a client session tag.
 func clientPut(index raft.Index, clientID, seq uint64, key, value string) raft.Entry {
 	return raft.Entry{
 		Term:  1,
@@ -36,7 +23,6 @@ func clientPut(index raft.Index, clientID, seq uint64, key, value string) raft.E
 	}
 }
 
-// clientDelete builds a Delete carrying a client session tag.
 func clientDelete(index raft.Index, clientID, seq uint64, key string) raft.Entry {
 	return raft.Entry{
 		Term:  1,
@@ -52,16 +38,12 @@ func clientDelete(index raft.Index, clientID, seq uint64, key string) raft.Entry
 }
 
 func TestStaleRetryDoesNotClobberNewerWrite(t *testing.T) {
-	// The hazard deduplication exists for. A client writes 1, times out and
-	// retries, but has already written 2 in the meantime. If the retry is
-	// applied after the newer write, the client's value silently reverts and
-	// nothing anywhere reports a problem.
 	kv := New()
 
 	applyAll(t, kv, []raft.Entry{
 		clientPut(1, 7, 1, "x", "1"),
 		clientPut(2, 7, 2, "x", "2"),
-		clientPut(3, 7, 1, "x", "1"), // the delayed retry of seq 1
+		clientPut(3, 7, 1, "x", "1"),
 	})
 
 	if got := mustGet(t, kv, "x"); got != "2" {
@@ -70,14 +52,11 @@ func TestStaleRetryDoesNotClobberNewerWrite(t *testing.T) {
 }
 
 func TestDuplicateStillConsumesItsIndex(t *testing.T) {
-	// A duplicate is committed like any other entry, so every replica must
-	// advance past it. Leaving the cursor behind would make the next entry
-	// look like a gap and stall the state machine.
 	kv := New()
 
 	applyAll(t, kv, []raft.Entry{
 		clientPut(1, 1, 1, "k", "v"),
-		clientPut(2, 1, 1, "k", "ignored"), // duplicate
+		clientPut(2, 1, 1, "k", "ignored"),
 		clientPut(3, 1, 2, "k", "next"),
 	})
 
@@ -103,20 +82,17 @@ func TestExactDuplicateIsIgnored(t *testing.T) {
 }
 
 func TestSequencesNeedNotBeContiguous(t *testing.T) {
-	// A client that gives up on a request and moves on leaves a gap. The next
-	// request is still newer than everything applied, so it must take effect.
 	kv := New()
 
 	applyAll(t, kv, []raft.Entry{
 		clientPut(1, 3, 1, "k", "one"),
-		clientPut(2, 3, 9, "k", "nine"), // 2..8 abandoned
+		clientPut(2, 3, 9, "k", "nine"),
 	})
 
 	if got := mustGet(t, kv, "k"); got != "nine" {
 		t.Fatalf("k = %q, want nine; a non-contiguous sequence was rejected", got)
 	}
 
-	// And anything below the new high-water mark is still a duplicate.
 	applyAll(t, kv, []raft.Entry{clientPut(3, 3, 5, "k", "five")})
 	if got := mustGet(t, kv, "k"); got != "nine" {
 		t.Fatalf("k = %q, want nine; a sequence below the high-water mark was applied", got)
@@ -124,8 +100,6 @@ func TestSequencesNeedNotBeContiguous(t *testing.T) {
 }
 
 func TestClientsAreIndependent(t *testing.T) {
-	// One client's sequence numbers say nothing about another's. Two clients
-	// both starting at 1 must both be served.
 	kv := New()
 
 	applyAll(t, kv, []raft.Entry{
@@ -147,9 +121,6 @@ func TestClientsAreIndependent(t *testing.T) {
 }
 
 func TestNoClientIsNeverDeduplicated(t *testing.T) {
-	// Commands with no session are not claiming exactly-once, so identical
-	// ones must all take effect. Deduplicating them would silently drop
-	// legitimate writes.
 	kv := New()
 
 	applyAll(t, kv, []raft.Entry{
@@ -168,16 +139,13 @@ func TestNoClientIsNeverDeduplicated(t *testing.T) {
 }
 
 func TestDeleteIsDeduplicated(t *testing.T) {
-	// Deletes need the same protection: a retried delete arriving after the
-	// key has been rewritten would remove data the client never asked to
-	// remove.
 	kv := New()
 
 	applyAll(t, kv, []raft.Entry{
 		clientPut(1, 4, 1, "k", "value"),
 		clientDelete(2, 4, 2, "k"),
 		clientPut(3, 4, 3, "k", "rewritten"),
-		clientDelete(4, 4, 2, "k"), // stale retry of the delete
+		clientDelete(4, 4, 2, "k"),
 	})
 
 	if got := mustGet(t, kv, "k"); got != "rewritten" {
@@ -186,8 +154,6 @@ func TestDeleteIsDeduplicated(t *testing.T) {
 }
 
 func TestSessionsSurviveSnapshotAndRestore(t *testing.T) {
-	// A replica that restored without the session table would have forgotten
-	// every client's progress and would re-apply the next retry it saw.
 	kv := New()
 	applyAll(t, kv, []raft.Entry{
 		clientPut(1, 7, 1, "x", "1"),
@@ -212,7 +178,6 @@ func TestSessionsSurviveSnapshotAndRestore(t *testing.T) {
 		t.Fatalf("restored last sequence = %d, want 2", seq)
 	}
 
-	// The restored replica must still reject the stale retry.
 	applyAll(t, restored, []raft.Entry{clientPut(3, 7, 1, "x", "1")})
 	if got := mustGet(t, restored, "x"); got != "2" {
 		t.Fatalf("x = %q on the restored replica, want 2; the retry was re-applied", got)
@@ -220,9 +185,6 @@ func TestSessionsSurviveSnapshotAndRestore(t *testing.T) {
 }
 
 func TestSnapshotWithSessionsIsDeterministic(t *testing.T) {
-	// Sessions are encoded in client-ID order for the same reason keys are
-	// encoded in key order: without it, identical state would produce
-	// different bytes and convergence could not be checked by comparison.
 	kv := New()
 	for i := range 100 {
 		if err := kv.Apply(clientPut(raft.Index(i+1), uint64(i%20+1), uint64(i/20+1), "k", "v")); err != nil {
@@ -246,8 +208,6 @@ func TestSnapshotWithSessionsIsDeterministic(t *testing.T) {
 }
 
 func TestReplicasWithSessionsConverge(t *testing.T) {
-	// Two replicas fed the same entries, including duplicates, must reach
-	// byte-identical state — session tables included.
 	entries := []raft.Entry{
 		clientPut(1, 1, 1, "a", "1"),
 		clientPut(2, 2, 1, "b", "2"),
@@ -270,8 +230,6 @@ func TestReplicasWithSessionsConverge(t *testing.T) {
 }
 
 func TestSessionTableIsBounded(t *testing.T) {
-	// The table is written into every snapshot, so it cannot grow with every
-	// client that has ever connected.
 	const max = 8
 	kv := NewWithMaxSessions(max)
 
@@ -287,15 +245,9 @@ func TestSessionTableIsBounded(t *testing.T) {
 }
 
 func TestEvictionIsDeterministicAcrossReplicas(t *testing.T) {
-	// Eviction is a state machine transition like any other. If two replicas
-	// chose different victims — because one walked a map in a different order,
-	// say — their session tables would diverge and, from the next retry
-	// onward, so would their data.
 	const max = 4
 	entries := make([]raft.Entry, 0, 60)
 	for i := range 60 {
-		// Revisit some clients so the tables have varied last-seen indexes
-		// rather than a simple increasing sequence.
 		clientID := uint64(i%17 + 1)
 		entries = append(entries, clientPut(raft.Index(i+1), clientID, uint64(i/17+1), "k", "v"))
 	}
@@ -322,9 +274,6 @@ func TestEvictionIsDeterministicAcrossReplicas(t *testing.T) {
 }
 
 func TestEvictionKeepsTheMostRecentlyUsed(t *testing.T) {
-	// Evicting the least recently used client is what makes the bound
-	// tolerable: an active client keeps its protection, and only a client
-	// that has been quiet for a long time loses it.
 	const max = 3
 	kv := NewWithMaxSessions(max)
 
@@ -332,9 +281,7 @@ func TestEvictionKeepsTheMostRecentlyUsed(t *testing.T) {
 		clientPut(1, 1, 1, "k", "v"),
 		clientPut(2, 2, 1, "k", "v"),
 		clientPut(3, 3, 1, "k", "v"),
-		// Client 1 stays active, so client 2 is now the oldest.
 		clientPut(4, 1, 2, "k", "v"),
-		// A fourth client forces an eviction.
 		clientPut(5, 4, 1, "k", "v"),
 	})
 
@@ -352,23 +299,19 @@ func TestEvictionKeepsTheMostRecentlyUsed(t *testing.T) {
 }
 
 func TestEvictedClientLosesDeduplication(t *testing.T) {
-	// The cost of the bound, stated as a test rather than left implicit. A
-	// client evicted from the table is indistinguishable from a new one, so
-	// its next retry is applied as though it were fresh.
 	const max = 2
 	kv := NewWithMaxSessions(max)
 
 	applyAll(t, kv, []raft.Entry{
 		clientPut(1, 1, 1, "x", "original"),
 		clientPut(2, 2, 1, "k", "v"),
-		clientPut(3, 3, 1, "k", "v"), // evicts client 1
+		clientPut(3, 3, 1, "k", "v"),
 	})
 
 	if _, ok := kv.LastSeq(1); ok {
 		t.Fatal("client 1 was not evicted; the test no longer exercises the case")
 	}
 
-	// The retry is now indistinguishable from a first request.
 	applyAll(t, kv, []raft.Entry{clientPut(4, 1, 1, "x", "replayed")})
 	if got := mustGet(t, kv, "x"); got != "replayed" {
 		t.Fatalf("x = %q; an evicted client's retry was still deduplicated, which "+
@@ -400,9 +343,6 @@ func TestCommandWithSessionRoundTrips(t *testing.T) {
 }
 
 func TestMalformedSessionFieldsAreRejected(t *testing.T) {
-	// A command truncated inside the session fields must be reported, not
-	// silently decoded as client 0 — which would turn a deduplicated request
-	// into a sessionless one and reintroduce the hazard.
 	full := Command{ClientID: 9, Seq: 3, Op: OpPut, Key: "k", Value: []byte("v")}.Encode()
 
 	for cut := 1; cut < 17; cut++ {
@@ -420,8 +360,6 @@ func TestMalformedSessionTableIsRejected(t *testing.T) {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	// Cutting anywhere inside the session table must fail rather than restore
-	// a partial table, which would silently forget some clients.
 	for cut := range len(valid) {
 		target := New()
 		if err := target.Restore(valid[:cut]); err == nil {
@@ -431,8 +369,6 @@ func TestMalformedSessionTableIsRejected(t *testing.T) {
 }
 
 func TestSessionsRestoreOntoAPopulatedStore(t *testing.T) {
-	// Restore replaces the session table as well as the data. A replica that
-	// merged the two would keep sessions no other node has.
 	stale := New()
 	applyAll(t, stale, []raft.Entry{
 		clientPut(1, 111, 5, "old", "value"),
@@ -461,9 +397,6 @@ func TestSessionsRestoreOntoAPopulatedStore(t *testing.T) {
 }
 
 func TestManyClientsUnderTheLimit(t *testing.T) {
-	// A realistic mix: many clients, several requests each, with retries
-	// scattered through. Every client's final value must reflect its highest
-	// sequence and nothing older.
 	kv := New()
 
 	const clients = 50
@@ -478,7 +411,6 @@ func TestManyClientsUnderTheLimit(t *testing.T) {
 			if err := kv.Apply(clientPut(next(), id, seq, key, fmt.Sprintf("seq-%d", seq))); err != nil {
 				t.Fatalf("applying: %v", err)
 			}
-			// Every third request is retried immediately.
 			if seq%3 == 0 {
 				if err := kv.Apply(clientPut(next(), id, seq, key, "RETRY")); err != nil {
 					t.Fatalf("applying retry: %v", err)

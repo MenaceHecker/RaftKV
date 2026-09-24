@@ -5,19 +5,6 @@ import (
 	"testing"
 )
 
-// Tests for applying configuration changes from the log (§6).
-//
-// The behaviour that needs the most defending is that a change takes effect
-// when its entry is *appended*, not when it commits. That sounds reckless —
-// acting on something that might never be agreed — but the alternative is
-// circular: whether the entry is committed is itself decided by a majority,
-// and which majority depends on the configuration.
-//
-// Accepting the rule means accepting that a configuration can be undone, so
-// the tests below spend as much effort on a change being correctly reverted as
-// on it being applied.
-
-// leaderWithConfChange elects node 1 and returns the cluster and that node.
 func leaderWithConfChange(t *testing.T, size int, seed int64) (*cluster, *Node) {
 	t.Helper()
 	c := newCluster(t, size, clusterOpts{seed: seed})
@@ -26,9 +13,6 @@ func leaderWithConfChange(t *testing.T, size int, seed int64) (*cluster, *Node) 
 }
 
 func TestConfChangeTakesEffectOnAppendNotCommit(t *testing.T) {
-	// §6: a server uses the latest configuration in its log whether or not it
-	// has committed. A leader that kept using the old configuration while the
-	// new one sat in its log would judge commitment by the wrong majority.
 	c, n := leaderWithConfChange(t, 3, 800)
 
 	commitBefore := n.CommitIndex()
@@ -52,13 +36,6 @@ func TestConfChangeTakesEffectOnAppendNotCommit(t *testing.T) {
 }
 
 func TestFollowersAdoptTheChangeAsItReplicates(t *testing.T) {
-	// Every node derives its membership from the same entries, so a change
-	// reaches followers by ordinary replication rather than any side channel.
-	//
-	// The transition completes on its own once the entry commits, so what is
-	// observable here is the destination rather than the joint phase in
-	// between. TestTransitionStaysOpenUntilItsEntryCommits looks at the
-	// intermediate state, where it can be held still.
 	c, n := leaderWithConfChange(t, 3, 801)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
@@ -78,12 +55,6 @@ func TestFollowersAdoptTheChangeAsItReplicates(t *testing.T) {
 }
 
 func TestLeaderFinishesTheTransitionItself(t *testing.T) {
-	// Raft describes both halves of a membership change, but only the first is
-	// triggered by anyone: an operator asks to add a node, and nobody asks to
-	// leave the joint configuration. The leader has to propose that second
-	// entry itself, or the cluster sits in joint consensus indefinitely —
-	// still safe, since a double majority is stricter, but unable to make any
-	// further membership change.
 	c, n := leaderWithConfChange(t, 3, 830)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
@@ -93,8 +64,6 @@ func TestLeaderFinishesTheTransitionItself(t *testing.T) {
 		t.Fatal("the change did not open a transition")
 	}
 
-	// Nobody proposes the leave-joint entry; the leader must do it once the
-	// first entry commits.
 	c.deliverAll()
 
 	if n.InJointConfiguration() {
@@ -102,21 +71,16 @@ func TestLeaderFinishesTheTransitionItself(t *testing.T) {
 	}
 	assertVoters(t, n.conf.voters, 1, 2, 3, 4)
 
-	// And with the transition closed, another change is possible again.
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 5, Addr: "h:5"}); err != nil {
 		t.Fatalf("a second change after the first completed: %v", err)
 	}
 }
 
 func TestTransitionStaysOpenUntilItsEntryCommits(t *testing.T) {
-	// Finishing a transition on top of an entry that has not committed would
-	// be finishing something a new leader could still undo, leaving this node
-	// in a configuration no one else ever adopted.
 	c := newCluster(t, 5, clusterOpts{seed: 831})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 	n := c.node(leader)
 
-	// Cut the leader off so nothing it appends can reach a majority.
 	var rest []NodeID
 	for _, id := range c.ids {
 		if id != leader {
@@ -140,15 +104,10 @@ func TestTransitionStaysOpenUntilItsEntryCommits(t *testing.T) {
 }
 
 func TestANewLeaderFinishesAnInheritedTransition(t *testing.T) {
-	// A leader can die mid-transition. Whoever replaces it inherits the joint
-	// configuration and has to complete it, or the cluster stays there for
-	// good.
 	c := newCluster(t, 3, clusterOpts{seed: 832})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 	n := c.node(leader)
 
-	// Open a transition that cannot commit, so it is still open when
-	// leadership moves.
 	var rest []NodeID
 	for _, id := range c.ids {
 		if id != leader {
@@ -164,8 +123,6 @@ func TestANewLeaderFinishesAnInheritedTransition(t *testing.T) {
 		t.Fatal("the change did not take effect on append")
 	}
 
-	// Heal and let the cluster settle. Whichever node leads afterwards must
-	// not leave a transition open.
 	c.heal()
 	c.tickN(defaultElectionTick * 6)
 
@@ -201,12 +158,6 @@ func TestCompletingATransitionLeavesTheNewConfiguration(t *testing.T) {
 }
 
 func TestTruncationRevertsAConfigurationChange(t *testing.T) {
-	// The property that justifies rebuilding rather than editing in place.
-	//
-	// A change that was appended but never committed can be overwritten by a
-	// new leader. A node that had already adopted it has no undo record to
-	// consult, so the configuration has to be derivable from whatever the log
-	// says after the truncation.
 	c := newCluster(t, 3, clusterOpts{seed: 803})
 	n := c.node(1)
 
@@ -223,8 +174,6 @@ func TestTruncationRevertsAConfigurationChange(t *testing.T) {
 	}
 	changeIndex := n.LastIndex()
 
-	// A new leader in a later term overwrites that entry with one of its own.
-	// The follower must reject the configuration along with the entry.
 	newTerm := n.Term() + 1
 	prevTerm, err := n.log.term(changeIndex - 1)
 	if err != nil {
@@ -257,10 +206,6 @@ func TestTruncationRevertsAConfigurationChange(t *testing.T) {
 }
 
 func TestConfigurationIsDerivedFromTheLogOnRestart(t *testing.T) {
-	// A node's membership lives in its log, not in the peer list it was
-	// started with. One that crashed part-way through a change must come back
-	// believing what its log says, or it would use a different majority from
-	// everyone else.
 	c := newCluster(t, 3, clusterOpts{seed: 804})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 	n := c.node(leader)
@@ -270,9 +215,6 @@ func TestConfigurationIsDerivedFromTheLogOnRestart(t *testing.T) {
 	}
 	c.deliverAll()
 
-	// Restart a follower that had accepted the change. Its peer list still
-	// says three nodes, so anything other than four proves it fell back to
-	// static configuration.
 	var follower NodeID
 	for _, id := range c.ids {
 		if id != leader {
@@ -308,9 +250,6 @@ func TestOnlyOneChangeMayBeInFlight(t *testing.T) {
 }
 
 func TestLeaveJointRequiresATransitionToBeOpen(t *testing.T) {
-	// Leaving is the one change that requires a transition in progress, where
-	// every other requires none. Treating them alike would make it impossible
-	// to finish what was started.
 	_, n := leaderWithConfChange(t, 3, 806)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); !errors.Is(err, ErrNotInJoint) {
@@ -346,9 +285,6 @@ func TestOnlyTheLeaderMayChangeMembership(t *testing.T) {
 }
 
 func TestInvalidChangesNeverReachTheLog(t *testing.T) {
-	// A change that every node would have to independently decide to ignore
-	// is worse than one that was never written: they might not all agree on
-	// what to ignore.
 	_, n := leaderWithConfChange(t, 3, 808)
 	before := n.LastIndex()
 
@@ -386,7 +322,6 @@ func TestRemovingANodeCompletesATransition(t *testing.T) {
 	if !n.InJointConfiguration() {
 		t.Fatal("removal did not enter a joint configuration")
 	}
-	// During the transition the departing node still counts in the old set.
 	if !n.conf.hasVoter(victim) {
 		t.Fatal("the departing node stopped being a voter before the transition completed")
 	}
@@ -406,9 +341,6 @@ func TestRemovingANodeCompletesATransition(t *testing.T) {
 }
 
 func TestLeaderTracksProgressForNewMembers(t *testing.T) {
-	// A new member needs a progress entry before the leader can send it
-	// anything, and it has to exist the moment the configuration changes,
-	// because the next commit decision is made against the new membership.
 	_, n := leaderWithConfChange(t, 3, 810)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
@@ -424,9 +356,6 @@ func TestLeaderTracksProgressForNewMembers(t *testing.T) {
 }
 
 func TestLeaderDropsProgressForRemovedMembers(t *testing.T) {
-	// A node no longer in any configuration must stop contributing to
-	// majorities. Leaving its progress behind would let a departed member
-	// carry a commit decision.
 	c := newCluster(t, 5, clusterOpts{seed: 811})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 	n := c.node(leader)
@@ -442,7 +371,6 @@ func TestLeaderDropsProgressForRemovedMembers(t *testing.T) {
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeRemoveNode, NodeID: victim}); err != nil {
 		t.Fatalf("removing: %v", err)
 	}
-	// Still tracked during the transition: it remains a voter in C_old.
 	if n.progress[victim] == nil {
 		t.Fatal("the departing node lost its progress entry during the transition, " +
 			"while it still counts toward the old majority")
@@ -458,9 +386,6 @@ func TestLeaderDropsProgressForRemovedMembers(t *testing.T) {
 }
 
 func TestRebuildingIsIdempotent(t *testing.T) {
-	// Rebuilding runs on every append that touches membership, so doing it
-	// twice must land in the same place. A rebuild that accumulated state
-	// would drift with the number of appends rather than the log's contents.
 	_, n := leaderWithConfChange(t, 3, 812)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
@@ -489,9 +414,6 @@ func TestRebuildingIsIdempotent(t *testing.T) {
 }
 
 func TestAddressTravelsWithTheChange(t *testing.T) {
-	// The transport needs the new member's address to reach it, and the only
-	// place it can come from is the change itself, since no node can be told
-	// about a member it has never heard of.
 	c, n := leaderWithConfChange(t, 3, 813)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "10.0.0.4:9000"}); err != nil {
@@ -508,18 +430,6 @@ func TestAddressTravelsWithTheChange(t *testing.T) {
 }
 
 func TestTransitionWaitsEvenWhenCommitAdvancesBelowIt(t *testing.T) {
-	// The commit index advancing is not the same as *this* entry committing.
-	//
-	// A leader can have entries queued behind a membership change: a majority
-	// acknowledges some earlier index, the commit index moves, and the
-	// transition is reconsidered — while the entry that opened it is still
-	// unreplicated. Finishing there would build the new configuration on top
-	// of an entry a future leader could still overwrite.
-	//
-	// This is checked directly rather than through the message layer, because
-	// arranging the exact gap between the commit index and the change's index
-	// takes a partition that would also stop the leader hearing anything at
-	// all, which is a different case.
 	c := newCluster(t, 3, clusterOpts{seed: 833})
 	n := c.node(1)
 
@@ -531,7 +441,6 @@ func TestTransitionWaitsEvenWhenCommitAdvancesBelowIt(t *testing.T) {
 		t.Fatalf("node 1 is %s, want Leader", n.State())
 	}
 
-	// An ordinary entry, then the membership change behind it.
 	if err := n.propose([]Entry{{Type: EntryNormal, Data: []byte("before")}}); err != nil {
 		t.Fatalf("propose: %v", err)
 	}
@@ -545,7 +454,6 @@ func TestTransitionWaitsEvenWhenCommitAdvancesBelowIt(t *testing.T) {
 		t.Fatalf("the change is at %d, expected it after %d", changeIndex, earlier)
 	}
 
-	// A majority has the earlier entry but not the change itself.
 	for _, id := range []NodeID{2, 3} {
 		n.progress[id].match = earlier
 	}
@@ -569,7 +477,6 @@ func TestTransitionWaitsEvenWhenCommitAdvancesBelowIt(t *testing.T) {
 			"still uncommitted (commit %d, change at %d)", n.CommitIndex(), changeIndex)
 	}
 
-	// Once the change itself commits, the leader completes it.
 	for _, id := range []NodeID{2, 3} {
 		n.progress[id].match = changeIndex
 	}

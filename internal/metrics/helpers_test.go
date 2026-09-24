@@ -9,14 +9,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-// Helpers for reading values back out of a registry.
-//
-// They gather through the registry rather than reading the collectors
-// directly, so what a test asserts on is what a Prometheus server would
-// actually scrape. A metric that was built but never registered would pass a
-// direct read and fail here, which is the point.
-
-// find returns the named metric family, failing the test if it is absent.
 func find(t *testing.T, reg *prometheus.Registry, name string) *dto.MetricFamily {
 	t.Helper()
 
@@ -33,7 +25,6 @@ func find(t *testing.T, reg *prometheus.Registry, name string) *dto.MetricFamily
 	return nil
 }
 
-// counter returns a counter's value for one value of its "result" label.
 func counter(t *testing.T, reg *prometheus.Registry, name, result string) float64 {
 	t.Helper()
 
@@ -48,7 +39,6 @@ func counter(t *testing.T, reg *prometheus.Registry, name, result string) float6
 	return 0
 }
 
-// gatherValue returns the value of an unlabelled gauge or counter.
 func gatherValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 	t.Helper()
 
@@ -68,7 +58,6 @@ func gatherValue(t *testing.T, reg *prometheus.Registry, name string) float64 {
 	}
 }
 
-// histogramCount returns how many observations a histogram has taken.
 func histogramCount(t *testing.T, reg *prometheus.Registry, name string) uint64 {
 	t.Helper()
 
@@ -79,7 +68,6 @@ func histogramCount(t *testing.T, reg *prometheus.Registry, name string) uint64 
 	return metrics[0].GetHistogram().GetSampleCount()
 }
 
-// scrape returns what an HTTP scrape of the registry produces.
 func scrape(t *testing.T, reg *prometheus.Registry) string {
 	t.Helper()
 

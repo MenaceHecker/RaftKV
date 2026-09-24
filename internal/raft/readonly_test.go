@@ -6,15 +6,6 @@ import (
 	"testing"
 )
 
-// Tests for the read-index protocol (§6.4).
-//
-// The property under test is negative and easy to get wrong: a leader that has
-// been cut off from the majority must not be able to serve a read. It still
-// believes it leads, its state machine still holds data, and every naive
-// implementation happily answers from it. So the tests here spend more effort
-// proving reads *fail* when they should than proving they succeed.
-
-// readIndex issues a read on a node and runs the network to quiescence.
 func (c *cluster) readIndex(id NodeID, context string) error {
 	c.t.Helper()
 	err := c.node(id).ReadIndex([]byte(context))
@@ -22,7 +13,6 @@ func (c *cluster) readIndex(id NodeID, context string) error {
 	return err
 }
 
-// completedReads returns the contexts of the read indexes a node has reported.
 func (c *cluster) completedReads(id NodeID) []string {
 	out := []string{}
 	for _, rs := range c.readStates[id] {
@@ -31,8 +21,6 @@ func (c *cluster) completedReads(id NodeID) []string {
 	return out
 }
 
-// readIndexFor returns the reported index for a context, and whether it
-// completed at all.
 func (c *cluster) readIndexFor(id NodeID, context string) (Index, bool) {
 	for _, rs := range c.readStates[id] {
 		if string(rs.Context) == context {
@@ -60,8 +48,6 @@ func TestReadIndexCompletesOnHealthyLeader(t *testing.T) {
 }
 
 func TestReadIndexRequiresLeadership(t *testing.T) {
-	// A follower cannot establish a read index, which is what lets the server
-	// layer turn the attempt into a redirect rather than a stale answer.
 	c := newCluster(t, 3, clusterOpts{seed: 201})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -79,10 +65,6 @@ func TestReadIndexRequiresLeadership(t *testing.T) {
 }
 
 func TestPartitionedLeaderCannotCompleteRead(t *testing.T) {
-	// The reason the protocol exists. A leader isolated from the majority
-	// still believes it leads and still holds state, so without the
-	// confirmation round it would serve a read that the rest of the cluster
-	// has already moved past.
 	c := newCluster(t, 5, clusterOpts{seed: 202})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -111,7 +93,6 @@ func TestPartitionedLeaderCannotCompleteRead(t *testing.T) {
 		t.Fatalf("an isolated leader completed a read index; the read would be stale\n%s", c.dump())
 	}
 
-	// It must never complete, however long it waits.
 	c.tickN(defaultElectionTick * 3)
 	if _, ok := c.readIndexFor(leader, "stale"); ok {
 		t.Fatalf("an isolated leader eventually completed a read index\n%s", c.dump())
@@ -119,8 +100,6 @@ func TestPartitionedLeaderCannotCompleteRead(t *testing.T) {
 }
 
 func TestReadCompletesAgainAfterHealing(t *testing.T) {
-	// Liveness alongside the safety case: once a majority is reachable, reads
-	// must work again rather than being permanently wedged.
 	c := newCluster(t, 5, clusterOpts{seed: 203})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -142,16 +121,6 @@ func TestReadCompletesAgainAfterHealing(t *testing.T) {
 		t.Fatalf("ReadIndex on the healed leader: %v", err)
 	}
 
-	// The doomed read's confirmation round went out into a partition and was
-	// never answered, and only one round runs at a time, so the fresh read
-	// waits behind it. The leader resends the outstanding round on its next
-	// heartbeat, which unblocks both.
-	//
-	// That delay is the price of batching reads behind a shared round, and it
-	// is bounded by one heartbeat interval. It buys a great deal: measured on
-	// a three node cluster, sharing rounds took reads from 7,600 to 28,000 a
-	// second and cut median latency from 2ms to 0.5ms, because the per-read
-	// broadcast was saturating the loop rather than the network.
 	c.tickN(defaultHeartbeatTick * 2)
 
 	if _, ok := c.readIndexFor(next, "fresh"); !ok {
@@ -160,8 +129,6 @@ func TestReadCompletesAgainAfterHealing(t *testing.T) {
 }
 
 func TestReadIndexNeedsAMajority(t *testing.T) {
-	// Two of five is not a majority. As with elections, silence must never be
-	// read as confirmation.
 	c := newCluster(t, 5, clusterOpts{seed: 204})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -188,7 +155,6 @@ func TestReadIndexNeedsAMajority(t *testing.T) {
 }
 
 func TestReadIndexSucceedsWithExactlyAMajority(t *testing.T) {
-	// The boundary on the other side: three of five is enough.
 	c := newCluster(t, 5, clusterOpts{seed: 205})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -215,9 +181,6 @@ func TestReadIndexSucceedsWithExactlyAMajority(t *testing.T) {
 }
 
 func TestFreshLeaderCannotServeReadsYet(t *testing.T) {
-	// §5.4.2 from the read side. Until a leader commits something in its own
-	// term it cannot tell which inherited entries are truly committed, so any
-	// read index it produced might name an entry that is later overwritten.
 	c := newCluster(t, 3, clusterOpts{seed: 206})
 
 	n := c.node(1)
@@ -228,7 +191,6 @@ func TestFreshLeaderCannotServeReadsYet(t *testing.T) {
 		t.Fatalf("becomeLeader: %v", err)
 	}
 
-	// The no-op is in the log but not yet committed: nobody has acknowledged it.
 	if err := n.ReadIndex([]byte("early")); !errors.Is(err, ErrLeaderNotReady) {
 		t.Fatalf("ReadIndex on a leader with nothing committed in its term gave %v, "+
 			"want ErrLeaderNotReady", err)
@@ -236,8 +198,6 @@ func TestFreshLeaderCannotServeReadsYet(t *testing.T) {
 }
 
 func TestLeaderCanServeReadsOnceNoOpCommits(t *testing.T) {
-	// And the resolution: the no-op appended on election commits within a
-	// round, after which reads work with no client action.
 	c := newCluster(t, 3, clusterOpts{seed: 207})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -250,9 +210,6 @@ func TestLeaderCanServeReadsOnceNoOpCommits(t *testing.T) {
 }
 
 func TestConcurrentReadsShareOneRound(t *testing.T) {
-	// Reads registered together must all complete off a single heartbeat
-	// round. Without the batching, read throughput would be capped at one
-	// network round trip per read.
 	c := newCluster(t, 5, clusterOpts{seed: 208})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 	n := c.node(leader)
@@ -277,8 +234,6 @@ func TestConcurrentReadsShareOneRound(t *testing.T) {
 }
 
 func TestReadIndexRejectsDuplicateContext(t *testing.T) {
-	// The context is what attributes an acknowledgement to a round, so two
-	// in-flight reads sharing one would be indistinguishable.
 	c := newCluster(t, 5, clusterOpts{seed: 209})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 	n := c.node(leader)
@@ -290,7 +245,6 @@ func TestReadIndexRejectsDuplicateContext(t *testing.T) {
 		t.Fatalf("reusing an in-flight context gave %v, want ErrReadIndexInFlight", err)
 	}
 
-	// Once it completes the context is free again.
 	c.deliverAll()
 	if err := n.ReadIndex([]byte("dup")); err != nil {
 		t.Fatalf("reusing a completed context: %v", err)
@@ -307,8 +261,6 @@ func TestReadIndexRejectsEmptyContext(t *testing.T) {
 }
 
 func TestReadIndexOnSingleNodeCluster(t *testing.T) {
-	// A one-node cluster is its own majority, so there is nobody to hear from
-	// and the read completes immediately.
 	c := newCluster(t, 1, clusterOpts{seed: 211})
 	c.campaign(1)
 	c.tickN(2)
@@ -322,9 +274,6 @@ func TestReadIndexOnSingleNodeCluster(t *testing.T) {
 }
 
 func TestReadIndexReflectsCommittedWrites(t *testing.T) {
-	// The read index must be at least as high as everything committed before
-	// it was requested, or a client could write and then fail to see its own
-	// write.
 	c := newCluster(t, 5, clusterOpts{seed: 212})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -349,9 +298,6 @@ func TestReadIndexReflectsCommittedWrites(t *testing.T) {
 }
 
 func TestDeposedLeaderAbandonsInFlightReads(t *testing.T) {
-	// A node that stops leading cannot confirm anything. Its pending rounds
-	// must be dropped rather than left to complete against acknowledgements
-	// that no longer mean what they did.
 	c := newCluster(t, 5, clusterOpts{seed: 213})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 	n := c.node(leader)
@@ -368,7 +314,6 @@ func TestDeposedLeaderAbandonsInFlightReads(t *testing.T) {
 		t.Fatalf("ReadIndex: %v", err)
 	}
 
-	// Force it to step down by showing it a higher term.
 	if err := n.Step(Message{
 		Type: MsgAppendRequest,
 		From: rest[0],
@@ -390,9 +335,6 @@ func TestDeposedLeaderAbandonsInFlightReads(t *testing.T) {
 }
 
 func TestHeartbeatDoesNotDisturbReplication(t *testing.T) {
-	// Read-index heartbeats are a separate exchange from AppendEntries. They
-	// must not move any replication state — a heartbeat that reset a
-	// follower's progress would stall the log.
 	c := newCluster(t, 3, clusterOpts{seed: 214})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -419,7 +361,6 @@ func TestHeartbeatDoesNotDisturbReplication(t *testing.T) {
 			"append anything", len(beforeLog), len(got))
 	}
 
-	// Replication must still work afterwards.
 	if err := c.propose(leader, "after-reads"); err != nil {
 		t.Fatalf("propose after reads: %v", err)
 	}
@@ -428,8 +369,6 @@ func TestHeartbeatDoesNotDisturbReplication(t *testing.T) {
 }
 
 func TestHeartbeatAdvancesFollowerCommitIndex(t *testing.T) {
-	// A heartbeat carries the leader's commit index, so a follower learns what
-	// has committed even when there is nothing left to replicate to it.
 	c := newCluster(t, 3, clusterOpts{seed: 215})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -449,8 +388,6 @@ func TestHeartbeatAdvancesFollowerCommitIndex(t *testing.T) {
 }
 
 func TestReadContextIsCopied(t *testing.T) {
-	// The context is the key a round is tracked under. If it aliased the
-	// caller's buffer, mutating that buffer would orphan the round.
 	c := newCluster(t, 5, clusterOpts{seed: 216})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -470,19 +407,6 @@ func TestReadContextIsCopied(t *testing.T) {
 }
 
 func TestAQueuedReadIsNotConfirmedByAnEarlierRound(t *testing.T) {
-	// The hazard that comes with sharing confirmation rounds between reads.
-	//
-	// Only one round runs at a time, so a read arriving while one is in
-	// flight waits for the next. It must actually wait. Those heartbeats went
-	// out before this read existed, so the majority that answers them is
-	// proving the leader held office at a moment already past, and a read
-	// confirmed on that evidence can be served from a leader deposed in the
-	// meantime. That is precisely the staleness read-index exists to stop,
-	// reintroduced by the optimization rather than by the protocol.
-	//
-	// The test forces the question by letting the first round complete
-	// normally and blocking the second, so the queued read can only finish by
-	// borrowing acknowledgements it has no right to.
 	c := newCluster(t, 3, clusterOpts{seed: 211})
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
@@ -490,8 +414,6 @@ func TestAQueuedReadIsNotConfirmedByAnEarlierRound(t *testing.T) {
 		return !(m.Type == MsgHeartbeat && string(m.Context) == "second")
 	}
 
-	// Both registered before anything is delivered, so the second is queued
-	// behind the first rather than starting a round of its own.
 	n := c.node(leader)
 	if err := n.ReadIndex([]byte("first")); err != nil {
 		t.Fatalf("first ReadIndex: %v", err)
@@ -509,7 +431,6 @@ func TestAQueuedReadIsNotConfirmedByAnEarlierRound(t *testing.T) {
 			"acknowledgements, which were collected before it existed\n%s", c.dump())
 	}
 
-	// And once its own round is allowed through, it completes normally.
 	c.heal()
 	c.tickN(defaultHeartbeatTick * 3)
 	if _, ok := c.readIndexFor(leader, "second"); !ok {

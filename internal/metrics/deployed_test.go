@@ -17,23 +17,8 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/transport"
 )
 
-// A dashboard panel or an alert rule naming a metric that does not exist does
-// not fail. It renders an empty graph, or it is an alert that can never fire,
-// and both look exactly like a healthy cluster. That is the worst failure mode
-// observability has: the thing you added in order to find out what is wrong
-// tells you nothing is wrong.
-//
-// Nothing connects the name in a JSON dashboard to the name in Go. Renaming a
-// metric compiles, passes every test, and silently blanks whatever was
-// watching it. So the deployed files are checked against what a registry
-// actually exports.
-
-// metricRef matches a metric name in a config file, including the suffixes
-// Prometheus appends to histogram samples.
 var metricRef = regexp.MustCompile(`raftkv_[a-z0-9_]+`)
 
-// sampleSuffixes are added by Prometheus to a histogram's samples; the family
-// underneath carries the bare name.
 var sampleSuffixes = []string{"_bucket", "_sum", "_count"}
 
 func TestDeployedFilesOnlyNameMetricsThatExist(t *testing.T) {
@@ -56,13 +41,6 @@ func TestDeployedFilesOnlyNameMetricsThatExist(t *testing.T) {
 }
 
 func TestTheDashboardIsValidJSON(t *testing.T) {
-	// Provisioning reads this file at startup. A dashboard that does not
-	// parse is not provisioned, and the graphs an operator goes looking for
-	// during an incident are simply absent.
-	//
-	// It is also what makes the check above mean what it says: the metric
-	// names are found by scanning text, which would happily scan a file that
-	// Grafana could never load.
 	const path = "../../deploy/grafana/raftkv-dashboard.json"
 
 	b, err := os.ReadFile(path)
@@ -82,8 +60,6 @@ func TestTheDashboardIsValidJSON(t *testing.T) {
 	}
 }
 
-// family strips the suffix Prometheus appends to a histogram sample, leaving
-// the name the registry reports.
 func family(ref string) string {
 	for _, suffix := range sampleSuffixes {
 		if strings.HasSuffix(ref, suffix) {
@@ -93,13 +69,6 @@ func family(ref string) string {
 	return ref
 }
 
-// exportedMetricNames gathers from a registry holding everything a running
-// node registers.
-//
-// Every recorder method is called once first. A vector with labels reports no
-// family at all until some combination of labels has been observed, so a
-// registry that has never been written to would look emptier than a running
-// node and the check would pass by knowing nothing.
 func exportedMetricNames(t *testing.T) map[string]bool {
 	t.Helper()
 
@@ -140,8 +109,6 @@ func exportedMetricNames(t *testing.T) map[string]bool {
 	return names
 }
 
-// deployedFiles are the files that name metrics outside Go: the alert rules,
-// the dashboard, and the document that tells an operator what to look at.
 func deployedFiles(t *testing.T) []string {
 	t.Helper()
 

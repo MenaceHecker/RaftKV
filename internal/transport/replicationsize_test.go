@@ -16,23 +16,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/storage"
 )
 
-// Tests for replication traffic that grows with the data.
-//
-// A snapshot is the obvious message whose size follows the data, and it now
-// has its own streamed path. It is not the only one. An AppendEntries carries
-// however many entries a follower is missing, and a follower can be missing
-// an unbounded number of them, so ordinary replication has exactly the same
-// failure mode: it works in every test where the data is small and stops
-// working once it is not.
-
-// TestFollowerCatchesUpFromALargeBacklog stops a follower, accumulates far
-// more than one message worth of entries without compacting, and brings it
-// back.
-//
-// Not compacting is the whole point. With a snapshot available the leader
-// would send one and the streamed path would carry it. This forces catch-up
-// through the log, which is what a follower that was only briefly away
-// actually does.
 func TestFollowerCatchesUpFromALargeBacklog(t *testing.T) {
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
@@ -55,8 +38,6 @@ func TestFollowerCatchesUpFromALargeBacklog(t *testing.T) {
 	}
 	delete(c.nodes, victim)
 
-	// About 8 MiB of entries, comfortably past a default gRPC message, and
-	// deliberately never compacted.
 	const (
 		writes    = 64
 		valueSize = 128 << 10
@@ -72,8 +53,6 @@ func TestFollowerCatchesUpFromALargeBacklog(t *testing.T) {
 		}
 	}
 
-	// Bring it back with its data directory intact, so it resumes from where
-	// it left off and the leader has to ship the whole backlog.
 	l, err := net.Listen("tcp", c.addrs[victim])
 	if err != nil {
 		t.Fatalf("re-binding node %d: %v", victim, err)
@@ -117,18 +96,12 @@ func TestFollowerCatchesUpFromALargeBacklog(t *testing.T) {
 		return c.nodes[victim].Status().Applied >= want
 	})
 
-	// It must have caught up from the log, not from an image. If a snapshot
-	// were involved this would be re-testing the streamed path instead of
-	// ordinary replication.
 	if got := c.nodes[victim].Status().SnapshotsReceived; got != 0 {
 		t.Fatalf("node %d received %d snapshots, so this test is not exercising "+
 			"log replication", victim, got)
 	}
 }
 
-// TestLargeConcurrentWritesReplicate covers the other way a single append
-// grows: group commit puts everything that was waiting into one batch, and
-// the leader then replicates that batch as one message.
 func TestLargeConcurrentWritesReplicate(t *testing.T) {
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()

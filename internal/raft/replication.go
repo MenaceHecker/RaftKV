@@ -5,19 +5,6 @@ import (
 	"sort"
 )
 
-// Log replication (§5.3, §5.4.2).
-//
-// The leader holds the authoritative log. For each follower it tracks the
-// highest index known to be replicated there (match) and where the next append
-// should start (next). A follower accepts an append only if its log agrees at
-// the entry immediately before it, which by induction means the whole prefix
-// agrees — the Log Matching Property. Once a majority of match indices reach
-// some index, and the entry there belongs to the leader's own term, it is
-// committed.
-
-// propose appends client commands to the leader's log and starts replicating
-// them. Entries arrive with no term or index; the leader assigns both, which is
-// what makes it the single ordering authority for its term.
 func (n *Node) propose(entries []Entry) error {
 	if n.state != Leader {
 		return ErrNotLeader
@@ -40,8 +27,6 @@ func (n *Node) propose(entries []Entry) error {
 	n.progress[n.id].match = n.log.lastIndex()
 	n.progress[n.id].next = n.log.lastIndex() + 1
 
-	// When this node is the whole cluster its own append is already a
-	// majority, and no response will ever arrive to advance the commit index.
 	if n.isSoleVoter() {
 		n.maybeCommit()
 		return nil
@@ -51,12 +36,6 @@ func (n *Node) propose(entries []Entry) error {
 	return nil
 }
 
-// broadcastAppend sends every follower whatever it is missing.
-//
-// The set is drawn from the configuration, so during a joint transition a node
-// that belongs to only the incoming configuration is replicated to as well. It
-// has to be: it cannot contribute to the new majority until its log has caught
-// up.
 func (n *Node) broadcastAppend() {
 	for _, p := range n.conf.members() {
 		if p == n.id {
@@ -66,23 +45,9 @@ func (n *Node) broadcastAppend() {
 	}
 }
 
-// broadcastHeartbeat is the leader's periodic contact with its followers.
-//
-// It is deliberately the same operation as broadcastAppend: a heartbeat is
-// just an AppendEntries that happens to carry nothing when the follower is
-// caught up. Sharing the path means a dropped append is retried on the next
-// heartbeat, instead of leaving that follower stalled until the next client
-// write.
 func (n *Node) broadcastHeartbeat() {
 	n.broadcastAppend()
 
-	// Retry the outstanding read confirmation, if there is one.
-	//
-	// Batching reads behind a single round makes one lost heartbeat more
-	// expensive than it used to be: previously it stalled the one read that
-	// sent it, now it stalls every read queued behind that round. Resending
-	// on the beat the leader is already paying for costs nothing and bounds
-	// the delay to a heartbeat interval.
 	if n.readOnly.outstanding != "" {
 		if round, ok := n.readOnly.rounds[n.readOnly.outstanding]; ok {
 			n.sendReadHeartbeats(round.context)
@@ -90,9 +55,6 @@ func (n *Node) broadcastHeartbeat() {
 	}
 }
 
-// sendAppend sends one follower the entries from its next index onward, along
-// with the (index, term) of the entry immediately before them so the follower
-// can verify its log agrees at that point.
 func (n *Node) sendAppend(to NodeID) {
 	pr := n.progress[to]
 	if pr == nil {
@@ -102,9 +64,6 @@ func (n *Node) sendAppend(to NodeID) {
 	prevIdx := pr.next - 1
 	prevTerm, err := n.log.term(prevIdx)
 	if err != nil {
-		// The entry this follower needs has been compacted away, so no amount
-		// of backing off will find a position the two logs agree on. Send the
-		// state machine image instead and let it start over from there.
 		n.sendSnapshot(to)
 		return
 	}
@@ -115,9 +74,6 @@ func (n *Node) sendAppend(to NodeID) {
 		return
 	}
 
-	// Send at most a bounded amount at a time. A follower far behind gets its
-	// backlog over several rounds rather than in one message no transport
-	// would accept.
 	limited := limitEntries(entries, n.maxAppendBytes)
 	pr.heldBack = len(limited) < len(entries)
 	entries = limited
@@ -133,28 +89,17 @@ func (n *Node) sendAppend(to NodeID) {
 	})
 }
 
-// handleAppendRequest is the follower's side of replication. Step has already
-// applied the term rules, so m.Term equals n.term here.
 func (n *Node) handleAppendRequest(m Message) error {
 	switch n.state {
 	case Leader:
-		// Two leaders in one term would violate Election Safety, so this is
-		// a bug in this implementation rather than a condition to tolerate.
 		return fmt.Errorf("raft: node %d received an append from %d in its own leader term %d",
 			n.id, m.From, n.term)
 	case PreCandidate, Candidate:
-		// A leader is alive in this term. A candidate has lost the election;
-		// a pre-candidate never started one and has simply learned that it
-		// should not. Both become followers of the leader that is writing.
 		if err := n.becomeFollower(m.Term, m.From); err != nil {
 			return err
 		}
 	}
 
-	// Contact from the current leader, so the election timer restarts even if
-	// the append itself is rejected. The leader being alive and reachable is
-	// the only thing that timer is watching for; whether the logs happen to
-	// agree yet is a separate question.
 	n.leader = m.From
 	n.electionElapsed = 0
 
@@ -176,9 +121,6 @@ func (n *Node) handleAppendRequest(m Message) error {
 		return nil
 	}
 
-	// A configuration change takes effect on append, so accepting entries can
-	// change this node's membership — and truncating can revert one it was
-	// already using.
 	if res.truncated || containsConfChange(m.Entries) {
 		if err := n.rebuildConfig(); err != nil {
 			return err
@@ -195,22 +137,15 @@ func (n *Node) handleAppendRequest(m Message) error {
 	return nil
 }
 
-// handleAppendResponse updates the leader's view of one follower and, on
-// success, reconsiders what is committed.
 func (n *Node) handleAppendResponse(m Message) error {
 	if n.state != Leader {
 		return nil
 	}
 	pr := n.progress[m.From]
 	if pr == nil {
-		// Not a member. A node dropped by a configuration change can still
-		// have a response in flight, and a node that was never a member can
-		// send whatever it likes, so this is ignored rather than acted on.
 		return nil
 	}
 
-	// Any message from a follower proves it is reachable and still
-	// recognises this leader, which is all the quorum check needs.
 	pr.active = true
 
 	if !m.Success {
@@ -219,9 +154,6 @@ func (n *Node) handleAppendResponse(m Message) error {
 		return nil
 	}
 
-	// A delayed response can report a lower match than one already recorded.
-	// match must never move backwards, or the leader could un-commit an entry
-	// it has already told clients about.
 	if m.MatchIndex > pr.match {
 		pr.match = m.MatchIndex
 	}
@@ -230,70 +162,39 @@ func (n *Node) handleAppendResponse(m Message) error {
 	}
 
 	if n.maybeCommit() {
-		// A membership transition may now be finishable, and the entry that
-		// finishes it should go out with everything else rather than waiting
-		// for another round.
 		if err := n.maybeFinishConfChange(); err != nil {
 			return err
 		}
 
-		// Tell the followers about the new commit index now rather than
-		// waiting for the next heartbeat, so they can apply without that
-		// extra delay. This also carries the next slice of the backlog to
-		// anyone still catching up.
 		n.broadcastAppend()
 	} else if pr.heldBack && pr.next <= n.log.lastIndex() {
-		// The last append to this follower was cut short by the budget, so
-		// it is working through a backlog. Send the next slice now rather
-		// than at the next heartbeat, which would cost one heartbeat
-		// interval per slice and turn a brief absence into a long recovery.
-		//
-		// The heldBack condition is what keeps this from firing constantly.
-		// Under load a follower is almost always an entry or two behind, and
-		// chasing that costs an extra message per response while the next
-		// proposal was about to carry the entries anyway.
 		n.sendAppend(m.From)
 	}
 	return nil
 }
 
-// backoff rewinds a follower's next index after a rejected append, using the
-// conflict hint to skip a whole term at a time instead of stepping back one
-// index per round trip (§5.3).
 func (n *Node) backoff(pr *progress, m Message) {
 	var next Index
 
 	switch last, ok := n.lastIndexInTerm(m.ConflictTerm); {
 	case m.ConflictTerm == 0:
-		// The follower's log is shorter than PrevLogIndex, or that position
-		// is compacted on its side. ConflictIndex is the first index it
-		// cannot speak for, so resume there.
 		next = m.ConflictIndex
 
 	case ok:
-		// The leader also holds entries in the conflicting term. Everything
-		// through its last entry in that term matches, so resume just after
-		// it.
 		next = last + 1
 
 	default:
-		// The leader has no entries in that term at all, so the follower's
-		// entire run of that term is wrong. Skip past all of it in one step.
 		next = m.ConflictIndex
 	}
 
 	if next < 1 {
 		next = 1
 	}
-	// Only ever move backwards. A reordered rejection arriving after a later
-	// success must not push next forward past what has already been confirmed.
 	if next < pr.next {
 		pr.next = next
 	}
 }
 
-// lastIndexInTerm returns the highest index in the leader's log whose entry has
-// the given term.
 func (n *Node) lastIndexInTerm(term Term) (Index, bool) {
 	first := n.log.firstIndex()
 	for i := n.log.lastIndex(); i >= first; i-- {
@@ -305,24 +206,12 @@ func (n *Node) lastIndexInTerm(term Term) (Index, bool) {
 			return i, true
 		}
 		if t < term {
-			// Terms never decrease as the index grows, so once the log drops
-			// below the target term there is nothing left to find.
 			break
 		}
 	}
 	return 0, false
 }
 
-// maybeCommit advances the commit index to the highest index replicated on a
-// majority, reporting whether it moved.
-//
-// The term check is the subtle part (§5.4.2). A leader may not commit an entry
-// from an earlier term merely because a majority now stores it — such an entry
-// can still be overwritten by a future leader, and committing it would let two
-// state machines diverge. Only once an entry from the leader's own term is
-// committed does the whole prefix become safe, which is exactly why
-// becomeLeader appends a no-op: it gives every new leader something in its own
-// term to commit immediately.
 func (n *Node) maybeCommit() bool {
 	matchFor := func(id NodeID) Index {
 		if pr := n.progress[id]; pr != nil {
@@ -331,18 +220,6 @@ func (n *Node) maybeCommit() bool {
 		return 0
 	}
 
-	// The commit index can only ever be an index some member has actually
-	// reached, so those are the only candidates worth testing. Trying every
-	// index between the current commit point and the highest match would be
-	// unbounded work after an election with a backlog, and would test indexes
-	// no majority could possibly hold.
-	//
-	// They are tested highest first, and the configuration decides whether
-	// each is held by a majority — which during a joint transition means a
-	// majority of both voter sets. Asking the configuration is what makes the
-	// two-set rule expressible: there is no single position in one sorted
-	// ordering that answers a double-majority question, which is why the
-	// previous sort-and-index approach could not be extended.
 	members := n.conf.members()
 	candidates := make([]Index, 0, len(members))
 	for _, p := range members {
@@ -357,10 +234,6 @@ func (n *Node) maybeCommit() bool {
 			continue
 		}
 
-		// §5.4.2: replica count alone does not commit. An entry from an
-		// earlier term can sit on a majority and still be overwritten, so
-		// only an entry from the leader's own term may advance the commit
-		// index — and it carries the whole inherited prefix with it.
 		t, err := n.log.term(candidate)
 		if err != nil || t != n.term {
 			return false

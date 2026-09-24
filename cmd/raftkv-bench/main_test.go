@@ -5,15 +5,6 @@ import (
 	"time"
 )
 
-// Tests for the benchmark's arithmetic.
-//
-// Every performance figure in this repository came out of this tool, which
-// makes it an instrument rather than a convenience: if it computes a
-// percentile slightly wrong, every number quoted from it is slightly wrong in
-// the same direction and nothing else in the project would notice. It had no
-// tests at all until these, which is a poor position from which to publish
-// measurements.
-
 func durations(ms ...int) []time.Duration {
 	out := make([]time.Duration, len(ms))
 	for i, m := range ms {
@@ -23,8 +14,6 @@ func durations(ms ...int) []time.Duration {
 }
 
 func TestPercentileUsesNearestRank(t *testing.T) {
-	// Ten samples, 1ms through 10ms. Nearest rank puts the median at the
-	// fifth, not the sixth: ceil(0.5*10) = 5.
 	sorted := durations(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 
 	for _, tc := range []struct {
@@ -58,17 +47,12 @@ func TestPercentileOfASingleSample(t *testing.T) {
 }
 
 func TestPercentileOfNothingIsZero(t *testing.T) {
-	// A run that recorded nothing must report zero rather than reaching past
-	// the end of an empty slice.
 	if got := percentile(nil, 0.99); got != 0 {
 		t.Errorf("percentile of an empty slice = %v, want 0", got)
 	}
 }
 
 func TestPercentileNeverReadsOutOfRange(t *testing.T) {
-	// The fraction comes from a table in this file today, but the guard
-	// matters more than where the value came from: an index past the end
-	// would panic in the middle of reporting results, losing the whole run.
 	sorted := durations(1, 2, 3)
 	for _, f := range []float64{-1, 0, 0.5, 1, 2, 1e9} {
 		got := percentile(sorted, f)

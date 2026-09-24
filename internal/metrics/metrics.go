@@ -1,15 +1,3 @@
-// Package metrics exposes what a RaftKV node is doing in Prometheus format.
-//
-// It is the only package that knows about Prometheus. Everything below it
-// reports through small interfaces defined where the events happen, which
-// keeps the consensus core and the driver free of a metrics dependency and
-// keeps them testable without a registry.
-//
-// The metrics here are chosen to answer the questions an operator actually
-// has during an incident, in roughly this order: is there a leader, is the
-// cluster committing, is any node falling behind, and is the disk keeping up.
-// A metric that does not help answer one of those is not worth the
-// cardinality.
 package metrics
 
 import (
@@ -20,21 +8,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Namespace prefixes every metric this package exports.
 const Namespace = "raftkv"
 
-// latencyBuckets spans the range consensus operations actually occupy.
-//
-// The interesting values are spread very wide: an fsync on a healthy SSD is
-// well under a millisecond, while a write that has to wait out an election
-// takes seconds. Default buckets bunch up around 10ms and would put both of
-// those in the same place, so these run from 100us to roughly 3s.
 var latencyBuckets = prometheus.ExponentialBuckets(0.0001, 2, 16)
 
-// Metrics implements node.Recorder and holds every collector it feeds.
-//
-// It satisfies that interface structurally rather than by importing the node
-// package, so nothing here depends on the driver.
 type Metrics struct {
 	proposals        *prometheus.CounterVec
 	proposalDuration prometheus.Histogram
@@ -59,10 +36,6 @@ type Metrics struct {
 	leaderID      prometheus.Gauge
 }
 
-// New creates the metrics and registers them.
-//
-// It takes a Registerer rather than using the default one so that tests, and
-// a process running more than one node, can each have their own registry.
 func New(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		proposals: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -176,9 +149,6 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.leaderChanges, m.term, m.isLeader, m.leaderID,
 	)
 
-	// Initialize the outcome counters so a dashboard shows a flat zero
-	// rather than a gap before the first failure of each kind. A panel that
-	// reads "no data" is ambiguous in a way that "0" is not.
 	for _, result := range []string{"ok", "not_leader", "lost_leadership", "timeout", "stopped", "error"} {
 		m.proposals.WithLabelValues(result)
 		m.reads.WithLabelValues(result)
@@ -187,41 +157,34 @@ func New(reg prometheus.Registerer) *Metrics {
 	return m
 }
 
-// ObserveProposal records a completed write.
 func (m *Metrics) ObserveProposal(result string, d time.Duration) {
 	m.proposals.WithLabelValues(result).Inc()
 	m.proposalDuration.Observe(d.Seconds())
 }
 
-// ObserveRead records a completed linearizable read.
 func (m *Metrics) ObserveRead(result string, d time.Duration) {
 	m.reads.WithLabelValues(result).Inc()
 	m.readDuration.Observe(d.Seconds())
 }
 
-// ObserveApply records a batch of entries applied to the state machine.
 func (m *Metrics) ObserveApply(entries int, d time.Duration) {
 	m.appliedEntries.Add(float64(entries))
 	m.applyDuration.Observe(d.Seconds())
 }
 
-// ObservePersist records a durable log write.
 func (m *Metrics) ObservePersist(entries int, d time.Duration) {
 	m.persistedEntries.Add(float64(entries))
 	m.persistDuration.Observe(d.Seconds())
 }
 
-// SnapshotCreated records a snapshot taken locally.
 func (m *Metrics) SnapshotCreated(index uint64, d time.Duration) {
 	m.snapshotsCreated.Inc()
 	m.snapshotDuration.Observe(d.Seconds())
 	m.snapshotIndex.Set(float64(index))
 }
 
-// SnapshotReceived records an image installed from a leader.
 func (m *Metrics) SnapshotReceived() { m.snapshotsReceived.Inc() }
 
-// LeaderChanged records a change of term or leader.
 func (m *Metrics) LeaderChanged(term, leader uint64, isLeader bool) {
 	m.leaderChanges.Inc()
 	m.term.Set(float64(term))
@@ -233,12 +196,8 @@ func (m *Metrics) LeaderChanged(term, leader uint64, isLeader bool) {
 	}
 }
 
-// Handler serves the registry in Prometheus exposition format.
 func Handler(reg *prometheus.Registry) http.Handler {
 	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{
-		// A failing collector should be visible in the scrape rather than
-		// taking the whole endpoint down: partial metrics during an incident
-		// are considerably more useful than none.
 		ErrorHandling: promhttp.ContinueOnError,
 	})
 }

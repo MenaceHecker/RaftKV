@@ -6,19 +6,10 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Tests for the fault-injecting network.
-//
-// This is test infrastructure, which is exactly why it needs tests of its own.
-// A chaos harness that silently fails to inject the faults it claims turns
-// every scenario built on it into a test of nothing, and the failure mode is
-// invisible: everything passes, and it looks like the system is robust.
-
-// msg builds a message between two nodes.
 func msg(from, to raft.NodeID) raft.Message {
 	return raft.Message{Type: raft.MsgHeartbeat, From: from, To: to, Term: 1}
 }
 
-// drainAt advances to a tick and returns everything delivered up to it.
 func drainAt(n *Network, ticks int) []raft.Message {
 	var out []raft.Message
 	for range ticks {
@@ -46,9 +37,6 @@ func TestPerfectNetworkDeliversEverythingImmediately(t *testing.T) {
 }
 
 func TestDeliveryOrderIsDeterministic(t *testing.T) {
-	// The whole harness rests on this. If the same seed produced a different
-	// delivery order between runs, a failing scenario could not be reproduced
-	// and the suite would only teach people to re-run it.
 	run := func() []raft.Message {
 		n, err := NewNetwork(42, Faults{MinDelay: 0, MaxDelay: 5})
 		if err != nil {
@@ -77,9 +65,6 @@ func TestDeliveryOrderIsDeterministic(t *testing.T) {
 }
 
 func TestDifferentSeedsExploreDifferentOrders(t *testing.T) {
-	// Reproducibility is only useful if the seed actually changes something.
-	// A harness where every seed behaved identically would explore one
-	// interleaving forever while appearing to explore many.
 	order := func(seed int64) []raft.NodeID {
 		n, err := NewNetwork(seed, Faults{MinDelay: 0, MaxDelay: 10})
 		if err != nil {
@@ -120,10 +105,10 @@ func TestPartitionDropsCrossingMessages(t *testing.T) {
 	n.Partition([]raft.NodeID{1, 2}, []raft.NodeID{3, 4})
 
 	n.Send([]raft.Message{
-		msg(1, 2), // within a group
-		msg(3, 4), // within a group
-		msg(1, 3), // crossing
-		msg(4, 2), // crossing
+		msg(1, 2),
+		msg(3, 4),
+		msg(1, 3),
+		msg(4, 2),
 	})
 
 	got := n.Deliver()
@@ -141,8 +126,6 @@ func TestPartitionDropsCrossingMessages(t *testing.T) {
 }
 
 func TestUnlistedNodesAreIsolated(t *testing.T) {
-	// Naming one group has to be enough to isolate a node, or every scenario
-	// would have to enumerate the whole cluster just to cut one member off.
 	n, err := NewNetwork(1, Faults{})
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
@@ -151,8 +134,8 @@ func TestUnlistedNodesAreIsolated(t *testing.T) {
 	n.Partition([]raft.NodeID{1, 2, 3})
 
 	n.Send([]raft.Message{
-		msg(1, 2), // both listed
-		msg(1, 4), // 4 is not listed
+		msg(1, 2),
+		msg(1, 4),
 		msg(4, 1),
 	})
 
@@ -185,10 +168,6 @@ func TestHealingRestoresConnectivity(t *testing.T) {
 }
 
 func TestHealingDoesNotResurrectDroppedMessages(t *testing.T) {
-	// A message a partition dropped is gone. Delivering it once the partition
-	// heals would model a network that buffers indefinitely, which is both
-	// unrealistic and far easier to survive than the real thing — Raft's own
-	// retransmission is what recovers, and that is what should be under test.
 	n, err := NewNetwork(1, Faults{})
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
@@ -233,8 +212,6 @@ func TestLossDropsSomeButNotAll(t *testing.T) {
 			st.Dropped, delivered, count)
 	}
 
-	// Loosely around half. The bound is wide because this checks that the rate
-	// is applied at all, not that the generator is well distributed.
 	if st.Dropped < count/5 || st.Dropped > 4*count/5 {
 		t.Fatalf("dropped %d of %d at a 50%% loss rate, which is not close to half",
 			st.Dropped, count)
@@ -274,9 +251,6 @@ func TestDelayHoldsMessagesBack(t *testing.T) {
 }
 
 func TestVariableDelayReordersMessages(t *testing.T) {
-	// Reordering is the fault that finds the subtlest bugs, because an
-	// implementation that treats a response as being about its most recent
-	// request looks perfectly correct until two cross.
 	n, err := NewNetwork(3, Faults{MinDelay: 0, MaxDelay: 8})
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
@@ -284,8 +258,6 @@ func TestVariableDelayReordersMessages(t *testing.T) {
 
 	const count = 60
 	for i := range count {
-		// The term stands in for send order, so the delivered sequence can be
-		// compared against it.
 		n.Send([]raft.Message{{
 			Type: raft.MsgHeartbeat, From: 1, To: 2, Term: raft.Term(i),
 		}})
@@ -326,9 +298,6 @@ func TestDuplicationDeliversTwice(t *testing.T) {
 }
 
 func TestDuplicatesCanArriveLater(t *testing.T) {
-	// A copy delivered back to back is a much weaker test than one that turns
-	// up after the receiver has moved on, so duplicates are scheduled
-	// independently rather than beside the original.
 	n, err := NewNetwork(11, Faults{DuplicateRate: 1.0, MinDelay: 0, MaxDelay: 6})
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
@@ -348,9 +317,6 @@ func TestDuplicatesCanArriveLater(t *testing.T) {
 }
 
 func TestCrashDropsMessagesBoundForANode(t *testing.T) {
-	// When a node dies, whatever was on its way to it is gone. Delivering it
-	// to the restarted process would hand a node messages from before it
-	// existed.
 	n, err := NewNetwork(1, Faults{MinDelay: 5, MaxDelay: 5})
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
@@ -373,9 +339,6 @@ func TestCrashDropsMessagesBoundForANode(t *testing.T) {
 }
 
 func TestFaultsCanChangeMidRun(t *testing.T) {
-	// A scenario models a network that degrades and then recovers, so the
-	// configuration has to be changeable without rebuilding the network and
-	// losing everything in flight.
 	n, err := NewNetwork(1, Faults{})
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
@@ -404,8 +367,6 @@ func TestFaultsCanChangeMidRun(t *testing.T) {
 }
 
 func TestInvalidFaultsAreRejected(t *testing.T) {
-	// A misconfigured harness that ran anyway would inject something other
-	// than what the scenario asked for, and the scenario would still pass.
 	cases := map[string]Faults{
 		"negative loss":   {LossRate: -0.1},
 		"loss above one":  {LossRate: 1.5},
@@ -432,9 +393,6 @@ func TestInvalidFaultsAreRejected(t *testing.T) {
 }
 
 func TestStatsAccountForEveryMessage(t *testing.T) {
-	// A scenario reports the conditions it actually ran under, not the ones it
-	// configured. A run that asked for 20% loss and happened to drop nothing
-	// proves much less, and only the counters can tell the difference.
 	n, err := NewNetwork(9, Faults{LossRate: 0.3, MinDelay: 0, MaxDelay: 4})
 	if err != nil {
 		t.Fatalf("NewNetwork: %v", err)
@@ -445,7 +403,7 @@ func TestStatsAccountForEveryMessage(t *testing.T) {
 	for i := range count {
 		to := raft.NodeID(2)
 		if i%3 == 0 {
-			to = 3 // crosses the partition
+			to = 3
 		}
 		n.Send([]raft.Message{msg(1, to)})
 	}
@@ -472,19 +430,6 @@ func TestStatsAccountForEveryMessage(t *testing.T) {
 	}
 }
 
-// The tests above establish that each fault happens at all. These establish
-// that it happens as often as it was asked to.
-//
-// The distinction matters because every scenario states its faults as
-// magnitudes, and the report repeats them: "sustained loss, delay,
-// duplication and reordering" at fifteen percent means something different
-// from the same words at one percent. A guard like requireDropped only asks
-// whether anything was lost, so an injector applying a tenth of the
-// configured rate would keep every scenario green while quietly making the
-// suite far gentler than it claims to be.
-
-// observedRate runs n messages through a network and returns how often the
-// counted fault occurred.
 func observedRate(t *testing.T, seed int64, f Faults, n int, count func(Stats) int) float64 {
 	t.Helper()
 
@@ -498,7 +443,6 @@ func observedRate(t *testing.T, seed int64, f Faults, n int, count func(Stats) i
 	return float64(count(net.Stats())) / float64(n)
 }
 
-// assertClose fails if observed is not within tolerance of want, relatively.
 func assertClose(t *testing.T, what string, want, got, tolerance float64) {
 	t.Helper()
 
@@ -513,10 +457,6 @@ func assertClose(t *testing.T, what string, want, got, tolerance float64) {
 }
 
 func TestLossRateMatchesItsConfiguration(t *testing.T) {
-	// Twenty thousand messages per rate, with a fixed seed, so the figures
-	// are reproducible and the tolerance can be tight. Ten percent relative
-	// leaves room for the generator being consumed in a different order
-	// without leaving room for the rate being wrong.
 	const (
 		messages  = 20000
 		tolerance = 0.10
@@ -541,10 +481,6 @@ func TestDuplicateRateMatchesItsConfiguration(t *testing.T) {
 }
 
 func TestDelaysStayWithinTheirBoundsAndReachThem(t *testing.T) {
-	// Both ends have to be reachable, not just respected. A generator that
-	// never produced the maximum would make a scenario's worst case
-	// unreachable, and one that never produced the minimum would make every
-	// message slower than configured.
 	const (
 		min      = 2
 		max      = 6

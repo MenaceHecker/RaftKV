@@ -12,22 +12,11 @@ import (
 	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
 
-// Tests for the client-facing services.
-//
-// The behaviour that matters most here is what happens when a client picks the
-// wrong node. A follower must refuse and say where to go, rather than serving
-// from state it cannot vouch for — its own state may be arbitrarily behind and
-// nothing in a reply would say so. Most of these tests are about that refusal
-// being both correct and useful.
-
-// clientCtx returns a context bounded by the settle timeout.
 func clientCtx(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
 	return context.WithTimeout(context.Background(), grpcSettleTimeout)
 }
 
-// notLeaderDetail extracts the redirect attached to an error, failing the test
-// if it is absent.
 func notLeaderDetail(t *testing.T, err error) *raftkvv1.NotLeader {
 	t.Helper()
 
@@ -75,8 +64,6 @@ func TestClientWriteAndReadThroughTheAPI(t *testing.T) {
 }
 
 func TestMissingKeyIsFoundFalseNotAnError(t *testing.T) {
-	// An absent key is a legitimate answer, not a failure. Returning NotFound
-	// would make every client treat a normal lookup as an exception.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 
@@ -93,7 +80,6 @@ func TestMissingKeyIsFoundFalseNotAnError(t *testing.T) {
 }
 
 func TestEmptyValueIsDistinctFromMissing(t *testing.T) {
-	// found is a separate field precisely so an empty value stays a value.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 
@@ -121,9 +107,6 @@ func TestEmptyValueIsDistinctFromMissing(t *testing.T) {
 }
 
 func TestFollowerRedirectsWritesAndReads(t *testing.T) {
-	// The redirect, which is the whole reason a client may talk to any node.
-	// A follower that served the read instead would be answering from state
-	// that could be arbitrarily stale, with nothing in the reply saying so.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -158,9 +141,6 @@ func TestFollowerRedirectsWritesAndReads(t *testing.T) {
 }
 
 func TestARedirectIsEnoughToFindTheLeader(t *testing.T) {
-	// The redirect has to be actionable, not merely informative: a client that
-	// follows it must succeed on the next attempt without consulting any
-	// configuration of its own.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -178,7 +158,6 @@ func TestARedirectIsEnoughToFindTheLeader(t *testing.T) {
 	})
 	detail := notLeaderDetail(t, err)
 
-	// Follow it, using only what the error said.
 	var target raft.NodeID
 	for id, addr := range c.addrs {
 		if addr == detail.GetLeaderAddress() {
@@ -198,10 +177,6 @@ func TestARedirectIsEnoughToFindTheLeader(t *testing.T) {
 }
 
 func TestRedirectUsesFailedPreconditionNotUnavailable(t *testing.T) {
-	// The code choice is load-bearing. Unavailable invites gRPC's automatic
-	// retry against the same node, which can never succeed; FailedPrecondition
-	// tells the client the request was well-formed but sent to the wrong
-	// member.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -221,9 +196,6 @@ func TestRedirectUsesFailedPreconditionNotUnavailable(t *testing.T) {
 }
 
 func TestStatusAnswersOnAnyNode(t *testing.T) {
-	// A redirected client needs somewhere to ask, and an operator needs to see
-	// a node that is unhealthy precisely because it is not participating. So
-	// this is the one call every node always answers.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -267,8 +239,6 @@ func TestStatusAnswersOnAnyNode(t *testing.T) {
 }
 
 func TestRetriedWriteIsDeduplicatedThroughTheAPI(t *testing.T) {
-	// A client that does not hear back has to retry, and the sequence number
-	// is what stops that retry from undoing a newer write.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 
@@ -294,22 +264,17 @@ func TestRetriedWriteIsDeduplicatedThroughTheAPI(t *testing.T) {
 		return string(got.GetValue())
 	}
 
-	// A retry of a request the same client has already superseded.
 	put(7, 1, "x", "first")
 	put(7, 2, "x", "second")
-	put(7, 1, "x", "first") // the delayed retry
+	put(7, 1, "x", "first")
 
 	if got := read("x"); got != "second" {
 		t.Fatalf("x = %q after a stale retry, want second", got)
 	}
 
-	// And a retry of the client's most recent request, which is what a
-	// timeout actually produces. Another client writes in between so the
-	// duplicate is observable rather than idempotent; without that, writing
-	// the same value twice looks identical to writing it once.
 	put(7, 3, "y", "mine")
 	put(8, 1, "y", "somebody else")
-	put(7, 3, "y", "mine") // the same request again
+	put(7, 3, "y", "mine")
 
 	if got := read("y"); got != "somebody else" {
 		t.Fatalf("y = %q after a client resent its latest write, want somebody else", got)
@@ -346,8 +311,6 @@ func TestDeleteThroughTheAPI(t *testing.T) {
 		t.Fatal("the key is still present after a delete")
 	}
 
-	// Deleting again succeeds: a command must be applicable on every replica
-	// whatever that replica holds.
 	if _, err := kv.Delete(ctx, &raftkvv1.DeleteRequest{
 		Client: &raftkvv1.ClientRequest{ClientId: 1, Sequence: 3},
 		Key:    "k",
@@ -363,7 +326,6 @@ func TestListMembersReportsTheCluster(t *testing.T) {
 	ctx, cancel := clientCtx(t)
 	defer cancel()
 
-	// Answers on any node, since membership is derived from the log.
 	for _, id := range c.ids {
 		got, err := c.cluster(id).ListMembers(ctx, &raftkvv1.ListMembersRequest{})
 		if err != nil {
@@ -386,8 +348,6 @@ func TestListMembersReportsTheCluster(t *testing.T) {
 }
 
 func TestAddAndRemoveNodeThroughTheAPI(t *testing.T) {
-	// Membership changes go through the log like anything else, so the call
-	// returns once a majority has agreed rather than when it was accepted.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -425,7 +385,6 @@ func TestAddAndRemoveNodeThroughTheAPI(t *testing.T) {
 		t.Fatalf("node 4 is missing from the membership: %v", members.GetMembers())
 	}
 
-	// And it can be removed again.
 	if _, err := admin.RemoveNode(ctx, &raftkvv1.RemoveNodeRequest{NodeId: 4}); err != nil {
 		t.Fatalf("RemoveNode: %v", err)
 	}
@@ -436,8 +395,6 @@ func TestAddAndRemoveNodeThroughTheAPI(t *testing.T) {
 }
 
 func TestMembershipChangesRedirectToTheLeader(t *testing.T) {
-	// Only the leader may change membership, for the same reason only it may
-	// write: nobody else can order the change against everything else.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -463,9 +420,6 @@ func TestMembershipChangesRedirectToTheLeader(t *testing.T) {
 }
 
 func TestInvalidMembershipRequestsAreRejected(t *testing.T) {
-	// A change that cannot be applied should be refused where the operator can
-	// still see why, rather than reaching the log for every node to
-	// independently decide to ignore.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -518,13 +472,10 @@ func TestNewKVServerRequiresAStore(t *testing.T) {
 }
 
 func TestClientCallsRespectTheirDeadline(t *testing.T) {
-	// A write to a node that cannot commit must fail when the client says so,
-	// not hang until something else happens.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
 
-	// Cut the leader off so nothing it appends can commit.
 	c.servers[c.followerOf(leaderID)].Stop()
 	for _, id := range c.ids {
 		if id != leaderID && id != c.followerOf(leaderID) {

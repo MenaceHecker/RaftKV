@@ -14,37 +14,12 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/storage"
 )
 
-// Tests for the node driver.
-//
-// Unlike the Raft core's harness, this one runs real goroutines against real
-// time: the driver exists precisely to introduce those, so testing it without
-// them would test nothing. That makes these tests inherently less reproducible
-// than the deterministic ones below them, which is why they check outcomes
-// that must eventually hold rather than exact interleavings, and why the
-// deterministic suite remains where the subtle consensus properties are
-// pinned down.
-//
-// Ticks are short so a full election fits in milliseconds, and every wait is
-// bounded so a hang fails with a diagnosis instead of a timeout.
-
 const (
-	// testTick keeps elections fast. It is well above the scheduling noise a
-	// loaded CI machine introduces, so a slow moment does not read as a
-	// failure.
 	testTick = 5 * time.Millisecond
 
-	// settleTimeout bounds how long a test waits for a condition that should
-	// hold within a few election rounds.
-	//
-	// It is far longer than the handful of ticks these conditions actually
-	// need. The generosity is deliberate: these tests share a machine with
-	// the storage suite's fsync-heavy runs, and a scheduling stall there must
-	// not read as a consensus failure here. A real hang still fails, just
-	// later, and with a cluster dump explaining what was true at the time.
 	settleTimeout = 20 * time.Second
 )
 
-// testCluster is a set of driver nodes wired together in one process.
 type testCluster struct {
 	t *testing.T
 
@@ -53,17 +28,11 @@ type testCluster struct {
 	dirs  map[raft.NodeID]string
 	ids   []raft.NodeID
 
-	// blocked records which ordered pairs cannot exchange messages, which is
-	// how partitions are simulated.
 	blocked map[[2]raft.NodeID]bool
 
-	// tune lets a test adjust each node's Config before it starts. It is
-	// applied last, so a test can override any default the helper sets.
 	tune func(*Config)
 }
 
-// Send implements Transport by handing messages straight to the destination
-// node, subject to whatever partition is in force.
 func (c *testCluster) Send(msgs []raft.Message) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -78,14 +47,11 @@ func (c *testCluster) Send(msgs []raft.Message) {
 	}
 }
 
-// newTestCluster starts a cluster of the given size with IDs 1..size.
 func newTestCluster(t *testing.T, size int) *testCluster {
 	t.Helper()
 	return newTunedTestCluster(t, size, nil)
 }
 
-// newTunedTestCluster starts a cluster whose nodes get their Config adjusted
-// by tune before starting.
 func newTunedTestCluster(t *testing.T, size int, tune func(*Config)) *testCluster {
 	t.Helper()
 
@@ -111,7 +77,6 @@ func newTunedTestCluster(t *testing.T, size int, tune func(*Config)) *testCluste
 	return c
 }
 
-// start brings up one node against its existing data directory.
 func (c *testCluster) start(id raft.NodeID) {
 	c.t.Helper()
 
@@ -123,9 +88,7 @@ func (c *testCluster) start(id raft.NodeID) {
 		TickInterval:  testTick,
 		ElectionTick:  10,
 		HeartbeatTick: 1,
-		// Tests do not survive power loss, and fsyncing every append makes
-		// them an order of magnitude slower for no additional coverage.
-		Sync: storage.SyncNever,
+		Sync:          storage.SyncNever,
 	}
 	if c.tune != nil {
 		c.tune(&cfg)
@@ -141,8 +104,6 @@ func (c *testCluster) start(id raft.NodeID) {
 	c.mu.Unlock()
 }
 
-// stop shuts one node down, leaving its data directory intact so it can be
-// restarted.
 func (c *testCluster) stop(id raft.NodeID) {
 	c.t.Helper()
 
@@ -172,7 +133,6 @@ func (c *testCluster) stopAll() {
 	}
 }
 
-// node returns a running node by ID.
 func (c *testCluster) node(id raft.NodeID) *Node {
 	c.t.Helper()
 	c.mu.RLock()
@@ -184,7 +144,6 @@ func (c *testCluster) node(id raft.NodeID) *Node {
 	return n
 }
 
-// running returns every node currently up.
 func (c *testCluster) running() []*Node {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -197,7 +156,6 @@ func (c *testCluster) running() []*Node {
 	return out
 }
 
-// isolate cuts a node off from every other node, in both directions.
 func (c *testCluster) isolate(id raft.NodeID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -210,15 +168,12 @@ func (c *testCluster) isolate(id raft.NodeID) {
 	}
 }
 
-// heal restores full connectivity.
 func (c *testCluster) heal() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.blocked = make(map[[2]raft.NodeID]bool)
 }
 
-// awaitLeader waits for exactly one node to consider itself leader and returns
-// it.
 func (c *testCluster) awaitLeader() *Node {
 	c.t.Helper()
 
@@ -239,7 +194,6 @@ func (c *testCluster) awaitLeader() *Node {
 	return found
 }
 
-// awaitLeaderOtherThan waits for leadership to move away from a given node.
 func (c *testCluster) awaitLeaderOtherThan(excluded raft.NodeID) *Node {
 	c.t.Helper()
 
@@ -257,9 +211,6 @@ func (c *testCluster) awaitLeaderOtherThan(excluded raft.NodeID) *Node {
 	return found
 }
 
-// eventually polls until cond holds, failing with a cluster dump if it never
-// does. Real time makes some waiting unavoidable; bounding it means a broken
-// invariant reports what was actually true rather than hanging.
 func (c *testCluster) eventually(what string, cond func() bool) {
 	c.t.Helper()
 
@@ -273,8 +224,6 @@ func (c *testCluster) eventually(what string, cond func() bool) {
 	c.t.Fatalf("timed out after %v waiting for %s\n%s", settleTimeout, what, c.dump())
 }
 
-// dump renders every running node's status, so a failure is diagnosable from
-// the test output alone.
 func (c *testCluster) dump() string {
 	out := "cluster state:\n"
 	for _, n := range c.running() {
@@ -290,13 +239,11 @@ func (c *testCluster) dump() string {
 	return out
 }
 
-// testContext returns a context bounded by the settle timeout.
 func testContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
 	return context.WithTimeout(context.Background(), settleTimeout)
 }
 
-// put writes a key through a node.
 func put(t *testing.T, n *Node, client, seq uint64, key, value string) error {
 	t.Helper()
 	ctx, cancel := testContext(t)
@@ -306,7 +253,6 @@ func put(t *testing.T, n *Node, client, seq uint64, key, value string) error {
 	})
 }
 
-// mustPut writes a key and fails the test if it does not commit.
 func mustPut(t *testing.T, n *Node, client, seq uint64, key, value string) {
 	t.Helper()
 	if err := put(t, n, client, seq, key, value); err != nil {
@@ -314,7 +260,6 @@ func mustPut(t *testing.T, n *Node, client, seq uint64, key, value string) {
 	}
 }
 
-// mustGet performs a linearizable read and fails if it errors or is absent.
 func mustGet(t *testing.T, n *Node, key string) string {
 	t.Helper()
 	ctx, cancel := testContext(t)
@@ -334,8 +279,6 @@ func TestClusterElectsALeader(t *testing.T) {
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 
-	// Every follower must converge on the same leader and term, which is what
-	// makes redirection possible.
 	c.eventually("all followers to recognize the leader", func() bool {
 		want := leader.Status()
 		for _, n := range c.running() {
@@ -358,7 +301,6 @@ func TestWriteThenLinearizableRead(t *testing.T) {
 		t.Fatalf("x = %q, want hello", got)
 	}
 
-	// A key that was never written must read as absent rather than empty.
 	ctx, cancel := testContext(t)
 	defer cancel()
 	if _, ok, err := leader.Get(ctx, "missing"); err != nil || ok {
@@ -374,10 +316,6 @@ func TestWritesReplicateToEveryNode(t *testing.T) {
 		mustPut(t, leader, 1, uint64(i+1), fmt.Sprintf("key-%d", i), fmt.Sprintf("value-%d", i))
 	}
 
-	// Every node must apply the same entries. Followers cannot be read
-	// through Get, which requires leadership, so this checks the applied
-	// index instead — the state machine is deterministic, so equal applied
-	// indexes mean equal state.
 	want := leader.Status().Applied
 	c.eventually("every node to apply the same entries", func() bool {
 		for _, n := range c.running() {
@@ -390,9 +328,6 @@ func TestWritesReplicateToEveryNode(t *testing.T) {
 }
 
 func TestFollowersRedirectRatherThanServe(t *testing.T) {
-	// The property the server layer's redirect is built on: a follower must
-	// refuse both writes and reads, and must name the leader so the client
-	// knows where to go.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -435,32 +370,20 @@ func TestFollowersRedirectRatherThanServe(t *testing.T) {
 }
 
 func TestStaleRetryIsDeduplicatedThroughTheFullStack(t *testing.T) {
-	// The same hazard the state machine tests cover, but end to end: through
-	// the driver, the log, the WAL, and back out through a linearizable read.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 
-	// A retry of a request the same client has already superseded.
 	mustPut(t, leader, 7, 1, "x", "first")
 	mustPut(t, leader, 7, 2, "x", "second")
-	mustPut(t, leader, 7, 1, "x", "first") // the delayed retry
+	mustPut(t, leader, 7, 1, "x", "first")
 
 	if got := mustGet(t, leader, "x"); got != "second" {
 		t.Fatalf("x = %q after a stale retry, want second", got)
 	}
 
-	// And a retry of the client's most recent request, which is the case a
-	// timeout actually produces: the client sends something, hears nothing,
-	// and sends the same thing again. Another client writes in between, so a
-	// duplicate is visible rather than idempotent.
-	//
-	// Checking only the superseded case above leaves this one uncovered, and
-	// the two fail differently: a dedup rule that compares sequence numbers
-	// with the wrong strictness still rejects a superseded retry and lets
-	// this one straight through.
 	mustPut(t, leader, 7, 3, "y", "mine")
 	mustPut(t, leader, 8, 1, "y", "somebody else")
-	mustPut(t, leader, 7, 3, "y", "mine") // the same request again
+	mustPut(t, leader, 7, 3, "y", "mine")
 
 	if got := mustGet(t, leader, "y"); got != "somebody else" {
 		t.Fatalf("y = %q after a client resent its latest write, want somebody else", got)
@@ -468,9 +391,6 @@ func TestStaleRetryIsDeduplicatedThroughTheFullStack(t *testing.T) {
 }
 
 func TestConcurrentWritesAllCommit(t *testing.T) {
-	// Many clients writing at once must every one of them either commit or
-	// report a reason. A proposal that is silently dropped would leave a
-	// client waiting forever.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 
@@ -501,8 +421,6 @@ func TestConcurrentWritesAllCommit(t *testing.T) {
 }
 
 func TestDataSurvivesNodeRestart(t *testing.T) {
-	// A follower is stopped and brought back against the same data directory,
-	// which is what a crash and restart looks like from the cluster's side.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -521,13 +439,10 @@ func TestDataSurvivesNodeRestart(t *testing.T) {
 
 	c.stop(victim)
 
-	// The cluster keeps working with two of three.
 	mustPut(t, leader, 1, 6, "during-outage", "written")
 
 	c.start(victim)
 
-	// The restarted node must catch up to everything, including what it
-	// missed while down.
 	c.eventually("the restarted node to catch up", func() bool {
 		want := leader.Status().Applied
 		return c.node(victim).Status().Applied == want
@@ -535,8 +450,6 @@ func TestDataSurvivesNodeRestart(t *testing.T) {
 }
 
 func TestLeaderRestartPreservesCommittedData(t *testing.T) {
-	// Losing the leader is the harder case: a new one must be elected and
-	// every committed write must still be there.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -551,7 +464,6 @@ func TestLeaderRestartPreservesCommittedData(t *testing.T) {
 			"was lost across a leader change", got)
 	}
 
-	// And the old leader rejoins without disturbing anything.
 	c.start(leaderID)
 	mustPut(t, next, 1, 2, "after", "rejoin")
 
@@ -562,9 +474,6 @@ func TestLeaderRestartPreservesCommittedData(t *testing.T) {
 }
 
 func TestIsolatedLeaderCannotCommit(t *testing.T) {
-	// A leader cut off from the majority must not be able to commit or to
-	// serve a read. It will still believe it leads for a while, which is
-	// exactly the dangerous window.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -590,8 +499,6 @@ func TestIsolatedLeaderCannotCommit(t *testing.T) {
 }
 
 func TestMajoritySideKeepsWorkingDuringPartition(t *testing.T) {
-	// The other half of the partition story: the side with a majority must
-	// elect a new leader and keep serving.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -608,8 +515,6 @@ func TestMajoritySideKeepsWorkingDuringPartition(t *testing.T) {
 }
 
 func TestPartitionedLeaderRejoinsAndCatchesUp(t *testing.T) {
-	// Once healed, the deposed leader must step down, discard anything it
-	// wrote alone, and converge on the majority's log.
 	c := newTestCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -640,7 +545,6 @@ func TestStopIsIdempotent(t *testing.T) {
 		t.Fatalf("second Stop: %v", err)
 	}
 
-	// Requests after Stop must fail rather than block forever.
 	ctx, cancel := testContext(t)
 	defer cancel()
 
@@ -659,9 +563,6 @@ func TestStopIsIdempotent(t *testing.T) {
 }
 
 func TestSingleNodeClusterServesImmediately(t *testing.T) {
-	// A one-node cluster is its own majority. This is the configuration that
-	// exposed the leader-never-commits-its-no-op bug, so it is worth
-	// exercising end to end.
 	c := newTestCluster(t, 1)
 	n := c.awaitLeader()
 
@@ -672,9 +573,6 @@ func TestSingleNodeClusterServesImmediately(t *testing.T) {
 }
 
 func TestSnapshotAndCompactionAcrossRestart(t *testing.T) {
-	// With a low threshold the node compacts repeatedly, so a restart has to
-	// rebuild from a snapshot plus the log tail rather than from the log
-	// alone.
 	root := t.TempDir()
 	dir := filepath.Join(root, "node-1")
 
@@ -725,8 +623,6 @@ func TestSnapshotAndCompactionAcrossRestart(t *testing.T) {
 		time.Sleep(testTick)
 	}
 
-	// Everything written before the restart must still be readable, which
-	// means the snapshot and the log tail were spliced together correctly.
 	for i := range writes {
 		want := fmt.Sprintf("value-%d", i)
 		if got := mustGet(t, restarted, fmt.Sprintf("key-%d", i)); got != want {
@@ -738,8 +634,6 @@ func TestSnapshotAndCompactionAcrossRestart(t *testing.T) {
 	}
 }
 
-// nopTransport discards messages, for a single-node cluster that has nobody to
-// talk to.
 type nopTransport struct{}
 
 func (nopTransport) Send([]raft.Message) {}

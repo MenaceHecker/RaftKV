@@ -14,21 +14,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/statemachine"
 )
 
-// The status code is a client-facing contract, not a label. gRPC clients act
-// on it without reading the message: Unavailable is retried, usually against
-// another address; Aborted is retried against the same one; InvalidArgument
-// and Internal are not retried at all, and a library will hand them straight
-// back to the caller as a failure.
-//
-// Getting one wrong turns a condition the cluster recovers from on its own
-// into an error the application sees. The case that prompted this: a node
-// that can no longer write now stops, and the write in its hands fails with
-// a storage error on the way. That fell through to Internal, so a client
-// gave up and reported a fault at the exact moment a new leader was about to
-// be elected and a retry would have succeeded.
-
-// stubStore is the least a KVServer needs. Only Status is ever called by the
-// code under test here, to describe a leader when redirecting.
 type stubStore struct{ status node.Status }
 
 func (s stubStore) Get(context.Context, string) ([]byte, bool, error) { return nil, false, nil }
@@ -115,17 +100,12 @@ func TestEveryFailureGetsTheCodeItsHandlingNeeds(t *testing.T) {
 }
 
 func TestNoFailureTranslatesToSuccess(t *testing.T) {
-	// A nil error must stay nil, or a successful call would be reported as a
-	// failure with an empty message.
 	if err := newStubServer(t).translate(nil); err != nil {
 		t.Errorf("translate(nil) = %v, want nil", err)
 	}
 }
 
 func TestAStorageFailureIsRetryableRatherThanAFault(t *testing.T) {
-	// Stated on its own because it is the one the durability work changed,
-	// and because Internal and Unavailable differ by whether the client ever
-	// tries again.
 	srv := newStubServer(t)
 
 	err := srv.translate(fmt.Errorf("raft: appending entries: %w: %w",

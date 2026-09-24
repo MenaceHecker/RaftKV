@@ -11,14 +11,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Tests for snapshot storage.
-//
-// A snapshot's job is to be either completely there or not there at all. Most
-// of these tests attack that: they damage files, leave partial writes behind,
-// and check that recovery either reads a whole snapshot or moves on to an
-// older one, but never hands back something half-formed.
-
-// newSnapshotter creates a Snapshotter in a temporary directory.
 func newSnapshotter(t *testing.T, dir string) *Snapshotter {
 	t.Helper()
 	s, err := NewSnapshotter(dir)
@@ -28,7 +20,6 @@ func newSnapshotter(t *testing.T, dir string) *Snapshotter {
 	return s
 }
 
-// saveSnapshot stores a snapshot, failing the test on error.
 func saveSnapshot(t *testing.T, s *Snapshotter, index raft.Index, term raft.Term, data string) Snapshot {
 	t.Helper()
 	snap := Snapshot{
@@ -41,7 +32,6 @@ func saveSnapshot(t *testing.T, s *Snapshotter, index raft.Index, term raft.Term
 	return snap
 }
 
-// snapshotFiles lists the published snapshot files in a directory.
 func snapshotFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(dir, "*"+snapshotSuffix))
@@ -78,8 +68,6 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 }
 
 func TestSaveEmptyData(t *testing.T) {
-	// A snapshot of an empty state machine is legitimate, and must not be
-	// confused with a missing or truncated one.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
@@ -103,8 +91,6 @@ func TestLoadReturnsNewest(t *testing.T) {
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
-	// Saved out of order, to be sure ordering comes from the metadata rather
-	// than from the order files happen to be listed in.
 	saveSnapshot(t, s, 20, 2, "middle")
 	saveSnapshot(t, s, 40, 4, "newest")
 	saveSnapshot(t, s, 10, 1, "oldest")
@@ -127,8 +113,6 @@ func TestSnapshotsSurviveReopen(t *testing.T) {
 	s := newSnapshotter(t, dir)
 	saveSnapshot(t, s, 100, 9, "durable state")
 
-	// A fresh Snapshotter over the same directory is what a restarted process
-	// sees.
 	reopened := newSnapshotter(t, dir)
 	got, err := reopened.Load()
 	if err != nil {
@@ -140,9 +124,6 @@ func TestSnapshotsSurviveReopen(t *testing.T) {
 }
 
 func TestCorruptNewestFallsBackToOlder(t *testing.T) {
-	// The reason more than one snapshot is kept. An older image plus the log
-	// entries after it rebuilds exactly the same state, so falling back costs
-	// replay time and nothing else — far better than refusing to start.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
@@ -169,9 +150,6 @@ func TestCorruptNewestFallsBackToOlder(t *testing.T) {
 }
 
 func TestAllSnapshotsCorruptIsAnError(t *testing.T) {
-	// Falling back is only reasonable while something readable remains.
-	// With nothing intact, the caller has to be told rather than handed an
-	// empty state machine that looks legitimate.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
@@ -195,9 +173,6 @@ func TestAllSnapshotsCorruptIsAnError(t *testing.T) {
 }
 
 func TestTruncatedSnapshotIsRejected(t *testing.T) {
-	// A snapshot cut short at any point must be rejected, never partially
-	// decoded. Handing back a truncated state machine image would silently
-	// lose committed data.
 	full := func() []byte {
 		dir := t.TempDir()
 		s := newSnapshotter(t, dir)
@@ -225,9 +200,6 @@ func TestTruncatedSnapshotIsRejected(t *testing.T) {
 }
 
 func TestPartialWriteIsSweptOnStartup(t *testing.T) {
-	// A crash during Save leaves a file under the temporary name, never under
-	// the real one. Startup must remove it: a partial snapshot is worth
-	// nothing, and leaving it risks a later save colliding with it.
 	dir := t.TempDir()
 	newSnapshotter(t, dir)
 
@@ -244,9 +216,6 @@ func TestPartialWriteIsSweptOnStartup(t *testing.T) {
 }
 
 func TestPartialWriteIsNeverLoaded(t *testing.T) {
-	// The atomicity guarantee stated directly: a file still under the
-	// temporary name is invisible to Load, so an interrupted save can never
-	// be mistaken for a finished one.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
@@ -268,8 +237,6 @@ func TestPartialWriteIsNeverLoaded(t *testing.T) {
 }
 
 func TestSaveAfterInterruptedSaveSucceeds(t *testing.T) {
-	// The sweep has to leave the directory usable, not merely tidy: a retry
-	// of the same snapshot must not collide with the leftover temporary file.
 	dir := t.TempDir()
 	newSnapshotter(t, dir)
 
@@ -294,8 +261,6 @@ func TestSaveAfterInterruptedSaveSucceeds(t *testing.T) {
 }
 
 func TestMetadataMismatchIsRejected(t *testing.T) {
-	// If the filename and the contents disagree, a file was renamed by hand
-	// or tampered with. Guessing which one to believe is worse than refusing.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
@@ -358,7 +323,6 @@ func TestPurgeKeepsNewest(t *testing.T) {
 		t.Fatalf("kept indexes %d and %d, want 50 and 40", metas[0].Index, metas[1].Index)
 	}
 
-	// The surviving snapshots must still be readable, not merely present.
 	got, err := s.Load()
 	if err != nil {
 		t.Fatalf("Load after purge: %v", err)
@@ -383,8 +347,6 @@ func TestPurgeWithFewerThanKeepIsANoOp(t *testing.T) {
 }
 
 func TestPurgeRefusesToKeepNothing(t *testing.T) {
-	// Keeping at least one is what makes fallback possible, so a request for
-	// zero is a mistake rather than an instruction.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 	saveSnapshot(t, s, 10, 1, "state")
@@ -398,9 +360,6 @@ func TestPurgeRefusesToKeepNothing(t *testing.T) {
 }
 
 func TestOversizedSnapshotIsRejected(t *testing.T) {
-	// The in-memory encoding bounds a snapshot at one record. Enforcing that
-	// on write turns a future unreadable file into an immediate, explicit
-	// error.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
@@ -418,9 +377,6 @@ func TestOversizedSnapshotIsRejected(t *testing.T) {
 }
 
 func TestUnrecognizedFilesAreIgnored(t *testing.T) {
-	// Unlike the WAL directory, a stray file here is skipped rather than
-	// fatal: snapshots are redundant with the log, so an unknown file is no
-	// reason to refuse to start.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 
@@ -461,8 +417,6 @@ func TestLoadAtSelectsASpecificSnapshot(t *testing.T) {
 }
 
 func TestLargeSnapshotRoundTrips(t *testing.T) {
-	// Well under the limit, but large enough to cross buffer boundaries and
-	// catch an encoding that only works for short payloads.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 

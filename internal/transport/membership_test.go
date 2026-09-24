@@ -17,21 +17,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/storage"
 )
 
-// Membership over the real transport.
-//
-// The deterministic tests in internal/raft prove that joint consensus reaches
-// the right configuration, and the chaos suite drives membership changes hard.
-// Neither one exercises this layer: the chaos network routes by node ID and
-// every node it was built with is reachable forever, so a member added at
-// runtime is reachable there by construction. Over gRPC it is not. Nothing
-// reaches a node whose address the sender never learned, and the address
-// arrives in the configuration change rather than in the static peer list.
-
-// joinNode starts a node that is not yet a member and returns it.
-//
-// The listener is bound before the caller proposes the change, because a
-// member that cannot answer counts toward every majority while contributing
-// nothing.
 func (c *grpcCluster) joinNode(id raft.NodeID) *node.Node {
 	c.t.Helper()
 
@@ -41,9 +26,6 @@ func (c *grpcCluster) joinNode(id raft.NodeID) *node.Node {
 	}
 	c.addrs[id] = l.Addr().String()
 
-	// The joining node is told the membership it is joining. Its own
-	// transport therefore knows where everyone is; the question this test
-	// asks is whether the nodes already running learn where it is.
 	members := append(append([]raft.NodeID{}, c.ids...), id)
 
 	tr, err := NewPeerTransport(PeerConfig{Self: id, Addresses: c.addrs})
@@ -92,8 +74,6 @@ func TestANodeAddedAtRuntimeReceivesTheLog(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), grpcSettleTimeout)
 	defer cancel()
 
-	// Something written before the change, so catching up requires the new
-	// member to receive history rather than just the entries that follow.
 	if err := leader.Propose(ctx, statemachine.Command{
 		ClientID: 1, Seq: 1, Op: statemachine.OpPut, Key: "before", Value: []byte("joined"),
 	}); err != nil {
@@ -109,20 +89,10 @@ func TestANodeAddedAtRuntimeReceivesTheLog(t *testing.T) {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})
 
-	// Applied parity is the check available from here: a follower cannot
-	// serve a read, and the node exposes no local one. It is still a real
-	// check, because the joiner starts at zero and the only way its applied
-	// index reaches the leader's is by receiving the log, "before" included.
-
-	// It must also have learned the configuration it joined, not just the
-	// entries. A node that replicates the log but believes in the old
-	// membership would vote on the wrong quorum.
 	c.eventually("the added node to agree about the membership", func() bool {
 		return joiner.Status().Members.String() == leader.Status().Members.String()
 	})
 
-	// And the log must have got there over the network rather than by some
-	// route. Without a link the leader is not replicating to it at all.
 	var toJoiner uint64
 	for _, st := range c.transports[leader.Status().ID].Stats() {
 		if st.ID == 4 {
@@ -135,12 +105,6 @@ func TestANodeAddedAtRuntimeReceivesTheLog(t *testing.T) {
 }
 
 func TestASingleNodeClusterCanGrow(t *testing.T) {
-	// The case that decides when the transport has to be reconfigured. Going
-	// from one node to two produces a joint configuration needing a majority
-	// of {1} and a majority of {1,2}, so the entry admitting node 2 cannot
-	// commit until node 2 replies. A transport that only learned about new
-	// members once their entry committed would wait forever for a reply from
-	// a node it had no way to contact.
 	c := newGRPCCluster(t, 1)
 	leader := c.awaitLeader()
 
@@ -156,7 +120,6 @@ func TestASingleNodeClusterCanGrow(t *testing.T) {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})
 
-	// The cluster must still be able to commit, now needing both nodes.
 	if err := leader.Propose(ctx, statemachine.Command{
 		ClientID: 1, Seq: 1, Op: statemachine.OpPut, Key: "grown", Value: []byte("two"),
 	}); err != nil {
@@ -165,8 +128,6 @@ func TestASingleNodeClusterCanGrow(t *testing.T) {
 }
 
 func TestARemovedNodeLosesItsLink(t *testing.T) {
-	// A member admitted at runtime and then removed should not leave the
-	// leader holding a connection to it.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 
@@ -203,15 +164,6 @@ func TestARemovedNodeLosesItsLink(t *testing.T) {
 }
 
 func TestAMemberAddedAfterCompactionCatchesUpBySnapshot(t *testing.T) {
-	// The operator flow the deployment guide describes: compact before
-	// admitting a member, so it does not have to replay everything ever
-	// written. That makes the log useless for catching it up. A node joining
-	// a cluster starts at index zero, which is below any compaction point, so
-	// the only thing that can bring it up to date is an image over gRPC.
-	//
-	// Snapshot transfer is already covered for a member that restarts. This
-	// is the other shape: a member that has never held anything at all, and
-	// whose address the leader only learns from the change that admits it.
 	const (
 		writes    = 32
 		valueSize = 4 << 10
@@ -234,9 +186,6 @@ func TestAMemberAddedAfterCompactionCatchesUpBySnapshot(t *testing.T) {
 		}
 	}
 
-	// Every node compacts, not just the one leading now. Leadership can move,
-	// and a leader that still holds the entries would catch the new member up
-	// from the log, which is the path this test exists to avoid.
 	for _, id := range c.ids {
 		if err := c.nodes[id].Compact(ctx); err != nil {
 			t.Fatalf("compacting node %d: %v", id, err)
@@ -252,16 +201,11 @@ func TestAMemberAddedAfterCompactionCatchesUpBySnapshot(t *testing.T) {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})
 
-	// Without this the test would pass on ordinary replication and say
-	// nothing about the path it is named for.
 	if got := joiner.Status().SnapshotsReceived; got == 0 {
 		t.Fatalf("the added node caught up without receiving a snapshot\n%s", c.dump())
 	}
 }
 
-// restartStale stops a node and brings it back knowing only the membership it
-// was originally configured with, which is what its command line still says
-// after somebody added a member at runtime.
 func (c *grpcCluster) restartStale(id raft.NodeID, staticPeers []raft.NodeID) *node.Node {
 	c.t.Helper()
 
@@ -317,7 +261,6 @@ func (c *grpcCluster) restartStale(id raft.NodeID, staticPeers []raft.NodeID) *n
 	return n
 }
 
-// linked reports whether a transport holds a connection to a node.
 func linked(tr *PeerTransport, id raft.NodeID) bool {
 	for _, st := range tr.Stats() {
 		if st.ID == id {
@@ -328,16 +271,6 @@ func linked(tr *PeerTransport, id raft.NodeID) bool {
 }
 
 func TestARestartedNodeRediscoversARuntimeMember(t *testing.T) {
-	// After a member is added at runtime, every other node's configured peer
-	// list is out of date. Restarting one is the ordinary case, not an edge:
-	// a rolling restart, a crash, a pod rescheduled. The node comes back with
-	// the flags it always had, so the only record that the fourth member
-	// exists, and of where it is, is the one in its own log.
-	//
-	// Each layer's half of this is covered by a unit test: the core carries
-	// addresses through a configuration change, the storage layer writes them
-	// into a snapshot, the codec puts them on the wire. What none of them
-	// asks is whether a real node uses any of it to reach anybody.
 	original := []raft.NodeID{1, 2, 3}
 
 	c := newGRPCCluster(t, 3)
@@ -365,7 +298,6 @@ func TestARestartedNodeRediscoversARuntimeMember(t *testing.T) {
 
 	restarted := c.restartStale(victim, original)
 
-	// It was told about three nodes and has to come back believing in four.
 	c.eventually("the restarted node to recover the membership", func() bool {
 		for _, id := range restarted.Status().Members.Members() {
 			if id == 4 {
@@ -375,14 +307,10 @@ func TestARestartedNodeRediscoversARuntimeMember(t *testing.T) {
 		return false
 	})
 
-	// Believing in the member is not the same as being able to reach it. The
-	// address came out of the log, and this is the assertion that says so:
-	// nothing in this node's configuration mentions node 4.
 	c.eventually("the restarted node to link to the runtime member", func() bool {
 		return linked(c.transports[victim], 4)
 	})
 
-	// And the cluster still works, now needing three of four to agree.
 	if err := leader.Propose(ctx, statemachine.Command{
 		ClientID: 2, Seq: 1, Op: statemachine.OpPut, Key: "after", Value: []byte("restart"),
 	}); err != nil {
@@ -391,12 +319,6 @@ func TestARestartedNodeRediscoversARuntimeMember(t *testing.T) {
 }
 
 func TestARestartedNodeRediscoversARuntimeMemberFromItsSnapshot(t *testing.T) {
-	// The same recovery once the log can no longer help. A cluster that has
-	// been up long enough compacts away the entry that admitted a member, so
-	// the only surviving record of where that member lives is the
-	// configuration stored alongside the snapshot. This is the case a
-	// long-running cluster is always in, and the previous test is the case it
-	// is in for the first few minutes.
 	original := []raft.NodeID{1, 2, 3}
 
 	c := newGRPCCluster(t, 3)
@@ -414,8 +336,6 @@ func TestARestartedNodeRediscoversARuntimeMemberFromItsSnapshot(t *testing.T) {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})
 
-	// Write past the change and compact, so the entry that carried node 4's
-	// address is no longer in anybody's log.
 	for i := range 8 {
 		err := leader.Propose(ctx, statemachine.Command{
 			ClientID: 3, Seq: uint64(i + 1), Op: statemachine.OpPut,

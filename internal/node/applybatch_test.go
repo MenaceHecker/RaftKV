@@ -7,16 +7,6 @@ import (
 	"time"
 )
 
-// Tests for bounding how much is applied in one pass of the loop.
-//
-// The driver's loop is the node's only goroutine: it ticks the clock, reads
-// messages, and applies entries. Applying a large backlog in one go therefore
-// stops the node doing anything else for the duration. Measured before this
-// was capped, a 20,000 entry replay applied in a single batch and blocked the
-// loop for 478ms, which is half a default election timeout spent unable to
-// send a heartbeat, answer one, or notice its own timer.
-
-// applyRecorder tracks the largest batch and the longest single apply.
 type applyRecorder struct {
 	mu       sync.Mutex
 	maxCount int
@@ -49,8 +39,6 @@ func (r *applyRecorder) read() (maxCount int, maxDur time.Duration, batches int)
 	return r.maxCount, r.maxDur, r.batches
 }
 
-// fillLog writes n entries through the leader, concurrently so the writes are
-// not serialized by one round trip each.
 func fillLog(t *testing.T, leader *Node, n int) {
 	t.Helper()
 
@@ -75,7 +63,6 @@ func TestReplayIsAppliedInBoundedBatches(t *testing.T) {
 	c := newTunedTestCluster(t, 3, func(cfg *Config) {
 		cfg.Metrics = rec
 		cfg.MaxCommittedEntries = cap
-		// Never snapshot, so a restart has the whole log to replay.
 		cfg.SnapshotThreshold = 1 << 40
 	})
 	leader := c.awaitLeader()
@@ -113,20 +100,6 @@ func TestReplayIsAppliedInBoundedBatches(t *testing.T) {
 }
 
 func TestReplayContinuesWithoutWaitingForAnEvent(t *testing.T) {
-	// Capping the batch is only half of it. The remainder has to be picked up
-	// without waiting for something else to happen, or capping turns a short
-	// stall into a long crawl of one batch per tick.
-	//
-	// Two things make this measurable. A single node has no peers, so no
-	// heartbeats or appends arrive to wake the loop incidentally, leaving the
-	// ticker as the only other thing that would. And the clock is slowed
-	// right down, so "one batch per tick" is unmistakable.
-	//
-	// The applied index is read exactly once, at the end. Polling it would
-	// send on the status channel and wake the loop each time, which is itself
-	// the event this test is checking the loop does not need. An earlier
-	// version of this test polled every two milliseconds and therefore passed
-	// whether or not the mechanism existed.
 	const (
 		entries  = 2000
 		cap      = 40
@@ -157,8 +130,6 @@ func TestReplayContinuesWithoutWaitingForAnEvent(t *testing.T) {
 
 	got := c.node(only).Status().Applied
 	if got < want {
-		// One batch per tick would manage roughly this much in the time
-		// allowed, which is the failure this is distinguishing.
 		paced := int(settling/tick) * cap
 		t.Errorf("applied %d of %d entries in %v; about %d is what one batch per tick "+
 			"would reach, so the loop is waiting for an event between batches",

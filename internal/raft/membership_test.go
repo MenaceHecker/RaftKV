@@ -7,19 +7,6 @@ import (
 	"testing"
 )
 
-// Tests for cluster membership and joint consensus (§6).
-//
-// The rule joint consensus exists to preserve is quorum intersection: any two
-// decisions the cluster makes must have been agreed by overlapping sets of
-// nodes. Moving straight from one configuration to another breaks that, because
-// for a moment two disjoint majorities can exist — one in the old set, one in
-// the new — and each could elect its own leader without either noticing.
-//
-// So the tests here are less about add and remove working, and more about the
-// transition never leaving a window where a single majority can decide
-// anything on its own.
-
-// voterSet builds a set from IDs, for concise expectations.
 func voterSet(ids ...NodeID) map[NodeID]struct{} {
 	out := make(map[NodeID]struct{}, len(ids))
 	for _, id := range ids {
@@ -28,7 +15,6 @@ func voterSet(ids ...NodeID) map[NodeID]struct{} {
 	return out
 }
 
-// sortedIDs renders a set for failure messages.
 func sortedIDs(s map[NodeID]struct{}) []NodeID {
 	out := make([]NodeID, 0, len(s))
 	for id := range s {
@@ -38,7 +24,6 @@ func sortedIDs(s map[NodeID]struct{}) []NodeID {
 	return out
 }
 
-// assertVoters checks a voter set matches exactly.
 func assertVoters(t *testing.T, got map[NodeID]struct{}, want ...NodeID) {
 	t.Helper()
 	expected := voterSet(want...)
@@ -52,13 +37,10 @@ func assertVoters(t *testing.T, got map[NodeID]struct{}, want ...NodeID) {
 	}
 }
 
-// matchAll returns a match function reporting the same index for every node.
 func matchAll(idx Index) func(NodeID) Index {
 	return func(NodeID) Index { return idx }
 }
 
-// matchOnly returns a match function where only the listed nodes have reached
-// idx and everyone else is at zero.
 func matchOnly(idx Index, ids ...NodeID) func(NodeID) Index {
 	have := voterSet(ids...)
 	return func(id NodeID) Index {
@@ -69,7 +51,6 @@ func matchOnly(idx Index, ids ...NodeID) func(NodeID) Index {
 	}
 }
 
-// grants builds a vote tally where the listed nodes voted yes.
 func grants(ids ...NodeID) map[NodeID]bool {
 	out := make(map[NodeID]bool, len(ids))
 	for _, id := range ids {
@@ -112,8 +93,6 @@ func TestAddNodeEntersJoint(t *testing.T) {
 		t.Fatalf("address for node 4 = %q, want host:4", got)
 	}
 
-	// The original must be untouched; the core computes the next config
-	// speculatively and only adopts it when the entry commits.
 	if base.inJoint() {
 		t.Fatal("enterJoint mutated the configuration it was called on")
 	}
@@ -158,13 +137,6 @@ func TestLeaveJointAdoptsTheNewConfiguration(t *testing.T) {
 }
 
 func TestSecondChangeWhileOneIsInFlightIsRejected(t *testing.T) {
-	// Raft permits one transition at a time. Two overlapping changes could
-	// produce configurations neither of which contains the other, and the
-	// quorum-intersection argument would no longer hold.
-	//
-	// Before this was enforced, the second change silently discarded the
-	// first: the node being added by the in-flight change simply vanished
-	// from the resulting configuration.
 	base := newConfig([]NodeID{1, 2, 3})
 
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4})
@@ -177,7 +149,6 @@ func TestSecondChangeWhileOneIsInFlightIsRejected(t *testing.T) {
 		t.Fatalf("a second change during a transition gave %v, want ErrConfChangeInFlight", err)
 	}
 
-	// And the in-flight change is still intact.
 	assertVoters(t, joint.incoming, 1, 2, 3, 4)
 }
 
@@ -190,8 +161,6 @@ func TestLeaveJointRequiresAnOpenTransition(t *testing.T) {
 }
 
 func TestLeaveJointIsNotAMembershipChange(t *testing.T) {
-	// Finalising is what ends a transition, not something to start one for.
-	// Accepting it produced a joint config whose two sets were identical.
 	base := newConfig([]NodeID{1, 2, 3})
 
 	if _, err := base.enterJoint(ConfChange{Type: ConfChangeLeaveJoint}); err == nil {
@@ -200,8 +169,6 @@ func TestLeaveJointIsNotAMembershipChange(t *testing.T) {
 }
 
 func TestChangesWithNoEffectAreRejected(t *testing.T) {
-	// A no-op change would still cost a full two-phase transition, during
-	// which no other change can start.
 	base := newConfig([]NodeID{1, 2, 3})
 
 	if _, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 2}); !errors.Is(err, ErrNoChange) {
@@ -213,10 +180,6 @@ func TestChangesWithNoEffectAreRejected(t *testing.T) {
 }
 
 func TestRemovingTheLastVoterIsRejected(t *testing.T) {
-	// A cluster with no voters can never reach a majority again, so it could
-	// not even configure its way back out. Before this was checked, the
-	// resulting configuration also reported itself as not in a transition,
-	// because the phase was inferred from the size of the incoming set.
 	solo := newConfig([]NodeID{1})
 
 	if _, err := solo.enterJoint(ConfChange{Type: ConfChangeRemoveNode, NodeID: 1}); !errors.Is(err, ErrEmptyConfiguration) {
@@ -241,9 +204,6 @@ func TestUnknownChangeTypeIsRejected(t *testing.T) {
 }
 
 func TestMembersCoversBothConfigurations(t *testing.T) {
-	// During a transition the leader must replicate to every node in either
-	// set. A node present only in C_new still has to receive entries, or it
-	// could never catch up enough to satisfy the new majority.
 	base := newConfig([]NodeID{1, 2, 3})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4})
 	if err != nil {
@@ -274,23 +234,16 @@ func TestCommitOutsideJointNeedsOneMajority(t *testing.T) {
 }
 
 func TestCommitDuringJointNeedsBothMajorities(t *testing.T) {
-	// The heart of joint consensus. A majority of only one configuration must
-	// not be enough, because the other configuration's majority could
-	// simultaneously agree something different.
 	base := newConfig([]NodeID{1, 2, 3})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "a"})
 	if err != nil {
 		t.Fatalf("enterJoint: %v", err)
 	}
-	// C_old = {1,2,3}, C_new = {1,2,3,4}
 
-	// {2,3} is a majority of C_old (2 of 3) but only 2 of 4 in C_new, which is
-	// not a majority there.
 	if joint.commitReady(5, matchOnly(5, 2, 3)) {
 		t.Fatal("committed on a majority of the old configuration alone; the new " +
 			"configuration's majority could have agreed something else")
 	}
-	// Three of four is a majority of C_new and of C_old.
 	if !joint.commitReady(5, matchOnly(5, 1, 2, 3)) {
 		t.Fatal("a majority of both configurations failed to commit")
 	}
@@ -300,25 +253,18 @@ func TestCommitDuringJointNeedsBothMajorities(t *testing.T) {
 }
 
 func TestCommitDuringShrinkNeedsBothMajorities(t *testing.T) {
-	// The mirror case: removing a node makes C_new smaller, so a majority of
-	// C_new is easier to reach than one of C_old. Neither alone may decide.
 	base := newConfig([]NodeID{1, 2, 3, 4, 5})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeRemoveNode, NodeID: 5})
 	if err != nil {
 		t.Fatalf("enterJoint: %v", err)
 	}
-	// C_old = {1..5}, C_new = {1,2,3,4}
 
-	// {1,2} is a majority of neither.
 	if joint.commitReady(7, matchOnly(7, 1, 2)) {
 		t.Fatal("two of five committed")
 	}
-	// {1,2,3} is a majority of C_new (3 of 4) but only 3 of 5 in C_old, which
-	// is a majority there too, so this should commit.
 	if !joint.commitReady(7, matchOnly(7, 1, 2, 3)) {
 		t.Fatal("a majority of both configurations failed to commit")
 	}
-	// {4,5} plus nobody else: 2 of 5 and 1 of 4, a majority of neither.
 	if joint.commitReady(7, matchOnly(7, 4, 5)) {
 		t.Fatal("a minority of both configurations committed")
 	}
@@ -336,9 +282,6 @@ func TestVoteOutsideJointNeedsOneMajority(t *testing.T) {
 }
 
 func TestVoteDuringJointNeedsBothMajorities(t *testing.T) {
-	// Election Safety across a transition. If a candidate could win on one
-	// configuration's majority alone, the other configuration could elect a
-	// different leader in the same term.
 	base := newConfig([]NodeID{1, 2, 3})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4})
 	if err != nil {
@@ -354,33 +297,24 @@ func TestVoteDuringJointNeedsBothMajorities(t *testing.T) {
 }
 
 func TestVoteIsLostWhenEitherMajorityBecomesUnreachable(t *testing.T) {
-	// The asymmetry that makes this correct: winning requires both majorities,
-	// so losing only requires one of them to become unreachable. Waiting for
-	// both to fail would keep a doomed candidate campaigning.
 	base := newConfig([]NodeID{1, 2, 3})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4})
 	if err != nil {
 		t.Fatalf("enterJoint: %v", err)
 	}
 
-	// Two refusals from C_old ({1,2,3}) leave only one possible yes, so a
-	// majority there is unreachable even though C_new could still deliver one.
 	refused := map[NodeID]bool{2: false, 3: false}
 	if !joint.voteLost(refused) {
 		t.Fatal("an election with an unreachable majority in one configuration " +
 			"was not reported as lost")
 	}
 
-	// A single refusal leaves both majorities reachable.
 	if joint.voteLost(map[NodeID]bool{2: false}) {
 		t.Fatal("an election was abandoned while both majorities were still reachable")
 	}
 }
 
 func TestNoQuorumIsReachableInAnEmptyConfiguration(t *testing.T) {
-	// Defence in depth. enterJoint refuses to produce one, but if a config
-	// with no voters ever arose it must fail closed rather than treating
-	// zero agreements as a majority.
 	empty := config{voters: map[NodeID]struct{}{}}
 
 	if empty.commitReady(1, matchAll(100)) {
@@ -392,13 +326,6 @@ func TestNoQuorumIsReachableInAnEmptyConfiguration(t *testing.T) {
 }
 
 func TestTransitionSequenceKeepsQuorumsIntersecting(t *testing.T) {
-	// The property the whole mechanism exists for, checked directly: at every
-	// step of a transition, any set that could commit under one active
-	// configuration must overlap any set that could commit under the other.
-	//
-	// Growing a 3-node cluster to 5 is the case where a direct switch would be
-	// unsafe: {1,2} is a majority of the old and {3,4,5} of the new, and they
-	// are disjoint.
 	base := newConfig([]NodeID{1, 2, 3})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4})
 	if err != nil {
@@ -413,21 +340,16 @@ func TestTransitionSequenceKeepsQuorumsIntersecting(t *testing.T) {
 		t.Fatalf("second enterJoint: %v", err)
 	}
 
-	// During the second transition: C_old = {1,2,3,4}, C_new = {1,2,3,4,5}.
-	// The disjoint pair that would be dangerous under a direct switch.
 	oldMajority := []NodeID{1, 2, 3}
 	newMajority := []NodeID{3, 4, 5}
 
 	if !joint3.commitReady(9, matchOnly(9, oldMajority...)) {
-		// {1,2,3} is 3 of 4 in C_old and 3 of 5 in C_new, a majority of both.
 		t.Fatalf("a majority of both configurations could not commit")
 	}
 	if joint3.commitReady(9, matchOnly(9, 4, 5)) {
 		t.Fatal("a set that is a majority of neither configuration committed")
 	}
 
-	// The point: no set can satisfy the joint rule without touching both, so
-	// two committing sets always share a node.
 	if !overlaps(oldMajority, newMajority) {
 		t.Fatal("test premise is wrong: the two sets should overlap at node 3")
 	}
@@ -463,8 +385,6 @@ func TestConfChangeRoundTrip(t *testing.T) {
 }
 
 func TestTruncatedConfChangeIsRejected(t *testing.T) {
-	// A conf change is applied from a log entry, so a damaged payload must be
-	// refused rather than decoded into a change to some other node.
 	full := ConfChange{Type: ConfChangeAddNode, NodeID: 7, Addr: "host:1234"}.Encode()
 
 	for cut := range len(full) {
@@ -475,10 +395,8 @@ func TestTruncatedConfChangeIsRejected(t *testing.T) {
 }
 
 func TestConfChangeWithOversizedAddrLengthIsRejected(t *testing.T) {
-	// The length prefix is read before anything can prove it is genuine.
 	cc := ConfChange{Type: ConfChangeAddNode, NodeID: 1, Addr: "x"}
 	b := cc.Encode()
-	// Claim a much longer address than is actually present.
 	b[9], b[10], b[11], b[12] = 0xff, 0xff, 0xff, 0xff
 
 	if _, err := DecodeConfChange(b); err == nil {
@@ -487,9 +405,6 @@ func TestConfChangeWithOversizedAddrLengthIsRejected(t *testing.T) {
 }
 
 func TestAddressesSurviveTransitions(t *testing.T) {
-	// The transport needs a new peer's address to reach it, and that address
-	// arrives with the change. It must still be there once the transition
-	// completes, or the cluster would agree on a member it cannot contact.
 	base := newConfig([]NodeID{1, 2, 3})
 
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "host:4"})
@@ -507,9 +422,6 @@ func TestAddressesSurviveTransitions(t *testing.T) {
 }
 
 func TestConfigCopiesAreIndependent(t *testing.T) {
-	// The core computes a prospective configuration before the entry that
-	// carries it has committed. If that shared backing state with the live
-	// one, an uncommitted change would take effect immediately.
 	base := newConfig([]NodeID{1, 2, 3})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "host:4"})
 	if err != nil {
@@ -537,9 +449,6 @@ func TestConfigCopiesAreIndependent(t *testing.T) {
 }
 
 func TestJointPhaseIsExplicitNotInferred(t *testing.T) {
-	// A transition must report itself as joint regardless of the sizes of the
-	// two sets. Inferring it from len(incoming) meant a shrinking change could
-	// look finished and fall back to a single majority.
 	base := newConfig([]NodeID{1, 2, 3, 4, 5})
 	joint, err := base.enterJoint(ConfChange{Type: ConfChangeRemoveNode, NodeID: 5})
 	if err != nil {
@@ -564,8 +473,6 @@ func TestJointPhaseIsExplicitNotInferred(t *testing.T) {
 }
 
 func TestSequentialChangesGrowAndShrinkACluster(t *testing.T) {
-	// A realistic sequence: grow from three to five, then remove the original
-	// leader's peer, one complete transition at a time.
 	c := newConfig([]NodeID{1, 2, 3})
 
 	apply := func(cc ConfChange) {
@@ -591,7 +498,6 @@ func TestSequentialChangesGrowAndShrinkACluster(t *testing.T) {
 	apply(ConfChange{Type: ConfChangeRemoveNode, NodeID: 2})
 	assertVoters(t, c.voters, 1, 3, 4, 5)
 
-	// Three of the four remaining nodes is still a majority.
 	if !c.commitReady(1, matchOnly(1, 1, 3, 4)) {
 		t.Fatal("three of four could not commit after the transitions")
 	}
@@ -604,25 +510,9 @@ func TestSequentialChangesGrowAndShrinkACluster(t *testing.T) {
 	}
 }
 
-// --- Tests that the configuration is actually consulted by the core ---
-//
-// Everything above tests the config type on its own. These drive a real node
-// and check that its commit and election paths ask the configuration rather
-// than counting peers. That distinction is the whole point of the wiring: a
-// correct config type that nothing consults would leave the cluster deciding
-// on a single majority during a transition.
-
-// enterJointOn puts a node into a joint configuration for testing, adding the
-// listed nodes and giving each a progress entry.
-//
-// It reaches past the log to set the configuration directly. Membership
-// changes will travel through the log once conf-change entries are applied on
-// commit; until then this is how the joint state is reached.
 func enterJointOn(t *testing.T, n *Node, add ...NodeID) {
 	t.Helper()
 
-	// Complete a transition for every addition but the last, so those nodes
-	// end up as ordinary voters.
 	c := n.conf
 	for _, id := range add[:len(add)-1] {
 		joint, err := c.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: id})
@@ -634,7 +524,6 @@ func enterJointOn(t *testing.T, n *Node, add ...NodeID) {
 		}
 	}
 
-	// Leave the last one open, so the node is mid-transition.
 	last := add[len(add)-1]
 	joint, err := c.enterJoint(ConfChange{Type: ConfChangeAddNode, NodeID: last})
 	if err != nil {
@@ -650,10 +539,6 @@ func enterJointOn(t *testing.T, n *Node, add ...NodeID) {
 }
 
 func TestLeaderCommitsByConfigurationNotPeerCount(t *testing.T) {
-	// The wiring test. A leader in a joint configuration must require a
-	// majority of both voter sets before advancing its commit index. If it
-	// still counted peers, a majority of the combined set would be enough and
-	// the two configurations could commit different entries.
 	c := newCluster(t, 3, clusterOpts{seed: 700})
 	n := c.node(1)
 
@@ -665,7 +550,6 @@ func TestLeaderCommitsByConfigurationNotPeerCount(t *testing.T) {
 		t.Fatalf("node 1 is %s, want Leader", n.State())
 	}
 
-	// C_old = {1,2,3,4}, C_new = {1,2,3,4,5}.
 	enterJointOn(t, n, 4, 5)
 	if !n.InJointConfiguration() {
 		t.Fatal("the node is not in a joint configuration")
@@ -677,7 +561,6 @@ func TestLeaderCommitsByConfigurationNotPeerCount(t *testing.T) {
 	idx := n.log.lastIndex()
 	before := n.CommitIndex()
 
-	// Two nodes is a majority of neither set.
 	n.progress[1].match = idx
 	n.progress[2].match = idx
 	if n.maybeCommit() {
@@ -685,7 +568,6 @@ func TestLeaderCommitsByConfigurationNotPeerCount(t *testing.T) {
 			before, n.CommitIndex())
 	}
 
-	// Three is a majority of both (3 of 4, and 3 of 5).
 	n.progress[3].match = idx
 	if !n.maybeCommit() {
 		t.Fatalf("a majority of both configurations failed to commit; commit is still %d, entry is at %d",
@@ -697,26 +579,20 @@ func TestLeaderCommitsByConfigurationNotPeerCount(t *testing.T) {
 }
 
 func TestCandidateWinsByConfigurationNotVoteCount(t *testing.T) {
-	// The same wiring on the election path. During a transition a candidate
-	// must carry both voter sets; a raw count of granted votes would let it
-	// win on one alone.
 	c := newCluster(t, 3, clusterOpts{seed: 701})
 	n := c.node(1)
 
 	enterJointOn(t, n, 4, 5)
-	// C_old = {1,2,3,4}, C_new = {1,2,3,4,5}.
 
 	if err := n.becomeCandidate(); err != nil {
 		t.Fatalf("becomeCandidate: %v", err)
 	}
 
-	// Two votes: a majority of neither set, so no win.
 	n.votes = grants(1, 2)
 	if n.conf.voteGranted(n.votes) {
 		t.Fatal("two votes carried a four- and five-node joint configuration")
 	}
 
-	// Three votes: a majority of both.
 	n.votes = grants(1, 2, 3)
 	if !n.conf.voteGranted(n.votes) {
 		t.Fatal("three votes did not carry a majority of both configurations")
@@ -724,9 +600,6 @@ func TestCandidateWinsByConfigurationNotVoteCount(t *testing.T) {
 }
 
 func TestBroadcastReachesNodesOnlyInTheIncomingConfiguration(t *testing.T) {
-	// A node that belongs only to C_new still needs entries. Until its log
-	// catches up it cannot contribute to the new majority, so a leader that
-	// skipped it could never complete the transition.
 	c := newCluster(t, 3, clusterOpts{seed: 702})
 	n := c.node(1)
 
@@ -734,10 +607,9 @@ func TestBroadcastReachesNodesOnlyInTheIncomingConfiguration(t *testing.T) {
 		t.Fatalf("campaign: %v", err)
 	}
 	c.deliverAll()
-	n.Ready() // discard election traffic
+	n.Ready()
 
 	enterJointOn(t, n, 4)
-	// C_old = {1,2,3}, C_new = {1,2,3,4}: node 4 exists only in C_new.
 
 	n.broadcastAppend()
 
@@ -755,9 +627,6 @@ func TestBroadcastReachesNodesOnlyInTheIncomingConfiguration(t *testing.T) {
 }
 
 func TestSoleVoterCommitsWithoutAcknowledgement(t *testing.T) {
-	// The single-node case now asks the configuration rather than comparing a
-	// peer count to one. It must still settle immediately, since no
-	// acknowledgement will ever arrive.
 	c := newCluster(t, 1, clusterOpts{seed: 703})
 	n := c.node(1)
 
@@ -778,9 +647,6 @@ func TestSoleVoterCommitsWithoutAcknowledgement(t *testing.T) {
 }
 
 func TestSoleVoterIsNotJustAOneElementPeerList(t *testing.T) {
-	// A node can be the only member of one voter set while a transition is
-	// bringing in others. It is not the sole voter then, and treating it as
-	// one would let it decide alone.
 	c := newCluster(t, 1, clusterOpts{seed: 704})
 	n := c.node(1)
 

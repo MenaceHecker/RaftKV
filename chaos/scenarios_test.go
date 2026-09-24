@@ -11,22 +11,8 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// The adversarial scenarios.
-//
-// Each one describes a specific way the cluster could go wrong, drives it into
-// that situation, and hands the resulting history to the linearizability
-// checker. The scenario itself asserts nothing about correctness: it only
-// creates the conditions. What has to hold afterwards is the same for all of
-// them, and is checked by the runner.
-//
-// Every scenario runs across several seeds, because one seed is one
-// interleaving. That is not a proof — no amount of testing is — but it is the
-// difference between testing a behaviour and testing an anecdote.
-
-// seeds are the interleavings every scenario is run against.
 var seeds = []int64{1, 2, 3, 5, 8}
 
-// runScenario executes a scenario and fails the test if any run did not hold.
 func runScenario(t *testing.T, s Scenario) Report {
 	t.Helper()
 
@@ -39,7 +25,6 @@ func runScenario(t *testing.T, s Scenario) Report {
 	return report
 }
 
-// requireDropped insists messages were actually lost.
 func requireDropped(st Stats) error {
 	if st.Dropped == 0 {
 		return fmt.Errorf("no messages were dropped")
@@ -47,7 +32,6 @@ func requireDropped(st Stats) error {
 	return nil
 }
 
-// requireDelayed insists messages were actually held back.
 func requireDelayed(st Stats) error {
 	if st.Delayed == 0 {
 		return fmt.Errorf("no messages were delayed")
@@ -55,7 +39,6 @@ func requireDelayed(st Stats) error {
 	return nil
 }
 
-// requirePartitioned insists a partition actually blocked traffic.
 func requirePartitioned(st Stats) error {
 	if st.Partitions == 0 {
 		return fmt.Errorf("no messages were blocked by a partition")
@@ -78,20 +61,16 @@ func scenarioLeaderPartitioned() Scenario {
 				return err
 			}
 
-			// Build a real history before anything goes wrong, so the
-			// checker has something substantial to reconcile against.
 			if err := Workload(c, 3, "x", "before", 3, 400); err != nil {
 				return err
 			}
 
-			// Start a write, then cut the leader off before it can commit.
 			c.Write(2, "x", "during-partition")
 			c.Network().Partition([]raft.NodeID{leader}, MajorityWithout(c, leader))
 			if err := c.TickN(10); err != nil {
 				return err
 			}
 
-			// The majority elects someone else and carries on serving.
 			if err := c.TickN(150); err != nil {
 				return err
 			}
@@ -99,7 +78,6 @@ func scenarioLeaderPartitioned() Scenario {
 				return err
 			}
 
-			// The old leader rejoins and must reconcile.
 			c.Network().Heal()
 			return c.TickN(300)
 		},
@@ -127,8 +105,6 @@ func scenarioLeaderCrash() Scenario {
 				return err
 			}
 
-			// Kill the leader with a write outstanding. Its outcome becomes
-			// genuinely unknown, which is the case the checker must handle.
 			c.Write(2, "x", "in-flight")
 			c.Crash(leader)
 
@@ -175,7 +151,6 @@ func scenarioRollingRestarts() Scenario {
 					return err
 				}
 
-				// Keep writing while a node is down.
 				if _, err := WriteWithRetry(c, 2, "x", fmt.Sprintf("down-%d", round), 400); err != nil {
 					return err
 				}
@@ -251,15 +226,11 @@ func scenarioSplitVote() Scenario {
 		Hypothesis: "delay long enough to produce competing candidates still yields " +
 			"at most one leader per term, and the cluster eventually settles " +
 			"rather than campaigning forever",
-		// An even-sized cluster makes a tied vote possible, which is the case
-		// that deadlocks an implementation with a fixed election timeout.
 		Nodes:         4,
 		Faults:        Faults{MinDelay: 2, MaxDelay: 12, LossRate: 0.1},
 		RequireFaults: requireDropped,
 
 		Run: func(c *Cluster) error {
-			// Election safety is asserted on every call to Leader, so simply
-			// ticking through the contested period exercises it continuously.
 			if err := c.TickN(200); err != nil {
 				return err
 			}
@@ -296,7 +267,6 @@ func scenarioMinorityPartition() Scenario {
 				return err
 			}
 
-			// Three nodes on one side, two on the other.
 			ids := c.IDs()
 			majority := ids[:3]
 			minority := ids[3:]
@@ -306,12 +276,9 @@ func scenarioMinorityPartition() Scenario {
 				return err
 			}
 
-			// The majority side keeps working.
 			if err := Workload(c, 2, "x", "majority", 3, 500); err != nil {
 				return err
 			}
-			// The minority side is asked for a read; it must refuse rather
-			// than answer from its own stale state.
 			if _, err := ReadAndSettle(c, 3, "x", 100); err != nil {
 				return err
 			}
@@ -355,8 +322,6 @@ func scenarioLeaderChurn() Scenario {
 					continue
 				}
 
-				// Isolate the leader so the rest must replace it, then bring
-				// it back to reconcile.
 				c.Network().Partition([]raft.NodeID{leader}, MajorityWithout(c, leader))
 				if err := c.TickN(150); err != nil {
 					return err
@@ -388,10 +353,6 @@ func scenarioConcurrentClients() Scenario {
 				return err
 			}
 
-			// Writes are issued in small overlapping batches rather than all
-			// at once. Fully concurrent writes to one key are what make a
-			// history expensive to decide exactly, and a scenario that ends
-			// Undecided proves nothing either way.
 			for round := range 6 {
 				for client := 1; client <= 3; client++ {
 					c.Write(client, "x", fmt.Sprintf("r%d-c%d", round, client))
@@ -436,7 +397,6 @@ func scenarioIndependentKeys() Scenario {
 					}
 				}
 
-				// Force a leader change between rounds.
 				if leader, ok, err := c.Leader(); err == nil && ok {
 					c.Crash(leader)
 					if err := c.TickN(120); err != nil {
@@ -477,21 +437,15 @@ func scenarioStaleLeaderRead() Scenario {
 				return err
 			}
 
-			// Cut the leader off. It does not know yet, and a client that
-			// remembers where the leader was keeps asking there.
 			c.Network().Partition([]raft.NodeID{leader}, MajorityWithout(c, leader))
 			if err := c.TickN(120); err != nil {
 				return err
 			}
 
-			// The majority moves on without it, several times over.
 			if err := Workload(c, 3, "x", "moved-on", 3, 500); err != nil {
 				return err
 			}
 
-			// Now the stranded client asks the old leader. Every one of these
-			// must be refused or left unanswered — an answer here is a stale
-			// read, and the checker will say so.
 			for range 5 {
 				if _, err := ReadFromAndSettle(c, 9, leader, "x", 40); err != nil {
 					return err
@@ -504,16 +458,6 @@ func scenarioStaleLeaderRead() Scenario {
 	}
 }
 
-// Membership scenarios.
-//
-// Joint consensus is the most delicate part of the algorithm after the commit
-// rules, and until now it was only ever exercised by deterministic unit tests
-// on a healthy cluster. That is the wrong place to be confident: a
-// configuration change is a window in which two different ideas of "a
-// majority" are live at once, and the whole point of requiring both is to
-// survive a fault landing inside that window. These put faults there.
-
-// settleMembership ticks until every live node agrees on the membership.
 func settleMembership(c *Cluster, maxTicks int) error {
 	for range maxTicks {
 		if c.MembershipSettled() {
@@ -545,7 +489,6 @@ func scenarioNodeJoinsUnderLoad() Scenario {
 			if err := c.AddNode(4); err != nil {
 				return err
 			}
-			// Keep writing across the change rather than around it.
 			if err := Workload(c, 3, "x", "during", 2, 500); err != nil {
 				return err
 			}
@@ -583,7 +526,6 @@ func scenarioLeaderRemovesItself() Scenario {
 				return err
 			}
 
-			// The remaining four must carry on without it.
 			if err := Workload(c, 3, "x", "after", 3, 600); err != nil {
 				return err
 			}
@@ -612,9 +554,6 @@ func scenarioLeaderCrashesMidMembershipChange() Scenario {
 			if err := c.AddNode(6); err != nil {
 				return err
 			}
-			// Kill the leader almost immediately, while the change is still
-			// working its way through the log. This is the window joint
-			// consensus exists for.
 			if err := c.TickN(2); err != nil {
 				return err
 			}
@@ -656,8 +595,6 @@ func scenarioRemovedNodeKeepsRunning() Scenario {
 				return err
 			}
 
-			// It is still running, still has the data, and no longer counts.
-			// Let it time out and campaign repeatedly.
 			if err := c.TickN(300); err != nil {
 				return err
 			}
@@ -665,7 +602,6 @@ func scenarioRemovedNodeKeepsRunning() Scenario {
 				return err
 			}
 
-			// A client with a stale address asks it directly.
 			for range 3 {
 				if _, err := ReadFromAndSettle(c, 9, victim, "x", 40); err != nil {
 					return err
@@ -694,8 +630,6 @@ func scenarioMembershipChangeDuringPartition() Scenario {
 				return err
 			}
 
-			// Propose the change, then immediately strand the leader that
-			// proposed it.
 			if err := c.AddNode(7); err != nil {
 				return err
 			}
@@ -704,7 +638,6 @@ func scenarioMembershipChangeDuringPartition() Scenario {
 				return err
 			}
 
-			// The majority elects someone else and carries on.
 			if err := Workload(c, 3, "x", "split", 3, 600); err != nil {
 				return err
 			}
@@ -721,19 +654,6 @@ func scenarioMembershipChangeDuringPartition() Scenario {
 	}
 }
 
-// Snapshot scenarios.
-//
-// A follower needs a state machine image exactly when the leader has already
-// thrown away the entries it was missing. Until the harness could compact,
-// that never happened here, so the code that sends and installs images, some
-// of the most consequential in the system, was reachable only by deterministic
-// unit tests on a healthy cluster. These put it under faults.
-//
-// Each of these insists an image was actually transferred. Without that guard
-// a scenario passes by ordinary log replication and proves nothing, which is a
-// mistake this project has made before.
-
-// requireSnapshotInstalled fails a run that never transferred an image.
 func requireSnapshotInstalled(c *Cluster, id raft.NodeID) error {
 	if c.SnapshotsInstalled(id) == 0 {
 		return fmt.Errorf("node %d caught up without installing a snapshot, so this "+
@@ -757,7 +677,6 @@ func scenarioSnapshotCatchUp() Scenario {
 			victim := OtherThan(c, leader)
 			c.Crash(victim)
 
-			// The cluster moves on and compacts past where the victim was.
 			if err := Workload(c, 3, "x", "away", 4, 600); err != nil {
 				return err
 			}
@@ -849,8 +768,6 @@ func scenarioNodeJoinsACompactedCluster() Scenario {
 			if err := Workload(c, 3, "x", "before", 4, 600); err != nil {
 				return err
 			}
-			// Compact first, so there is no log left for a newcomer to
-			// replay. An image is the only way in.
 			if err := c.CompactAll(); err != nil {
 				return err
 			}
@@ -898,8 +815,6 @@ func scenarioSnapshotWhileLeadershipMoves() Scenario {
 				return err
 			}
 
-			// Bring the follower back and immediately unseat the leader that
-			// was about to catch it up.
 			if err := c.Restart(victim); err != nil {
 				return err
 			}
@@ -925,19 +840,6 @@ func scenarioSnapshotWhileLeadershipMoves() Scenario {
 	}
 }
 
-// Client session scenarios.
-//
-// Every write in the scenarios above carries a fresh sequence number, which
-// means none of them model the one thing client sessions exist for. A client
-// that never learns the outcome of a write has to send it again, and the
-// cluster has to recognise the second copy as the same request rather than a
-// new one. That is §6.3, and until now the chaos suite never asked for it.
-//
-// A duplicate write is invisible by itself: setting a key twice leaves the
-// same value. It becomes visible when another client writes that key in
-// between, because a stale duplicate landing afterwards silently discards the
-// newer write, and no ordering of the recorded history can account for that.
-
 func scenarioRetriedWriteIsNotAppliedTwice() Scenario {
 	return Scenario{
 		Name: "a client resends a write it never got an answer to",
@@ -952,7 +854,6 @@ func scenarioRetriedWriteIsNotAppliedTwice() Scenario {
 			}
 
 			for round := range 4 {
-				// One client writes and the write commits.
 				first, err := WriteAndSettle(c, 1, "x", fmt.Sprintf("first-%d", round), 400)
 				if err != nil {
 					return err
@@ -961,13 +862,10 @@ func scenarioRetriedWriteIsNotAppliedTwice() Scenario {
 					continue
 				}
 
-				// Somebody else writes the same key afterwards.
 				if _, err := WriteAndSettle(c, 2, "x", fmt.Sprintf("second-%d", round), 400); err != nil {
 					return err
 				}
 
-				// The first client never saw its acknowledgement and asks
-				// again. The cluster must not let that undo the second write.
 				if err := c.Resend(first); err != nil {
 					return err
 				}
@@ -1003,8 +901,6 @@ func scenarioRetriesAcrossLeaderChanges() Scenario {
 					return err
 				}
 
-				// Unseat the leader that took it, so the retry has to go to
-				// somebody else.
 				leader, ok, err := c.Leader()
 				if err != nil {
 					return err
@@ -1020,8 +916,6 @@ func scenarioRetriesAcrossLeaderChanges() Scenario {
 					return err
 				}
 
-				// Read before and after the retry, so the history pins the
-				// value on both sides of it rather than only afterwards.
 				if _, err := ReadAndSettle(c, 3, "y", 500); err != nil {
 					return err
 				}
@@ -1051,25 +945,11 @@ func scenarioRetriesAcrossLeaderChanges() Scenario {
 	}
 }
 
-// Durable vote scenarios.
-//
-// A node's term and its vote are the only things Raft insists are on disk
-// before it acts on them, and the reason is Election Safety. A node that
-// grants a vote, restarts, forgets it, and grants another in the same term has
-// let two candidates each collect a majority, and a cluster with two leaders
-// in one term can commit two different entries at the same index.
-//
-// Producing that needs an unlucky sequence rather than an unlucky moment: a
-// contested election, a voter restarting inside it, and a second candidate
-// still asking. The scenarios below spend their time trying to arrange it.
-
 func scenarioVotersRestartDuringElections() Scenario {
 	return Scenario{
 		Name:          "voters restart while an election is being contested",
 		RequireFaults: requireDelayed,
 		Faults: Faults{
-			// Slow, variable delivery keeps elections open for long enough
-			// that a restart can land in the middle of one.
 			MinDelay: 2,
 			MaxDelay: 9,
 		},
@@ -1086,8 +966,6 @@ func scenarioVotersRestartDuringElections() Scenario {
 				return err
 			}
 
-			// Repeatedly unseat the leader so the cluster is almost always
-			// mid-election, and restart voters while it is.
 			for round := range 6 {
 				leader, ok, err := c.Leader()
 				if err != nil {
@@ -1097,8 +975,6 @@ func scenarioVotersRestartDuringElections() Scenario {
 					c.Crash(leader)
 				}
 
-				// Give the election a moment to start, then restart a voter
-				// in the middle of it.
 				if err := c.TickN(6); err != nil {
 					return err
 				}
@@ -1152,9 +1028,6 @@ func scenarioWholeClusterRestarts() Scenario {
 					return err
 				}
 
-				// Everything goes down together. No majority survives to
-				// remind anyone what happened, so recovery depends entirely
-				// on what each node wrote down before it died.
 				for _, id := range c.IDs() {
 					c.Crash(id)
 				}
@@ -1179,10 +1052,6 @@ func scenarioWholeClusterRestarts() Scenario {
 	}
 }
 
-// allScenarios is every adversarial scenario, in report order.
-//
-// The individual tests and the report are built from this one list, so the
-// document can never describe a scenario the suite no longer runs.
 func allScenarios() []Scenario {
 	return []Scenario{
 		scenarioLeaderPartitioned(),
@@ -1211,13 +1080,6 @@ func allScenarios() []Scenario {
 	}
 }
 
-// TestChaosReport runs every scenario and writes the report the roadmap calls
-// for.
-//
-// It is a test rather than a script so the document can never describe a state
-// of the world that no longer exists: regenerating it re-runs everything, and a
-// scenario that stopped holding fails here rather than quietly producing a
-// stale file.
 func TestScenarioStaleLeaderRead(t *testing.T) {
 	runScenario(t, scenarioStaleLeaderRead())
 }
@@ -1337,40 +1199,6 @@ func TestChaosReport(t *testing.T) {
 	}
 }
 
-// TestChaosOnDisk runs every scenario again with each node backed by the real
-// write-ahead log instead of an in-memory one.
-//
-// The in-memory runs are the everyday ones because they are fast, but a node
-// that "crashes" by discarding a map cannot misframe a record, lose a segment,
-// or fail to stitch its log back together on recovery. Those failures live in
-// code the rest of the chaos suite never touches: the storage package tests it
-// in isolation, and the driver tests exercise it without adversarial crash
-// sequences.
-//
-// It is worth being exact about what this adds, because the obvious claim is
-// wrong. Measured by breaking the write-ahead log deliberately:
-//
-//   - Replay returning entries out of order is caught here. A corrupted log
-//     produces a state machine nothing in the recorded history explains.
-//   - Replay losing the tail of the log is not caught, and should not be.
-//     An entry that was not on a majority was never committed, and the leader
-//     simply sends it again; tolerating exactly that is the point of the
-//     algorithm.
-//   - Replay losing the whole log is not caught either, for the same reason
-//     one step further: the scenarios restart one node at a time, so a
-//     majority always still holds the data and the empty node is refilled by
-//     replication or a snapshot.
-//
-// So this is largely an exercise of a code path rather than an independent
-// oracle for it, and the storage package's own tests remain where log
-// corruption is actually detected. What it contributes is that the path runs
-// at all under hundreds of adversarial crash, compaction and membership
-// sequences, which is how the compacted-restart panic was found: invisible to
-// either layer alone, because the consensus tests used storage that never
-// compacted and the storage tests never ran the consensus core.
-//
-// One seed rather than five: this is about reaching a different code path, not
-// about exploring more timings.
 func TestChaosOnDisk(t *testing.T) {
 	if testing.Short() {
 		t.Skip("disk-backed chaos runs are slow")
@@ -1385,10 +1213,6 @@ func TestChaosOnDisk(t *testing.T) {
 				t.Errorf("scenario %q did not hold on disk\n%s", s.Name, report)
 			}
 
-			// Without this the test is worthless. If the data directory ever
-			// stopped reaching the cluster, every scenario would quietly run
-			// in memory again and this whole file would pass while covering
-			// nothing it claims to.
 			files, bytes := countFiles(t, scenarioDir)
 			if files == 0 || bytes == 0 {
 				t.Errorf("scenario %q wrote %d files totalling %d bytes; it did not "+
@@ -1398,7 +1222,6 @@ func TestChaosOnDisk(t *testing.T) {
 	}
 }
 
-// countFiles reports how much a scenario actually wrote.
 func countFiles(t *testing.T, dir string) (files, bytes int) {
 	t.Helper()
 	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
@@ -1417,7 +1240,6 @@ func countFiles(t *testing.T, dir string) (files, bytes int) {
 	return files, bytes
 }
 
-// sanitize turns a scenario name into something usable as a directory name.
 func sanitize(name string) string {
 	return strings.Map(func(r rune) rune {
 		switch {

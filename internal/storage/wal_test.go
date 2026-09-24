@@ -12,16 +12,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Tests for the write-ahead log.
-//
-// The WAL exists to make one promise: anything it acknowledged is still there
-// after the process dies. So most of these tests are shaped the same way —
-// write something, simulate a crash, reopen, and check what survived. A crash
-// is simulated by abandoning the WAL without closing it and, where a torn
-// write is being modelled, by chopping bytes off the tail of the newest
-// segment, which is what a process killed mid-write leaves behind.
-
-// openWAL opens a WAL in a temporary directory, failing the test on error.
 func openWAL(t *testing.T, dir string, opts Options) (*WAL, Replay) {
 	t.Helper()
 	opts.Dir = dir
@@ -33,7 +23,6 @@ func openWAL(t *testing.T, dir string, opts Options) (*WAL, Replay) {
 	return w, rep
 }
 
-// entries builds a contiguous run of entries for terseness in tests.
 func entries(term raft.Term, from raft.Index, count int) []raft.Entry {
 	out := make([]raft.Entry, count)
 	for i := range out {
@@ -48,12 +37,6 @@ func entries(term raft.Term, from raft.Index, count int) []raft.Entry {
 	return out
 }
 
-// appendEach appends entries one call at a time.
-//
-// Rollover is only considered after a write completes, so a single batched
-// append lands wholly in one segment however large it is. Tests that need
-// several segments must therefore append separately — batching them would
-// quietly produce a one-segment WAL and leave compaction untested.
 func appendEach(t *testing.T, w *WAL, es []raft.Entry) {
 	t.Helper()
 	for _, e := range es {
@@ -63,7 +46,6 @@ func appendEach(t *testing.T, w *WAL, es []raft.Entry) {
 	}
 }
 
-// segmentPaths returns the WAL's segment files, sorted by name.
 func segmentPaths(t *testing.T, dir string) []string {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join(dir, "*"+segmentSuffix))
@@ -74,8 +56,6 @@ func segmentPaths(t *testing.T, dir string) []string {
 	return paths
 }
 
-// truncateTail chops n bytes off the end of the newest segment, modelling a
-// process killed part-way through a write.
 func truncateTail(t *testing.T, dir string, n int64) {
 	t.Helper()
 	paths := segmentPaths(t, dir)
@@ -96,7 +76,6 @@ func truncateTail(t *testing.T, dir string, n int64) {
 	}
 }
 
-// assertEntries checks a replayed log against what was expected.
 func assertEntries(t *testing.T, got []raft.Entry, want []raft.Entry) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -167,8 +146,6 @@ func TestEntriesSurviveReopen(t *testing.T) {
 }
 
 func TestHardStateSurvivesReopen(t *testing.T) {
-	// The durability that Election Safety rests on: a node that voted must
-	// not forget across a restart.
 	dir := t.TempDir()
 
 	w, _ := openWAL(t, dir, Options{})
@@ -194,9 +171,6 @@ func TestHardStateSurvivesReopen(t *testing.T) {
 }
 
 func TestConflictingEntriesAreResolvedOnReplay(t *testing.T) {
-	// A follower whose log diverges re-appends from an earlier index. Nothing
-	// on disk is rewritten, so replay has to resolve the conflict by letting
-	// the later record for an index win.
 	dir := t.TempDir()
 
 	w, _ := openWAL(t, dir, Options{})
@@ -204,7 +178,6 @@ func TestConflictingEntriesAreResolvedOnReplay(t *testing.T) {
 		t.Fatalf("appending original: %v", err)
 	}
 
-	// The leader's version of index 3 onward, in a later term.
 	replacement := entries(2, 3, 2)
 	if err := w.AppendEntries(replacement); err != nil {
 		t.Fatalf("appending replacement: %v", err)
@@ -218,15 +191,12 @@ func TestConflictingEntriesAreResolvedOnReplay(t *testing.T) {
 	want := append(entries(1, 1, 2), replacement...)
 	assertEntries(t, rep.Entries, want)
 
-	// The superseded entries must be gone, not merely reordered.
 	if n := len(rep.Entries); n != 4 {
 		t.Fatalf("replayed %d entries, want 4; the truncated suffix was not dropped", n)
 	}
 }
 
 func TestTornTailIsRepaired(t *testing.T) {
-	// The kill -9 case. A partial record at the tail must be discarded and
-	// everything before it kept.
 	dir := t.TempDir()
 	survives := entries(1, 1, 3)
 
@@ -251,8 +221,6 @@ func TestTornTailIsRepaired(t *testing.T) {
 }
 
 func TestTornTailIsRepairedAtEveryCutPoint(t *testing.T) {
-	// A crash can interrupt a write at any byte, so repair must work for
-	// every possible tail length, not just a convenient one.
 	base := entries(1, 1, 3)
 
 	for cut := int64(1); cut <= 20; cut++ {
@@ -277,8 +245,6 @@ func TestTornTailIsRepairedAtEveryCutPoint(t *testing.T) {
 				t.Fatalf("replay after a %d-byte tear: %v", cut, err)
 			}
 
-			// The three original entries must always survive; whether the
-			// fourth does depends on how much of it was cut away.
 			if len(rep.Entries) < len(base) {
 				t.Fatalf("a %d-byte tear lost committed entries: %s",
 					cut, formatEntries(rep.Entries))
@@ -289,9 +255,6 @@ func TestTornTailIsRepairedAtEveryCutPoint(t *testing.T) {
 }
 
 func TestRepairedWALAcceptsFurtherAppends(t *testing.T) {
-	// Repair is not just about reading. The file has to be truncated on disk
-	// too, or the next append lands after the garbage and every future replay
-	// stops at it.
 	dir := t.TempDir()
 
 	w, _ := openWAL(t, dir, Options{})
@@ -312,7 +275,6 @@ func TestRepairedWALAcceptsFurtherAppends(t *testing.T) {
 		t.Fatal("expected a repair")
 	}
 
-	// Write past the repaired tail and confirm it replays cleanly.
 	next := entries(2, raft.Index(len(rep.Entries))+1, 2)
 	if err := w2.AppendEntries(next); err != nil {
 		t.Fatalf("appending after repair: %v", err)
@@ -329,9 +291,6 @@ func TestRepairedWALAcceptsFurtherAppends(t *testing.T) {
 }
 
 func TestCorruptionInsideSegmentIsRejected(t *testing.T) {
-	// Damage that is not at the tail cannot be explained by an interrupted
-	// append. Silently truncating there would discard committed entries, so
-	// it must surface instead.
 	dir := t.TempDir()
 
 	w, _ := openWAL(t, dir, Options{})
@@ -342,7 +301,6 @@ func TestCorruptionInsideSegmentIsRejected(t *testing.T) {
 		t.Fatalf("closing: %v", err)
 	}
 
-	// Flip a bit in the middle of the file, well away from the tail.
 	path := segmentPaths(t, dir)[0]
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -360,11 +318,8 @@ func TestCorruptionInsideSegmentIsRejected(t *testing.T) {
 }
 
 func TestCorruptionInOlderSegmentIsRejected(t *testing.T) {
-	// The same rule across files: only the newest segment's tail may be
-	// repaired, because only it could have been mid-write.
 	dir := t.TempDir()
 
-	// A tiny segment size forces several rollovers.
 	w, _ := openWAL(t, dir, Options{SegmentSize: 256})
 	appendEach(t, w, entries(1, 1, 20))
 	if err := w.Close(); err != nil {
@@ -376,8 +331,6 @@ func TestCorruptionInOlderSegmentIsRejected(t *testing.T) {
 		t.Fatalf("expected multiple segments, got %d", len(paths))
 	}
 
-	// Chop the tail off the *first* segment. In the newest file this would be
-	// a repairable tear; here it is unexplained damage.
 	info, err := os.Stat(paths[0])
 	if err != nil {
 		t.Fatalf("stat: %v", err)
@@ -406,15 +359,11 @@ func TestSegmentsRollOver(t *testing.T) {
 		t.Fatalf("100 entries at a 512-byte segment size produced %d segments, want several", got)
 	}
 
-	// Rollover must be invisible to replay: the log is one sequence however
-	// many files it happens to span.
 	_, rep := openWAL(t, dir, Options{SegmentSize: 512})
 	assertEntries(t, rep.Entries, want)
 }
 
 func TestTruncateBeforeDropsSupersededSegments(t *testing.T) {
-	// Compaction after a snapshot: whole segments below the snapshot point
-	// are deleted rather than rewritten.
 	dir := t.TempDir()
 
 	w, _ := openWAL(t, dir, Options{SegmentSize: 256})
@@ -438,10 +387,6 @@ func TestTruncateBeforeDropsSupersededSegments(t *testing.T) {
 }
 
 func TestTruncateBeforePreservesHardState(t *testing.T) {
-	// Hard state records live in segments alongside entries, so deleting an
-	// old segment could take the most recent vote with it. Losing it would
-	// let a restarted node vote a second time in a term it had already voted
-	// in, which breaks Election Safety.
 	dir := t.TempDir()
 
 	w, _ := openWAL(t, dir, Options{SegmentSize: 256})
@@ -451,7 +396,6 @@ func TestTruncateBeforePreservesHardState(t *testing.T) {
 		t.Fatalf("saving hard state: %v", err)
 	}
 
-	// Push the hard state well into an older segment.
 	appendEach(t, w, entries(1, 1, 100))
 	if err := w.TruncateBefore(90); err != nil {
 		t.Fatalf("truncating: %v", err)
@@ -468,7 +412,6 @@ func TestTruncateBeforePreservesHardState(t *testing.T) {
 }
 
 func TestTruncateBeforeKeepsNeededEntries(t *testing.T) {
-	// Compaction must never remove an entry at or above the truncation point.
 	dir := t.TempDir()
 
 	w, _ := openWAL(t, dir, Options{SegmentSize: 256})
@@ -494,7 +437,6 @@ func TestTruncateBeforeKeepsNeededEntries(t *testing.T) {
 			t.Fatalf("entry %d was corrupted by compaction: %+v", e.Index, e)
 		}
 	}
-	// Everything from the truncation point on must still be present.
 	for want := raft.Index(51); want <= 100; want++ {
 		found := false
 		for _, e := range rep.Entries {
@@ -528,8 +470,6 @@ func TestSnapshotMetaSurvivesReopen(t *testing.T) {
 }
 
 func TestNonContiguousAppendIsRejected(t *testing.T) {
-	// A gap in the log would be undetectable later, so it is refused at the
-	// point where the caller can still do something about it.
 	dir := t.TempDir()
 	w, _ := openWAL(t, dir, Options{})
 
@@ -543,8 +483,6 @@ func TestNonContiguousAppendIsRejected(t *testing.T) {
 }
 
 func TestUnexpectedFileInDirectoryIsRejected(t *testing.T) {
-	// A file that does not parse as a segment might be a half-created segment
-	// or someone else's data. Guessing is worse than refusing.
 	dir := t.TempDir()
 	openWAL(t, dir, Options{})
 
@@ -583,11 +521,6 @@ func TestOperationsAfterCloseAreRejected(t *testing.T) {
 }
 
 func TestSyncNeverStillSurvivesProcessCrash(t *testing.T) {
-	// SyncNever leaves flushing to the operating system, so data is in the
-	// page cache rather than on the platter. That is enough to survive the
-	// process dying — which is what makes it a usable test setting — but not
-	// a power loss, which this cannot simulate and the docs are explicit
-	// about.
 	dir := t.TempDir()
 
 	w, _, err := Open(Options{Dir: dir, Sync: SyncNever})
@@ -598,15 +531,12 @@ func TestSyncNeverStillSurvivesProcessCrash(t *testing.T) {
 	if err := w.AppendEntries(want); err != nil {
 		t.Fatalf("appending: %v", err)
 	}
-	// Deliberately abandoned without Close, as a killed process would.
 
 	_, rep := openWAL(t, dir, Options{Sync: SyncNever})
 	assertEntries(t, rep.Entries, want)
 }
 
 func TestReopenAfterAbandonWithoutClose(t *testing.T) {
-	// The realistic crash: no Close, no truncation, just a process that
-	// stopped. Everything acknowledged must still be there.
 	dir := t.TempDir()
 
 	w, _, err := Open(Options{Dir: dir})

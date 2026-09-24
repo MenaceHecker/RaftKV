@@ -2,24 +2,6 @@ package raft
 
 import "testing"
 
-// Committed entries are handed out repeatedly until the caller says it has
-// applied them.
-//
-// This is the whole reason Ready and Advance are separate calls. A driver
-// takes a batch, applies it to the state machine, and only then advances. If
-// the process dies in between, the entries have not been applied anywhere
-// durable and must come back, because nothing else would ever mention them
-// again. Marking them applied at the moment they were handed over would make
-// a crash mid-apply skip them silently: the log would say they were applied,
-// the state machine would not hold them, and no check anywhere compares the
-// two.
-//
-// At-least-once is what the design chooses, and it is safe because applying
-// the same entry twice is already handled: commands carry a client ID and a
-// sequence number, and the state machine ignores one it has seen.
-
-// drained returns a leader with its election no-op already applied, so that
-// what a test proposes is the only thing outstanding.
 func drained(t *testing.T) *Node {
 	t.Helper()
 
@@ -48,7 +30,6 @@ func TestCommittedEntriesComeBackUntilTheyAreAdvanced(t *testing.T) {
 		t.Fatal("nothing was committed, so there is nothing to hand back")
 	}
 
-	// No Advance. A driver that died here applied nothing.
 	second := n.Ready()
 
 	got, want := indexesOf(second.CommittedEntries), indexesOf(first.CommittedEntries)
@@ -64,8 +45,6 @@ func TestCommittedEntriesComeBackUntilTheyAreAdvanced(t *testing.T) {
 }
 
 func TestAdvanceStopsThemComingBack(t *testing.T) {
-	// The other half. If Advance did not take effect, a driver would apply
-	// the same entries forever and never make progress.
 	n := drained(t)
 
 	if err := n.Propose([]byte("one")); err != nil {
@@ -85,9 +64,6 @@ func TestAdvanceStopsThemComingBack(t *testing.T) {
 }
 
 func TestAdvancingPartOfTheWayKeepsTheRest(t *testing.T) {
-	// A driver that applies a batch and advances is told about everything
-	// that committed while it was busy. Nothing may be skipped between the
-	// two calls.
 	n := drained(t)
 
 	if err := n.Propose([]byte("one")); err != nil {
@@ -95,7 +71,6 @@ func TestAdvancingPartOfTheWayKeepsTheRest(t *testing.T) {
 	}
 	first := n.Ready()
 
-	// More commits while the caller is applying the batch it already holds.
 	if err := n.Propose([]byte("two")); err != nil {
 		t.Fatalf("proposing: %v", err)
 	}
@@ -114,10 +89,6 @@ func TestAdvancingPartOfTheWayKeepsTheRest(t *testing.T) {
 }
 
 func TestAdvancingASnapshotMarksItApplied(t *testing.T) {
-	// A snapshot replaces the state machine wholesale, so advancing one has
-	// to move the applied cursor to its index even though no entries came
-	// with it. Otherwise the log would go looking for entries the snapshot
-	// just replaced.
 	n, _ := newFragileNode(t)
 	atTerm(t, n, 1)
 

@@ -1,10 +1,3 @@
-// Package transport carries Raft messages between cluster members over gRPC,
-// and exposes the key-value API to clients.
-//
-// It is the only place that knows both the consensus core's types and the wire
-// format. That separation is deliberate: the core stays free of generated code
-// and protobuf semantics, and the wire format can change — a new field, a
-// renamed enum — without any of it reaching the algorithm.
 package transport
 
 import (
@@ -14,22 +7,6 @@ import (
 	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
 
-// Conversion between the core's types and the wire types.
-//
-// The two representations are kept separate rather than having the core use
-// generated structs directly. Protobuf's semantics do not match the
-// algorithm's: proto3 cannot tell an unset field from a zero one, generated
-// types carry mutable internal state, and the wire format has to stay
-// compatible across versions in ways the in-memory representation does not.
-// Converting at the boundary costs a copy per message and keeps every one of
-// those concerns out of the consensus logic.
-//
-// Both directions are total and explicit. An unrecognized enum value is an
-// error rather than a silent zero: a message from a newer or corrupted peer
-// must not be quietly reinterpreted as a different, valid message.
-
-// ErrUnknownEnum means a wire value has no counterpart in the core, which
-// happens if a peer speaks a newer protocol version or a message is damaged.
 type ErrUnknownEnum struct {
 	Field string
 	Value int32
@@ -39,12 +16,6 @@ func (e *ErrUnknownEnum) Error() string {
 	return fmt.Sprintf("transport: unknown %s value %d", e.Field, e.Value)
 }
 
-// messageTypeToWire maps a core message type onto the wire enum.
-//
-// Only inter-node messages appear here. MsgCampaign, MsgPropose, and
-// MsgReadIndex are local signals a node sends to itself, and putting them on
-// the wire would let a peer drive another node's internal state machine
-// directly — so they have no wire representation at all.
 func messageTypeToWire(t raft.MessageType) (raftkvv1.MessageType, error) {
 	switch t {
 	case raft.MsgVoteRequest:
@@ -73,7 +44,6 @@ func messageTypeToWire(t raft.MessageType) (raftkvv1.MessageType, error) {
 	}
 }
 
-// messageTypeFromWire maps a wire enum onto a core message type.
 func messageTypeFromWire(t raftkvv1.MessageType) (raft.MessageType, error) {
 	switch t {
 	case raftkvv1.MessageType_MESSAGE_TYPE_VOTE_REQUEST:
@@ -101,7 +71,6 @@ func messageTypeFromWire(t raftkvv1.MessageType) (raft.MessageType, error) {
 	}
 }
 
-// confStateToWire converts a cluster configuration.
 func confStateToWire(cs raft.ConfState) *raftkvv1.ConfState {
 	out := &raftkvv1.ConfState{Joint: cs.Joint}
 
@@ -126,10 +95,6 @@ func confStateToWire(cs raft.ConfState) *raftkvv1.ConfState {
 	return out
 }
 
-// confStateFromWire converts a cluster configuration.
-//
-// A nil message means the sender recorded no configuration, which is
-// legitimate for a snapshot taken before membership ever changed.
 func confStateFromWire(cs *raftkvv1.ConfState) raft.ConfState {
 	if cs == nil {
 		return raft.ConfState{}
@@ -157,7 +122,6 @@ func confStateFromWire(cs *raftkvv1.ConfState) raft.ConfState {
 	return out
 }
 
-// snapshotToWire converts a state machine image.
 func snapshotToWire(s *raft.Snapshot) *raftkvv1.Snapshot {
 	if s == nil {
 		return nil
@@ -170,14 +134,10 @@ func snapshotToWire(s *raft.Snapshot) *raftkvv1.Snapshot {
 	}
 }
 
-// snapshotFromWire converts a state machine image.
 func snapshotFromWire(s *raftkvv1.Snapshot) (*raft.Snapshot, error) {
 	if s == nil {
 		return nil, nil
 	}
-	// A snapshot at index zero covers nothing while claiming to cover a prefix
-	// of the log. Installing it would replace a node's state with an image of
-	// nothing at all, so it is refused here rather than at the point of use.
 	if s.GetIndex() == 0 {
 		return nil, fmt.Errorf("transport: snapshot has no index")
 	}
@@ -189,7 +149,6 @@ func snapshotFromWire(s *raftkvv1.Snapshot) (*raft.Snapshot, error) {
 	}, nil
 }
 
-// entryTypeToWire maps a core entry type onto the wire enum.
 func entryTypeToWire(t raft.EntryType) (raftkvv1.EntryType, error) {
 	switch t {
 	case raft.EntryNormal:
@@ -204,7 +163,6 @@ func entryTypeToWire(t raft.EntryType) (raftkvv1.EntryType, error) {
 	}
 }
 
-// entryTypeFromWire maps a wire enum onto a core entry type.
 func entryTypeFromWire(t raftkvv1.EntryType) (raft.EntryType, error) {
 	switch t {
 	case raftkvv1.EntryType_ENTRY_TYPE_NORMAL:
@@ -218,16 +176,11 @@ func entryTypeFromWire(t raftkvv1.EntryType) (raft.EntryType, error) {
 	}
 }
 
-// stateToWire maps a core role onto the wire enum, for Status responses.
 func stateToWire(s raft.State) raftkvv1.NodeState {
 	switch s {
 	case raft.Follower:
 		return raftkvv1.NodeState_NODE_STATE_FOLLOWER
 	case raft.PreCandidate:
-		// The wire enum has no pre-candidate. Reporting it as a candidate is
-		// the closest true statement available: the node is trying to become
-		// leader and is not one. The distinction matters inside the core, to
-		// a client it does not.
 		return raftkvv1.NodeState_NODE_STATE_CANDIDATE
 	case raft.Candidate:
 		return raftkvv1.NodeState_NODE_STATE_CANDIDATE
@@ -238,7 +191,6 @@ func stateToWire(s raft.State) raftkvv1.NodeState {
 	}
 }
 
-// entryToWire converts one log entry.
 func entryToWire(e raft.Entry) (*raftkvv1.Entry, error) {
 	typ, err := entryTypeToWire(e.Type)
 	if err != nil {
@@ -252,7 +204,6 @@ func entryToWire(e raft.Entry) (*raftkvv1.Entry, error) {
 	}, nil
 }
 
-// entryFromWire converts one log entry.
 func entryFromWire(e *raftkvv1.Entry) (raft.Entry, error) {
 	if e == nil {
 		return raft.Entry{}, fmt.Errorf("transport: nil entry")
@@ -269,7 +220,6 @@ func entryFromWire(e *raftkvv1.Entry) (raft.Entry, error) {
 	}, nil
 }
 
-// MessageToWire converts a Raft message into its wire form.
 func MessageToWire(m raft.Message) (*raftkvv1.Message, error) {
 	typ, err := messageTypeToWire(m.Type)
 	if err != nil {
@@ -309,11 +259,6 @@ func MessageToWire(m raft.Message) (*raftkvv1.Message, error) {
 	}, nil
 }
 
-// MessageFromWire converts a wire message into the core's form.
-//
-// It rejects anything it cannot represent exactly. A message that decodes into
-// something subtly different from what was sent is worse than one that fails
-// to decode at all, because the receiver would act on it.
 func MessageFromWire(m *raftkvv1.Message) (raft.Message, error) {
 	if m == nil {
 		return raft.Message{}, fmt.Errorf("transport: nil message")

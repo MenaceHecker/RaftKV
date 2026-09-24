@@ -1,18 +1,3 @@
-// Command raftkv-bench measures what a running RaftKV cluster actually does.
-//
-// It exists because published throughput numbers that nobody can reproduce are
-// worse than no numbers at all. Everything it reports is measured against real
-// nodes over real gRPC, with real fsyncs underneath, and it prints the
-// conditions alongside the results so a number can be argued with.
-//
-// It is a closed-loop benchmark: each client sends one request, waits for the
-// reply, and sends the next. That measures latency honestly and throughput
-// conservatively. An open-loop generator would produce larger throughput
-// figures by queueing work the cluster has not agreed to yet, which says more
-// about the queue than the cluster.
-//
-//	raftkv-bench --endpoints 127.0.0.1:9001,127.0.0.1:9002,127.0.0.1:9003 \
-//	  --clients 32 --duration 30s --workload mixed
 package main
 
 import (
@@ -96,8 +81,6 @@ func run() error {
 	fmt.Printf("              %v warmup then %v measured against %d endpoints\n\n",
 		opt.warmup, opt.duration, len(addrs))
 
-	// A read-only workload needs keys to exist, or it measures the cost of
-	// answering "not found" and nothing else.
 	if opt.workload != "write" {
 		fmt.Print("seeding the key space... ")
 		if err := seed(pool, &opt); err != nil {
@@ -111,10 +94,6 @@ func run() error {
 	return nil
 }
 
-// pool holds one connection per node and remembers which is the leader.
-//
-// The leader is discovered from redirects rather than configuration, which is
-// what a real client has to do anyway: membership can change underneath it.
 type pool struct {
 	mu      sync.RWMutex
 	conns   map[string]raftkvv1.KVServiceClient
@@ -154,9 +133,6 @@ func (p *pool) client() (raftkvv1.KVServiceClient, string) {
 	return p.conns[p.leader], p.leader
 }
 
-// redirect points the pool at a new leader. An address that was not in the
-// original endpoint list is dialed on demand, which is how a client follows
-// the cluster through a membership change.
 func (p *pool) redirect(addr string) {
 	if addr == "" {
 		return
@@ -184,9 +160,6 @@ func (p *pool) redirect(addr string) {
 	p.mu.Unlock()
 }
 
-// rotate moves to some other node, for when the current one names no leader.
-// During an election nobody knows who leads, so trying elsewhere is all a
-// client can do.
 func (p *pool) rotate() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -204,7 +177,6 @@ func (p *pool) close() {
 	}
 }
 
-// notLeader extracts the redirect detail, if the error carries one.
 func notLeader(err error) (*raftkvv1.NotLeader, bool) {
 	st, ok := status.FromError(err)
 	if !ok || st.Code() != codes.FailedPrecondition {
@@ -218,7 +190,6 @@ func notLeader(err error) (*raftkvv1.NotLeader, bool) {
 	return nil, false
 }
 
-// result is what one measured run produced.
 type result struct {
 	latencies []time.Duration
 	reads     int
@@ -243,7 +214,6 @@ func seed(p *pool, opt *options) error {
 	return nil
 }
 
-// putOnce writes one key, following redirects until it lands on the leader.
 func putOnce(ctx context.Context, p *pool, clientID, seq uint64, key string, value []byte) error {
 	for attempt := 0; attempt < 20; attempt++ {
 		kv, _ := p.client()
@@ -273,7 +243,6 @@ func putOnce(ctx context.Context, p *pool, clientID, seq uint64, key string, val
 	return errors.New("gave up following redirects")
 }
 
-// measure runs the workload and collects per-request latencies.
 func measure(p *pool, opt *options) result {
 	var (
 		wg        sync.WaitGroup
@@ -292,8 +261,6 @@ func measure(p *pool, opt *options) result {
 
 			local := result{errors: map[string]int{}}
 			rng := rand.New(rand.NewSource(int64(c)*7919 + 1))
-			// Client IDs start above the seeder's so sequence numbers never
-			// collide with it in the dedup table.
 			clientID := uint64(c) + 100
 			seq := uint64(0)
 
@@ -329,9 +296,6 @@ func measure(p *pool, opt *options) result {
 				}
 				took := time.Since(start)
 
-				// Only requests issued during the measured window count.
-				// Warmup traffic still runs, so the cluster is in steady
-				// state when measurement begins.
 				if measuring.on() {
 					if err != nil {
 						local.errors[classify(err)]++
@@ -360,9 +324,6 @@ func measure(p *pool, opt *options) result {
 	return merged
 }
 
-// window is a flag marking whether the measured period is open. Warmup
-// traffic runs through the same code path but is not recorded, so the cluster
-// is in steady state by the time anything counts.
 type window struct {
 	mu sync.RWMutex
 	v  bool
@@ -395,15 +356,6 @@ func getOnce(p *pool, opt *options, key string, local *result) error {
 	return errors.New("gave up following redirects")
 }
 
-// classify buckets a failure for the error breakdown.
-//
-// A gRPC failure is named by its code. Anything else came from this side:
-// a context that expired before the call returned, or running out of
-// redirects to follow. Those used to be labelled "unknown", which collides
-// with gRPC's own Unknown code by everything except capitalisation, so a run
-// could report two buckets that read as the same thing and were not. Worse,
-// a timeout landed in one or the other depending on whether the server
-// answered or the client gave up first.
 func classify(err error) string {
 	if st, ok := status.FromError(err); ok {
 		return st.Code().String()
@@ -411,19 +363,6 @@ func classify(err error) string {
 	return "local:" + err.Error()
 }
 
-// percentile returns the nearest-rank percentile of an ascending slice.
-//
-// Nearest rank is ceil(f*n), counting from one, so the index is that minus
-// one. Taking int(f*n) instead is the same number except when f*n lands
-// exactly on a whole number, and then it is one too high: with a hundred
-// samples it reports the fifty-first as the median and the hundredth, the
-// maximum, as the ninety-ninth percentile.
-//
-// The error is a single sample either way and made no visible difference to
-// the figures published from this tool, which come from tens of thousands of
-// operations. It is fixed because a benchmark is an instrument, and an
-// instrument that is slightly wrong in a way nobody has measured is one
-// nobody can calibrate against.
 func percentile(sorted []time.Duration, f float64) time.Duration {
 	if len(sorted) == 0 {
 		return 0

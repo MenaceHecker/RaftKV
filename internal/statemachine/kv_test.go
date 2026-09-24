@@ -11,15 +11,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Tests for the key-value state machine.
-//
-// The store itself is simple; what these tests are really checking is that it
-// is a deterministic function of the entries applied to it. A replicated state
-// machine that agrees on the log but not on the resulting state has failed in
-// the worst possible way, because nothing in Raft detects it — so determinism
-// is tested directly and repeatedly rather than assumed.
-
-// putEntry builds a Put entry at a given index.
 func putEntry(index raft.Index, key, value string) raft.Entry {
 	return raft.Entry{
 		Term:  1,
@@ -29,7 +20,6 @@ func putEntry(index raft.Index, key, value string) raft.Entry {
 	}
 }
 
-// deleteEntry builds a Delete entry at a given index.
 func deleteEntry(index raft.Index, key string) raft.Entry {
 	return raft.Entry{
 		Term:  1,
@@ -39,7 +29,6 @@ func deleteEntry(index raft.Index, key string) raft.Entry {
 	}
 }
 
-// applyAll applies entries in order, failing the test on error.
 func applyAll(t *testing.T, kv *KV, entries []raft.Entry) {
 	t.Helper()
 	for _, e := range entries {
@@ -49,7 +38,6 @@ func applyAll(t *testing.T, kv *KV, entries []raft.Entry) {
 	}
 }
 
-// mustGet returns a key's value, failing the test if it is absent.
 func mustGet(t *testing.T, kv *KV, key string) string {
 	t.Helper()
 	v, ok := kv.Get(key)
@@ -111,9 +99,6 @@ func TestDelete(t *testing.T) {
 }
 
 func TestDeleteMissingKeySucceeds(t *testing.T) {
-	// A command has to be applicable on every replica whatever that replica
-	// holds. A delete that errored where the key was absent would diverge the
-	// cluster, so it must succeed everywhere.
 	kv := New()
 
 	if err := kv.Apply(deleteEntry(1, "never-existed")); err != nil {
@@ -125,8 +110,6 @@ func TestDeleteMissingKeySucceeds(t *testing.T) {
 }
 
 func TestEmptyValueIsDistinctFromAbsent(t *testing.T) {
-	// An empty value is a value. Conflating it with a missing key would make
-	// Get ambiguous and break any client storing empty strings.
 	kv := New()
 	applyAll(t, kv, []raft.Entry{putEntry(1, "k", "")})
 
@@ -140,9 +123,6 @@ func TestEmptyValueIsDistinctFromAbsent(t *testing.T) {
 }
 
 func TestNoOpEntriesAdvanceAppliedIndex(t *testing.T) {
-	// A no-op is not a command, but it occupies an index. Failing to advance
-	// past it would put the state machine one behind the log for every leader
-	// election, and the gap check would then reject everything after it.
 	kv := New()
 
 	applyAll(t, kv, []raft.Entry{
@@ -172,9 +152,6 @@ func TestConfChangeEntriesAdvanceAppliedIndex(t *testing.T) {
 }
 
 func TestAlreadyAppliedEntriesAreIgnored(t *testing.T) {
-	// After a crash a node restores a snapshot and replays the log from
-	// before it, so re-delivery is the normal path rather than an error. The
-	// replayed entry must not take effect a second time.
 	kv := New()
 	applyAll(t, kv, []raft.Entry{
 		putEntry(1, "k", "current"),
@@ -195,8 +172,6 @@ func TestAlreadyAppliedEntriesAreIgnored(t *testing.T) {
 }
 
 func TestGapInIndexesIsRejected(t *testing.T) {
-	// The Raft core delivers committed entries in order, so a gap means the
-	// caller is broken. Applying across it would silently skip commands.
 	kv := New()
 	applyAll(t, kv, []raft.Entry{putEntry(1, "a", "1")})
 
@@ -265,9 +240,6 @@ func TestCommandRoundTrip(t *testing.T) {
 }
 
 func TestSnapshotIsDeterministicAcrossCalls(t *testing.T) {
-	// Go randomizes map iteration, so an encoding that walks the map directly
-	// produces different bytes every time for identical state. Enough keys
-	// are used here that a non-deterministic encoding could not pass by luck.
 	kv := New()
 	for i := range 200 {
 		if err := kv.Apply(putEntry(raft.Index(i+1), fmt.Sprintf("key-%03d", i), fmt.Sprintf("value-%d", i))); err != nil {
@@ -292,10 +264,6 @@ func TestSnapshotIsDeterministicAcrossCalls(t *testing.T) {
 }
 
 func TestReplicasConvergeToIdenticalSnapshots(t *testing.T) {
-	// The property the whole package exists for: two nodes applying the same
-	// entries in the same order must reach byte-identical state. Comparing
-	// snapshots is the cheapest way to check it, and only works because the
-	// encoding is deterministic.
 	entries := []raft.Entry{
 		putEntry(1, "zebra", "1"),
 		putEntry(2, "apple", "2"),
@@ -327,9 +295,6 @@ func TestReplicasConvergeToIdenticalSnapshots(t *testing.T) {
 }
 
 func TestInsertionOrderDoesNotAffectSnapshot(t *testing.T) {
-	// The same final state reached by different paths must encode identically,
-	// or a node that took a different route through the log would look
-	// divergent when it is not.
 	forward := New()
 	applyAll(t, forward, []raft.Entry{
 		putEntry(1, "a", "1"),
@@ -337,8 +302,6 @@ func TestInsertionOrderDoesNotAffectSnapshot(t *testing.T) {
 		putEntry(3, "c", "3"),
 	})
 
-	// Same destination, opposite insertion order, plus a key added and
-	// removed along the way.
 	backward := New()
 	applyAll(t, backward, []raft.Entry{
 		putEntry(1, "c", "3"),
@@ -348,9 +311,6 @@ func TestInsertionOrderDoesNotAffectSnapshot(t *testing.T) {
 		putEntry(5, "a", "1"),
 	})
 
-	// The applied index is part of the snapshot and legitimately differs, so
-	// compare the key-value portion by restoring both into fresh stores at a
-	// common index.
 	sf, _ := forward.Snapshot()
 	sb, _ := backward.Snapshot()
 
@@ -412,9 +372,6 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 }
 
 func TestRestoreReplacesExistingState(t *testing.T) {
-	// Restore is a replacement, not a merge. Keys present before but absent
-	// from the snapshot must be gone, or a restored replica would carry
-	// state no other node has.
 	kv := New()
 	applyAll(t, kv, []raft.Entry{
 		putEntry(1, "old", "1"),
@@ -444,8 +401,6 @@ func TestRestoreReplacesExistingState(t *testing.T) {
 }
 
 func TestRestoreAfterSnapshotResumesApplying(t *testing.T) {
-	// The recovery path end to end: restore a snapshot, then continue
-	// applying the entries that came after it.
 	source := New()
 	applyAll(t, source, []raft.Entry{
 		putEntry(1, "a", "1"),
@@ -470,8 +425,6 @@ func TestRestoreAfterSnapshotResumesApplying(t *testing.T) {
 }
 
 func TestCorruptSnapshotLeavesStateIntact(t *testing.T) {
-	// Restore is all-or-nothing. A snapshot that fails to decode part-way
-	// through must not leave the store holding a mixture of old and new.
 	kv := New()
 	applyAll(t, kv, []raft.Entry{
 		putEntry(1, "a", "1"),
@@ -487,8 +440,6 @@ func TestCorruptSnapshotLeavesStateIntact(t *testing.T) {
 	})
 	snap, _ := source.Snapshot()
 
-	// Truncate part-way through, so decoding fails only after several keys
-	// have been read.
 	if err := kv.Restore(snap[:len(snap)-5]); err == nil {
 		t.Fatal("a truncated snapshot was accepted")
 	}
@@ -525,8 +476,6 @@ func TestMalformedSnapshotIsRejected(t *testing.T) {
 }
 
 func TestEveryTruncationOfASnapshotIsRejected(t *testing.T) {
-	// A snapshot cut at any point must fail to decode. Accepting a prefix
-	// would silently drop keys and leave the replica quietly divergent.
 	kv := New()
 	for i := range 20 {
 		if err := kv.Apply(putEntry(raft.Index(i+1), fmt.Sprintf("k%02d", i), "v")); err != nil {
@@ -544,8 +493,6 @@ func TestEveryTruncationOfASnapshotIsRejected(t *testing.T) {
 }
 
 func TestGetReturnsACopy(t *testing.T) {
-	// A caller holding the returned slice must not be able to mutate
-	// committed state through it.
 	kv := New()
 	applyAll(t, kv, []raft.Entry{putEntry(1, "k", "original")})
 
@@ -560,8 +507,6 @@ func TestGetReturnsACopy(t *testing.T) {
 }
 
 func TestApplyDoesNotAliasEntryData(t *testing.T) {
-	// Entry payloads come from decoded log records whose buffers the caller
-	// may reuse. The store must own what it holds.
 	kv := New()
 	e := putEntry(1, "k", "original")
 	if err := kv.Apply(e); err != nil {
@@ -578,8 +523,6 @@ func TestApplyDoesNotAliasEntryData(t *testing.T) {
 }
 
 func TestConcurrentReadsAndApplies(t *testing.T) {
-	// Raft applies from one goroutine while clients read from others. Run
-	// under -race, this is what proves the locking is right.
 	kv := New()
 
 	const writes = 500

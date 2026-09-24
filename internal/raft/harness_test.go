@@ -7,28 +7,11 @@ import (
 	"testing"
 )
 
-// A deterministic, single-process test harness for whole clusters.
-//
-// Everything the real system would get from the outside world is supplied here
-// instead: logical time comes from Tick, the network is a slice of in-flight
-// messages, and the randomized election timeouts come from a seeded source. No
-// goroutines, no sockets, no wall clock. A run is therefore reproducible — a
-// failure replays exactly, which is the property that makes the Phase 5 chaos
-// scenarios worth trusting.
-//
-// The network is honest by default: every message is delivered, exactly once,
-// in the order it was produced. Tests that want partitions or loss install a
-// filter.
-
-// defaultElectionTick and defaultHeartbeatTick are the timings used unless a
-// test overrides them. The ratio matters more than the values: a leader must
-// get several heartbeats out inside the shortest possible election timeout.
 const (
 	defaultElectionTick  = 10
 	defaultHeartbeatTick = 1
 )
 
-// cluster is a set of nodes wired to a simulated network.
 type cluster struct {
 	t *testing.T
 
@@ -36,53 +19,28 @@ type cluster struct {
 	nodes    map[NodeID]*Node
 	storages map[NodeID]*MemoryStorage
 
-	// applied records the committed entries each node has handed to its
-	// state machine, in order. Comparing these across nodes is how the tests
-	// check State Machine Safety: every node must apply the same commands in
-	// the same order.
 	applied map[NodeID][]Entry
 
-	// readStates records the completed read indexes each node has reported.
 	readStates map[NodeID][]ReadState
 
-	// snapshots records the state machine images each node was told to
-	// restore, so tests can tell a snapshot transfer from ordinary catch-up.
 	snapshots map[NodeID][]*Snapshot
 
-	// undeliverable counts messages addressed to nodes this harness does not
-	// run, which happens while a member is being added.
 	undeliverable int
 
-	// inflight holds messages produced but not yet delivered.
 	inflight []Message
 
-	// filter decides whether a message is delivered. Returning false drops
-	// it, which is how partitions and message loss are simulated. Nil means
-	// deliver everything.
 	filter func(m Message) bool
 }
 
-// clusterOpts configures a test cluster.
 type clusterOpts struct {
-	electionTick  int
-	heartbeatTick int
-	// seed drives the randomized election timeouts. A fixed seed makes the
-	// whole run reproducible; changing it explores different timings.
-	seed int64
-	// maxAppendBytes bounds one AppendEntries payload. Zero takes the
-	// package default, which is far larger than any test backlog.
+	electionTick   int
+	heartbeatTick  int
+	seed           int64
 	maxAppendBytes int
-	// checkQuorum makes a leader step down when it cannot reach a majority.
-	// Off by default so the existing tests, many of which strand a leader on
-	// purpose and expect it to stay one, keep testing what they did.
-	checkQuorum bool
-	// preVote enables the pre-vote round. It is off by default here so the
-	// existing tests keep exercising the plain election path, and the tests
-	// that care about pre-vote turn it on explicitly.
-	preVote bool
+	checkQuorum    bool
+	preVote        bool
 }
 
-// newCluster builds a cluster of size nodes with IDs 1..size.
 func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 	t.Helper()
 
@@ -110,9 +68,6 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 
 	for _, id := range ids {
 		storage := NewMemoryStorage()
-		// Each node draws from its own source, seeded distinctly, so their
-		// election timeouts differ the way real clocks would. Deriving the
-		// seed from the run seed keeps that reproducible.
 		rng := rand.New(rand.NewSource(opts.seed + int64(id)*7919))
 
 		node, err := NewNode(Config{
@@ -137,7 +92,6 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 	return c
 }
 
-// node returns a node by ID, failing the test if it does not exist.
 func (c *cluster) node(id NodeID) *Node {
 	c.t.Helper()
 	n, ok := c.nodes[id]
@@ -147,11 +101,6 @@ func (c *cluster) node(id NodeID) *Node {
 	return n
 }
 
-// tick advances every node by one unit of logical time, then runs the network
-// until it goes quiet.
-//
-// Nodes are ticked in ID order rather than map order, because Go randomizes map
-// iteration and that would make runs irreproducible.
 func (c *cluster) tick() {
 	c.t.Helper()
 	for _, id := range c.ids {
@@ -162,7 +111,6 @@ func (c *cluster) tick() {
 	c.deliverAll()
 }
 
-// tickN advances the cluster by n ticks.
 func (c *cluster) tickN(n int) {
 	c.t.Helper()
 	for range n {
@@ -170,8 +118,6 @@ func (c *cluster) tickN(n int) {
 	}
 }
 
-// campaign forces a node to start an election immediately, instead of waiting
-// out its timeout. Tests use it to control exactly who campaigns and when.
 func (c *cluster) campaign(id NodeID) {
 	c.t.Helper()
 	if err := c.node(id).Step(Message{Type: MsgCampaign}); err != nil {
@@ -180,8 +126,6 @@ func (c *cluster) campaign(id NodeID) {
 	c.deliverAll()
 }
 
-// propose submits a command to a node and runs the network until quiet. It
-// returns the node's error, since a test may be checking for ErrNotLeader.
 func (c *cluster) propose(id NodeID, data string) error {
 	c.t.Helper()
 	err := c.node(id).Propose([]byte(data))
@@ -189,8 +133,6 @@ func (c *cluster) propose(id NodeID, data string) error {
 	return err
 }
 
-// collect drains every node's Ready, queues the outbound messages, and records
-// the newly applied entries.
 func (c *cluster) collect() {
 	c.t.Helper()
 	for _, id := range c.ids {
@@ -205,18 +147,10 @@ func (c *cluster) collect() {
 		if rd.Snapshot != nil {
 			c.snapshots[id] = append(c.snapshots[id], rd.Snapshot)
 		}
-		// Acknowledging only after recording mirrors the real contract: a
-		// caller advances once the entries are safely applied.
 		n.Advance(rd)
 	}
 }
 
-// deliverAll runs the network to quiescence: collect what the nodes produced,
-// deliver it, collect what that produced, and so on until nothing is left.
-//
-// The bound is a safety net for a bug that makes two nodes talk forever. Real
-// convergence takes a handful of rounds, so tripping it means something is
-// wrong rather than merely slow.
 func (c *cluster) deliverAll() {
 	c.t.Helper()
 
@@ -232,9 +166,6 @@ func (c *cluster) deliverAll() {
 			return
 		}
 
-		// Take the whole batch and deliver it in production order. Messages
-		// generated during delivery go to the next round, which keeps the
-		// ordering deterministic.
 		batch := c.inflight
 		c.inflight = nil
 
@@ -244,11 +175,6 @@ func (c *cluster) deliverAll() {
 			}
 			dst, ok := c.nodes[m.To]
 			if !ok {
-				// A node the cluster knows of but which does not exist here.
-				// This is the normal situation while a member is being added:
-				// the leader replicates to it before it has been started. The
-				// real transport simply fails to deliver, so the harness drops
-				// it too rather than treating it as a bug.
 				c.undeliverable++
 				continue
 			}
@@ -259,11 +185,6 @@ func (c *cluster) deliverAll() {
 	}
 }
 
-// partition splits the cluster into isolated groups. Messages within a group
-// flow normally; messages crossing a group boundary are dropped, which is what
-// a network partition looks like from a node's point of view.
-//
-// Every node must appear in exactly one group.
 func (c *cluster) partition(groups ...[]NodeID) {
 	c.t.Helper()
 
@@ -287,14 +208,10 @@ func (c *cluster) partition(groups ...[]NodeID) {
 	}
 }
 
-// heal removes any partition, restoring full connectivity.
 func (c *cluster) heal() {
 	c.filter = nil
 }
 
-// restart rebuilds a node from its persisted storage, simulating a crash and
-// recovery. Volatile state is lost; the hard state and log survive, since
-// those are what Storage is responsible for.
 func (c *cluster) restart(id NodeID, opts clusterOpts) {
 	c.t.Helper()
 
@@ -322,12 +239,6 @@ func (c *cluster) restart(id NodeID, opts clusterOpts) {
 	c.nodes[id] = node
 }
 
-// leader returns the single node that considers itself leader.
-//
-// It fails the test if there is more than one leader in the same term, which
-// would be a direct violation of Election Safety. Two leaders in *different*
-// terms is legitimate and transient: a deposed leader that has not yet heard
-// about the new term still believes it is in charge, so the highest term wins.
 func (c *cluster) leader() (NodeID, bool) {
 	c.t.Helper()
 
@@ -350,7 +261,6 @@ func (c *cluster) leader() (NodeID, bool) {
 	return best, found
 }
 
-// mustLeader returns the current leader, failing the test if there is none.
 func (c *cluster) mustLeader() NodeID {
 	c.t.Helper()
 	id, ok := c.leader()
@@ -360,7 +270,6 @@ func (c *cluster) mustLeader() NodeID {
 	return id
 }
 
-// awaitLeader ticks until a leader emerges, up to a bound.
 func (c *cluster) awaitLeader(maxTicks int) NodeID {
 	c.t.Helper()
 	for range maxTicks {
@@ -373,9 +282,6 @@ func (c *cluster) awaitLeader(maxTicks int) NodeID {
 	return None
 }
 
-// commands returns the data of the normal entries a node has applied, skipping
-// the no-op entries leaders append on election. This is the node's view of the
-// replicated state machine's input.
 func (c *cluster) commands(id NodeID) []string {
 	out := []string{}
 	for _, e := range c.applied[id] {
@@ -386,11 +292,6 @@ func (c *cluster) commands(id NodeID) []string {
 	return out
 }
 
-// assertAppliedConsistent checks State Machine Safety across the cluster: no
-// two nodes may apply different entries at the same index.
-//
-// Nodes are allowed to be at different points in the log — a slow follower has
-// simply applied less — so this compares only the overlapping prefix.
 func (c *cluster) assertAppliedConsistent() {
 	c.t.Helper()
 
@@ -409,7 +310,6 @@ func (c *cluster) assertAppliedConsistent() {
 	}
 }
 
-// assertCommitted checks that a node has committed at least through index i.
 func (c *cluster) assertCommitted(id NodeID, i Index) {
 	c.t.Helper()
 	if got := c.node(id).CommitIndex(); got < i {
@@ -418,8 +318,6 @@ func (c *cluster) assertCommitted(id NodeID, i Index) {
 	}
 }
 
-// countCommitted reports how many nodes have committed through index i, which
-// is how a test checks that a majority — not merely the leader — holds an entry.
 func (c *cluster) countCommitted(i Index) int {
 	count := 0
 	for _, id := range c.ids {
@@ -430,7 +328,6 @@ func (c *cluster) countCommitted(i Index) int {
 	return count
 }
 
-// logEntries returns everything in a node's log, for assertions and dumps.
 func (c *cluster) logEntries(id NodeID) []Entry {
 	c.t.Helper()
 	s := c.storages[id]
@@ -441,9 +338,6 @@ func (c *cluster) logEntries(id NodeID) []Entry {
 	return entries
 }
 
-// dump renders the whole cluster as a table. It is attached to failure
-// messages, so a broken invariant is diagnosable from the test output alone
-// rather than needing a re-run under a debugger.
 func (c *cluster) dump() string {
 	var b []byte
 	b = append(b, "cluster state:\n"...)

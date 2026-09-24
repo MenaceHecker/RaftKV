@@ -2,14 +2,6 @@ package raft
 
 import "testing"
 
-// Tests for bounding how much a single Ready hands back to be applied.
-//
-// Applying runs on whichever goroutine drives the node, and that goroutine
-// also ticks the clock and reads incoming messages. A batch large enough to
-// take a noticeable time therefore stops the node being a cluster member for
-// exactly that long: no heartbeats sent, none answered, its own election timer
-// not even counted. The cap is what keeps a replay from doing that.
-
 func TestNextCommittedStopsAtTheCap(t *testing.T) {
 	st := NewMemoryStorage()
 	entries := make([]Entry, 100)
@@ -30,8 +22,6 @@ func TestNextCommittedStopsAtTheCap(t *testing.T) {
 	if len(got) != 10 {
 		t.Fatalf("got %d entries, want 10", len(got))
 	}
-	// It must be the next ten, not any ten: entries are only meaningful in
-	// order, and applying out of order would corrupt the state machine.
 	if got[0].Index != 1 || got[9].Index != 10 {
 		t.Errorf("got indexes %d..%d, want 1..10", got[0].Index, got[9].Index)
 	}
@@ -80,8 +70,6 @@ func TestHasUnapplied(t *testing.T) {
 }
 
 func TestReadyHandsBackAtMostTheCap(t *testing.T) {
-	// The end to end version, through the public contract rather than the
-	// log's internals.
 	st := &countingStorage{Storage: NewMemoryStorage()}
 	n, err := NewNode(Config{
 		ID:                  1,
@@ -98,8 +86,6 @@ func TestReadyHandsBackAtMostTheCap(t *testing.T) {
 		t.Fatalf("campaign: %v", err)
 	}
 
-	// A sole voter commits as it proposes, so this builds a backlog of
-	// committed but unapplied entries without any network at all.
 	datas := make([][]byte, 30)
 	for i := range datas {
 		datas[i] = []byte("cmd")
@@ -130,7 +116,6 @@ func TestReadyHandsBackAtMostTheCap(t *testing.T) {
 	if batches < 4 {
 		t.Errorf("the backlog came back in %d batches; the cap is not being exercised", batches)
 	}
-	// Nothing may be skipped on the way.
 	if total < 30 {
 		t.Errorf("only %d entries were handed back in total, want at least 30", total)
 	}

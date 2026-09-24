@@ -11,20 +11,6 @@ import (
 	"testing"
 )
 
-// The README states numbers as fact: how many tests there are, how many fuzz
-// targets, how large the code is. Nobody recomputes those when they change, so
-// they drift, and a document that is confidently wrong about something
-// checkable invites doubt about the parts that are harder to check.
-//
-// They have drifted twice in this repository. At one point the README claimed
-// 177 tests in one paragraph and 367 in another, when there were 434. The
-// round that fixed those introduced a fresh error in the same sentence.
-//
-// So the counts are checked the way the determinism rules above are checked:
-// mechanically, as part of the suite. Adding tests now means editing one
-// number in the README, and the failure says which.
-
-// repoRoot is where the module lives, relative to this package.
 const repoRoot = "../.."
 
 func TestReadmeTestCountIsCurrent(t *testing.T) {
@@ -32,19 +18,16 @@ func TestReadmeTestCountIsCurrent(t *testing.T) {
 
 	readme := readFile(t, filepath.Join(repoRoot, "README.md"))
 
-	// "442 tests and seven fuzz targets, ..."
 	claimed := extractInt(t, readme, `(\d+) tests and \w+ fuzz targets`)
 	if claimed != tests {
 		t.Errorf("the README opens by claiming %d tests; there are %d", claimed, tests)
 	}
 
-	// "... across 442 tests. The ratio is not an accident."
 	alsoClaimed := extractInt(t, readme, `across ([\d,]+) tests`)
 	if alsoClaimed != tests {
 		t.Errorf("the layout section claims %d tests; there are %d", alsoClaimed, tests)
 	}
 
-	// The fuzz count is spelled out, so it is matched by word.
 	words := map[int]string{
 		5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
 	}
@@ -58,10 +41,6 @@ func TestReadmeTestCountIsCurrent(t *testing.T) {
 }
 
 func TestReadmeLineCountsAreRoughlyRight(t *testing.T) {
-	// These are hedged with "roughly" in the text, so they are held to a
-	// tolerance rather than to the digit. The point is to catch a number that
-	// has stopped describing the repository, not to force an edit for every
-	// line added.
 	const tolerance = 0.10
 
 	impl, test := countLines(t)
@@ -89,9 +68,6 @@ func TestReadmeLineCountsAreRoughlyRight(t *testing.T) {
 }
 
 func TestChaosReportMatchesTheScenarioCount(t *testing.T) {
-	// The report is generated, so its own two numbers should agree with each
-	// other. A mismatch means a scenario errored in a way that still let the
-	// report be written.
 	report := readFile(t, filepath.Join(repoRoot, "docs", "chaos-report.md"))
 
 	m := regexp.MustCompile(`(\d+) of (\d+) scenarios held`).FindStringSubmatch(report)
@@ -103,7 +79,6 @@ func TestChaosReportMatchesTheScenarioCount(t *testing.T) {
 		t.Errorf("the committed chaos report says %s of %s scenarios held", held, total)
 	}
 
-	// And the README should not claim more scenarios than the report ran.
 	readme := readFile(t, filepath.Join(repoRoot, "README.md"))
 	words := map[string]string{
 		"Twenty-one": "21", "Twenty-two": "22", "Twenty-three": "23",
@@ -116,7 +91,6 @@ func TestChaosReportMatchesTheScenarioCount(t *testing.T) {
 	}
 }
 
-// countFunctions counts test and fuzz functions across the module.
 func countFunctions(t *testing.T) (tests, fuzz int) {
 	t.Helper()
 
@@ -138,7 +112,6 @@ func countFunctions(t *testing.T) (tests, fuzz int) {
 	return tests, fuzz
 }
 
-// countLines counts implementation and test lines, excluding generated code.
 func countLines(t *testing.T) (impl, test int) {
 	t.Helper()
 
@@ -156,7 +129,6 @@ func countLines(t *testing.T) (impl, test int) {
 	return impl, test
 }
 
-// walkGo visits every Go file in the module outside .git.
 func walkGo(t *testing.T, visit func(path string, isTest bool)) {
 	t.Helper()
 
@@ -190,8 +162,6 @@ func readFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// extractInt pulls the first capture group out of src and parses it, allowing
-// thousands separators.
 func extractInt(t *testing.T, src, pattern string) int {
 	t.Helper()
 

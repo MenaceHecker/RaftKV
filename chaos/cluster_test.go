@@ -7,15 +7,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Tests for the chaos cluster.
-//
-// Like the network, this is test infrastructure that needs testing. The
-// specific risk is a harness that appears to inject a fault but does not: a
-// crash that leaves the node running, a history that records an unknown
-// outcome as a success, a convergence check that compares nothing. Every one
-// of those makes the scenarios built on top pass for the wrong reason.
-
-// newTestCluster builds a cluster and fails the test on error.
 func newTestCluster(t *testing.T, cfg Config) *Cluster {
 	t.Helper()
 	c, err := NewCluster(cfg)
@@ -25,7 +16,6 @@ func newTestCluster(t *testing.T, cfg Config) *Cluster {
 	return c
 }
 
-// tick advances the cluster, failing the test on error.
 func tick(t *testing.T, c *Cluster, n int) {
 	t.Helper()
 	if err := c.TickN(n); err != nil {
@@ -33,7 +23,6 @@ func tick(t *testing.T, c *Cluster, n int) {
 	}
 }
 
-// awaitLeader waits for a leader, failing the test if none appears.
 func awaitLeader(t *testing.T, c *Cluster) raft.NodeID {
 	t.Helper()
 	id, err := c.AwaitLeader(500)
@@ -43,7 +32,6 @@ func awaitLeader(t *testing.T, c *Cluster) raft.NodeID {
 	return id
 }
 
-// writeAndSettle writes a key and ticks until the operation settles.
 func writeAndSettle(t *testing.T, c *Cluster, client int, key, value string) *Op {
 	t.Helper()
 	op := c.Write(client, key, value)
@@ -62,8 +50,6 @@ func TestClusterElectsALeaderOnAPerfectNetwork(t *testing.T) {
 
 	tick(t, c, 20)
 
-	// Everyone else must agree, or the cluster is not actually settled and
-	// any scenario built on it would be racing an election.
 	for _, id := range c.IDs() {
 		if id == leader {
 			continue
@@ -99,9 +85,6 @@ func TestWritesAndReadsSucceed(t *testing.T) {
 }
 
 func TestARunIsReproducible(t *testing.T) {
-	// The property the whole harness exists for. A scenario that fails must
-	// fail the same way when re-run, or the failure cannot be investigated and
-	// the suite only teaches people to run it again.
 	run := func() string {
 		c := newTestCluster(t, Config{
 			Nodes: 5, Seed: 99,
@@ -137,8 +120,6 @@ func TestARunIsReproducible(t *testing.T) {
 }
 
 func TestCrashStopsANodeCompletely(t *testing.T) {
-	// A crashed node must stop participating entirely. One that kept ticking
-	// would make every crash scenario a test of a healthy cluster.
 	c := newTestCluster(t, Config{Nodes: 3, Seed: 3})
 	leader := awaitLeader(t, c)
 
@@ -160,8 +141,6 @@ func TestCrashStopsANodeCompletely(t *testing.T) {
 		t.Fatal("a crashed node still has a live Raft node")
 	}
 
-	// The rest of the cluster keeps working, and the crashed node learns
-	// nothing while it is down.
 	writeAndSettle(t, c, 1, "x", "during-outage")
 	tick(t, c, 30)
 
@@ -175,9 +154,6 @@ func TestCrashStopsANodeCompletely(t *testing.T) {
 }
 
 func TestARestartedNodeRebuildsItsStateMachine(t *testing.T) {
-	// The state machine is volatile; only the log survives. A restart that
-	// kept the old state machine would skip the recovery path entirely, which
-	// is the most interesting thing a crash tests.
 	c := newTestCluster(t, Config{Nodes: 3, Seed: 4})
 	leader := awaitLeader(t, c)
 
@@ -200,8 +176,6 @@ func TestARestartedNodeRebuildsItsStateMachine(t *testing.T) {
 		t.Fatalf("Restart: %v", err)
 	}
 
-	// Immediately after the restart the state machine is empty; it has to
-	// replay the log to catch up.
 	if got := c.machines[victim].Applied(); got != 0 {
 		t.Fatalf("a restarted node's state machine starts at applied %d, want 0", got)
 	}
@@ -218,8 +192,6 @@ func TestARestartedNodeRebuildsItsStateMachine(t *testing.T) {
 }
 
 func TestCrashDiscardsMessagesInFlightToTheNode(t *testing.T) {
-	// Delivering pre-crash messages to a restarted process would hand a node
-	// traffic from before it existed.
 	c := newTestCluster(t, Config{
 		Nodes: 3, Seed: 5,
 		Faults: Faults{MinDelay: 5, MaxDelay: 5},
@@ -240,12 +212,8 @@ func TestCrashDiscardsMessagesInFlightToTheNode(t *testing.T) {
 }
 
 func TestOperationsAgainstNoLeaderFailRatherThanHang(t *testing.T) {
-	// A write nobody could have accepted definitely did not happen, and saying
-	// so is what lets the checker exclude it. Recording it as unknown would
-	// make every history needlessly ambiguous.
 	c := newTestCluster(t, Config{Nodes: 3, Seed: 6})
 
-	// No ticks yet, so no election has happened.
 	op := c.Write(1, "x", "v")
 	if op.Status != StatusFailed {
 		t.Fatalf("a write with no leader has status %s, want failed", op.Status)
@@ -257,9 +225,6 @@ func TestOperationsAgainstNoLeaderFailRatherThanHang(t *testing.T) {
 }
 
 func TestCrashingTheServingNodeMakesItsOperationsUnknown(t *testing.T) {
-	// The distinction the checker depends on. A write the crashed node had
-	// already replicated can still commit through the others, so its outcome
-	// is genuinely unknown — not failed.
 	c := newTestCluster(t, Config{Nodes: 3, Seed: 7})
 	leader := awaitLeader(t, c)
 
@@ -309,9 +274,6 @@ func TestHistoryRecordsEveryOperationInOrder(t *testing.T) {
 }
 
 func TestOperationsOverlapInTime(t *testing.T) {
-	// Concurrency is the point. A history where every operation returned
-	// before the next was invoked has exactly one possible ordering, and
-	// checking it for linearizability proves nothing.
 	c := newTestCluster(t, Config{
 		Nodes: 3, Seed: 9,
 		Faults: Faults{MinDelay: 1, MaxDelay: 4},
@@ -331,8 +293,6 @@ func TestOperationsOverlapInTime(t *testing.T) {
 	overlaps := 0
 	for i := range history {
 		for j := i + 1; j < len(history); j++ {
-			// Two operations overlap when neither returned before the other
-			// was invoked.
 			if history[i].Returned >= history[j].Invoked &&
 				history[j].Returned >= history[i].Invoked {
 				overlaps++
@@ -346,9 +306,6 @@ func TestOperationsOverlapInTime(t *testing.T) {
 }
 
 func TestConvergenceComparesActualState(t *testing.T) {
-	// Comparing applied indexes would call two nodes converged while they held
-	// different data. The check uses state machine snapshots, which are a
-	// deterministic function of the state.
 	c := newTestCluster(t, Config{Nodes: 3, Seed: 10})
 	awaitLeader(t, c)
 
@@ -365,7 +322,6 @@ func TestConvergenceComparesActualState(t *testing.T) {
 		t.Fatalf("a healthy cluster did not converge\n%s", c.Dump())
 	}
 
-	// Corrupt one node's state machine directly. The check must notice.
 	if err := c.machines[c.IDs()[1]].Apply(raft.Entry{
 		Term:  99,
 		Index: c.machines[c.IDs()[1]].Applied() + 1,
@@ -385,8 +341,6 @@ func TestConvergenceComparesActualState(t *testing.T) {
 }
 
 func TestElectionSafetyIsCheckedContinuously(t *testing.T) {
-	// Two leaders in one term is the violation everything else rests on, so
-	// asking for the leader reports it rather than picking one.
 	c := newTestCluster(t, Config{Nodes: 3, Seed: 11})
 	awaitLeader(t, c)
 
@@ -396,8 +350,6 @@ func TestElectionSafetyIsCheckedContinuously(t *testing.T) {
 }
 
 func TestClusterSurvivesLossAndDelay(t *testing.T) {
-	// The basic robustness claim: under a network that drops and reorders,
-	// the cluster still elects, still commits, and still converges.
 	c := newTestCluster(t, Config{
 		Nodes: 5, Seed: 12,
 		Faults: Faults{LossRate: 0.2, MinDelay: 0, MaxDelay: 5, DuplicateRate: 0.05},
@@ -425,7 +377,6 @@ func TestClusterSurvivesLossAndDelay(t *testing.T) {
 		t.Fatalf("the cluster did not converge under loss and delay\n%s", c.Dump())
 	}
 
-	// The run must actually have been adverse, or it proves nothing.
 	st := c.Network().Stats()
 	if st.Dropped == 0 {
 		t.Fatal("no messages were dropped, so this run was not adverse")

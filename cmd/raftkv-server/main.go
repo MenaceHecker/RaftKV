@@ -1,20 +1,3 @@
-// Command raftkv-server runs one node of a RaftKV cluster.
-//
-// It is deliberately thin. Everything it does is assemble pieces that already
-// exist and are already tested — the consensus core, the durable storage, the
-// state machine, the transport — and then get out of the way. Logic that lives
-// here would be logic no test covers, because a main package is the one part of
-// a Go program that cannot be exercised from another package.
-//
-// A three-node cluster on one machine:
-//
-//	raftkv-server --id 1 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003 --data-dir /tmp/n1
-//	raftkv-server --id 2 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003 --data-dir /tmp/n2
-//	raftkv-server --id 3 --peers 1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003 --data-dir /tmp/n3
-//
-// Every node is given the same peer list, including itself. Nodes may be
-// started in any order: a node that comes up first will campaign, fail to reach
-// a majority, and keep trying until the others appear.
 package main
 
 import (
@@ -50,7 +33,6 @@ func main() {
 	}
 }
 
-// options is everything the process is configured with.
 type options struct {
 	id       uint64
 	peers    string
@@ -111,20 +93,12 @@ func run() error {
 
 	bind := opt.listen
 	if bind == "" {
-		// Default to the address the rest of the cluster was told to use. A
-		// node listening somewhere other than where it is advertised is a
-		// misconfiguration that shows up only as unexplained unavailability,
-		// so the two agree unless someone deliberately separates them — which
-		// is what -listen is for, when the bind address differs from the
-		// routable one.
 		bind = peers[self]
 	}
 
 	ids := sortedIDs(peers)
 	slog.Info("starting", "id", self, "listen", bind, "peers", ids, "data-dir", opt.dataDir)
 
-	// Bind before starting the node, so a port conflict fails immediately
-	// rather than after the node has written to its data directory.
 	listener, err := net.Listen("tcp", bind)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", bind, err)
@@ -140,10 +114,6 @@ func run() error {
 	}
 	defer peerTransport.Close()
 
-	// The registry is built before the node so the node can be handed the
-	// recorder at construction. Metrics that only start once an HTTP server
-	// is up would miss the first election, which is the one most worth
-	// seeing.
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
 		collectors.NewGoCollector(),
@@ -174,8 +144,6 @@ func run() error {
 		return err
 	}
 
-	// The collector samples the node and the transport at scrape time, so it
-	// can only be registered once both exist.
 	registry.MustRegister(metrics.NewCollector(n, peerTransport))
 
 	metricsServer, err := serveMetrics(opt.metrics, registry, n)
@@ -185,8 +153,6 @@ func run() error {
 		return err
 	}
 
-	// Close the loop for messages this node addresses to itself. Until this is
-	// set they are dropped, which is harmless but pointless.
 	peerTransport.SetLocal(n)
 
 	raftServer, err := transport.NewRaftServer(n)
@@ -212,8 +178,6 @@ func run() error {
 		serveErr <- grpcServer.Serve(listener)
 	}()
 
-	// A leader election is the first thing anyone wants to see, so report it
-	// once rather than leaving the operator to poll.
 	go watchLeadership(n)
 
 	signals := make(chan os.Signal, 1)
@@ -228,11 +192,6 @@ func run() error {
 			return fmt.Errorf("serving: %w", err)
 		}
 	case <-n.Done():
-		// The node stopped without being asked to, which it does when it can
-		// no longer write. Carrying on would leave a process accepting
-		// connections for a node that is gone: out of the client service for
-		// failing readiness, still passing liveness, and never replaced.
-		// Exiting non-zero is what gets it restarted and noticed.
 		stopServer(grpcServer)
 		if metricsServer != nil {
 			metricsServer.Close()
@@ -240,14 +199,9 @@ func run() error {
 		return errors.New("the consensus loop stopped")
 	}
 
-	// Stop accepting work before stopping the node, so nothing arrives for a
-	// node that is on its way down and would only fail it.
 	stopServer(grpcServer)
 
 	if metricsServer != nil {
-		// Close rather than Shutdown: a scrape in flight has nothing worth
-		// waiting for, and a held-open connection should not delay the node
-		// releasing its files.
 		metricsServer.Close()
 	}
 
@@ -258,25 +212,8 @@ func run() error {
 	return nil
 }
 
-// shutdownGrace is how long in-flight requests are given to finish before the
-// server stops waiting for them.
-//
-// It has to exist because GracefulStop alone is not bounded by anything this
-// process controls. It refuses new calls on every service at once, Raft's
-// included, so a leader stops receiving the follower responses it needs to
-// commit and the client writes already in its hands can no longer finish.
-// They then sit there until the client gives up, and GracefulStop waits for
-// them: measured, shutdown took 3, 10 and 20 seconds for clients whose
-// request timeouts were 3, 10 and 20 seconds. A client that waits longer than
-// the orchestrator's grace period turns an orderly stop into a kill.
-//
-// Five seconds is comfortably longer than a healthy write and comfortably
-// shorter than the thirty second grace period the Kubernetes manifest asks
-// for, leaving room for the node to close its files afterwards.
 const shutdownGrace = 5 * time.Second
 
-// stopServer stops accepting work, waiting a bounded time for calls already
-// in progress.
 func stopServer(srv *grpc.Server) {
 	done := make(chan struct{})
 	go func() {
@@ -287,10 +224,6 @@ func stopServer(srv *grpc.Server) {
 	select {
 	case <-done:
 	case <-time.After(shutdownGrace):
-		// Whatever is still outstanding is waiting on something this node
-		// has already stopped being able to provide. Cutting it off returns
-		// an error to those clients, which is the honest answer and one they
-		// will retry against the new leader.
 		slog.Warn("in-flight requests did not finish in time; closing connections",
 			"grace", shutdownGrace)
 		srv.Stop()
@@ -298,15 +231,6 @@ func stopServer(srv *grpc.Server) {
 	}
 }
 
-// serveMetrics starts the observability endpoint, or returns nil if no
-// address was configured.
-//
-// It runs on its own listener rather than alongside the Raft and client
-// services. Metrics are most valuable exactly when the cluster is unhealthy,
-// and sharing a server with the traffic that is failing is how a monitoring
-// endpoint ends up unavailable during the incident it exists to explain. A
-// separate port also keeps it easy to expose internally without exposing the
-// data plane.
 func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*http.Server, error) {
 	if addr == "" {
 		return nil, nil
@@ -320,18 +244,6 @@ func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*ht
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler(registry))
 
-	// Liveness: the process is up and its Raft loop is still running.
-	//
-	// The stopped check is not belt and braces. Status answers from the loop
-	// while there is one and returns a zero value once there is not, so on
-	// its own it cannot tell a node whose loop has exited from a healthy one
-	// that has yet to elect anybody. Both would report live, and a node that
-	// stopped because it could no longer write would keep passing liveness
-	// for as long as the process ran.
-	//
-	// It must not depend on there being a leader. During an election nobody
-	// has one, and a liveness probe that checked would fail on every node at
-	// once and have the whole cluster restarted.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if n.Stopped() {
 			http.Error(w, "the consensus loop has stopped", http.StatusServiceUnavailable)
@@ -343,9 +255,6 @@ func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*ht
 			st.ID, st.State, st.Term, st.Leader, st.Commit, st.Applied)
 	})
 
-	// Readiness: this node can serve. A node with no leader is running
-	// correctly but cannot answer a linearizable read, so a load balancer
-	// should route around it rather than send traffic it will refuse.
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		if n.Status().Leader == 0 {
 			http.Error(w, "no leader", http.StatusServiceUnavailable)
@@ -354,26 +263,16 @@ func serveMetrics(addr string, registry *prometheus.Registry, n *node.Node) (*ht
 		w.Write([]byte("ok\n"))
 	})
 
-	// Addr records what was actually bound, which matters when the
-	// configured address asked for port zero. Serve ignores it in favour of
-	// the listener, so this is a label rather than an instruction.
 	srv := &http.Server{Handler: mux, Addr: listener.Addr().String()}
 	go func() {
 		slog.Info("serving metrics", "address", srv.Addr)
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			// The node keeps running: losing observability is bad, but
-			// stopping a healthy cluster member over it is worse.
 			slog.Error("metrics server stopped", "error", err)
 		}
 	}()
 	return srv, nil
 }
 
-// watchLeadership logs leadership changes.
-//
-// The metrics record the same transitions, but a log line is what somebody
-// reads first when a cluster will not serve: one that cannot elect a leader
-// looks identical to one that is merely idle.
 func watchLeadership(n *node.Node) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -400,14 +299,12 @@ func watchLeadership(n *node.Node) {
 	}
 }
 
-// parsePeers reads the id=address list.
 func parsePeers(spec string) (map[raft.NodeID]string, error) {
 	if strings.TrimSpace(spec) == "" {
 		return nil, errors.New("-peers is required, as id=host:port,id=host:port")
 	}
 
 	peers := make(map[raft.NodeID]string)
-	// Addresses are tracked alongside IDs so a collision in either is caught.
 	addresses := make(map[string]raft.NodeID)
 	for _, part := range strings.Split(spec, ",") {
 		part = strings.TrimSpace(part)
@@ -436,13 +333,6 @@ func parsePeers(spec string) (map[raft.NodeID]string, error) {
 			return nil, fmt.Errorf("peer %d appears more than once", id)
 		}
 		if other, taken := addresses[addr]; taken {
-			// Two members advertising one address is a typo with an
-			// expensive failure mode. The second node to start cannot bind
-			// the port and dies, and everyone else dialing it reaches the
-			// first node's process instead, so the cluster believes it has a
-			// member it does not. Quorum is still met by the survivors, which
-			// is the problem: nothing looks broken, and the fault tolerance
-			// that was paid for is quietly gone.
 			return nil, fmt.Errorf("peers %d and %d are both at %s", other, id, addr)
 		}
 		addresses[addr] = raft.NodeID(id)
@@ -455,11 +345,6 @@ func parsePeers(spec string) (map[raft.NodeID]string, error) {
 	return peers, nil
 }
 
-// sortedIDs returns the member IDs in ascending order.
-//
-// The order is not arbitrary: every node derives its initial configuration
-// from this list, and giving them the same membership in a different order
-// would be a needless source of difference between nodes.
 func sortedIDs(peers map[raft.NodeID]string) []raft.NodeID {
 	out := make([]raft.NodeID, 0, len(peers))
 	for id := range peers {
@@ -469,7 +354,6 @@ func sortedIDs(peers map[raft.NodeID]string) []raft.NodeID {
 	return out
 }
 
-// newLogger builds the process logger.
 func newLogger(level string) (*slog.Logger, error) {
 	var l slog.Level
 	switch strings.ToLower(level) {

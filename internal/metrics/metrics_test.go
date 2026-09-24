@@ -15,26 +15,10 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/transport"
 )
 
-// Tests for the metrics layer.
-//
-// The collectors themselves are close to trivial, so testing them alone would
-// mostly confirm that Prometheus works. What is genuinely worth testing is the
-// wiring: that a real node driving real consensus produces the numbers an
-// operator would be reading during an incident. Most of these tests therefore
-// run an actual single-node cluster and assert on what comes out of the
-// registry, which is the only thing that catches a hook that was never called.
-
-// discardTransport satisfies the driver's Transport for a single-node cluster,
-// where there is nobody to send to.
 type discardTransport struct{}
 
 func (discardTransport) Send([]raft.Message) {}
 
-// startNode brings up a one-node cluster wired to a fresh registry.
-//
-// One node is enough for everything here: it commits through the same code
-// path a five-node cluster does, including the fsync, and it reaches a leader
-// in a single election with no network to coordinate.
 func startNode(t *testing.T) (*node.Node, *Metrics, *prometheus.Registry) {
 	t.Helper()
 
@@ -54,7 +38,6 @@ func startNode(t *testing.T) (*node.Node, *Metrics, *prometheus.Registry) {
 	}
 	t.Cleanup(func() { n.Stop() })
 
-	// Wait for the node to elect itself; nothing can be proposed before that.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if n.Status().State == raft.Leader {
@@ -89,17 +72,12 @@ func TestProposalMetricsRecordSuccess(t *testing.T) {
 	if got := counter(t, reg, "raftkv_proposals_total", "ok"); got != writes {
 		t.Errorf("proposals_total{result=ok} = %v, want %d", got, writes)
 	}
-	// Every other outcome must still be zero, not merely absent: a hook that
-	// mislabelled its result would otherwise pass the check above.
 	for _, result := range []string{"not_leader", "lost_leadership", "timeout", "error"} {
 		if got := counter(t, reg, "raftkv_proposals_total", result); got != 0 {
 			t.Errorf("proposals_total{result=%s} = %v, want 0", result, got)
 		}
 	}
 
-	// The histogram must have observed the same number of writes. A counter
-	// that moved without a matching observation would mean latency is being
-	// silently lost.
 	if got := histogramCount(t, reg, "raftkv_proposal_duration_seconds"); got != writes {
 		t.Errorf("proposal_duration_seconds count = %d, want %d", got, writes)
 	}
@@ -108,9 +86,6 @@ func TestProposalMetricsRecordSuccess(t *testing.T) {
 func TestFailedProposalIsLabelled(t *testing.T) {
 	n, _, reg := startNode(t)
 
-	// A context that has already expired never reaches the Raft loop, so the
-	// proposal fails on the way in. That is the path a client hits when the
-	// node is overloaded, and it must not be counted as a success.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -163,9 +138,6 @@ func TestPersistAndApplyAreObserved(t *testing.T) {
 		t.Fatalf("propose: %v", err)
 	}
 
-	// Persisting happens inside the consensus core, through the wrapped
-	// Storage. If that decorator were dropped the node would still work
-	// perfectly and only this would notice.
 	if got := histogramCount(t, reg, "raftkv_persist_duration_seconds"); got == 0 {
 		t.Error("persist_duration_seconds recorded nothing; the storage decorator is not in the path")
 	}
@@ -173,7 +145,6 @@ func TestPersistAndApplyAreObserved(t *testing.T) {
 		t.Error("persisted_entries_total is zero")
 	}
 
-	// At minimum the leader's no-op and this write were applied.
 	if got := gatherValue(t, reg, "raftkv_applied_entries_total"); got < 2 {
 		t.Errorf("applied_entries_total = %v, want at least 2", got)
 	}
@@ -185,8 +156,6 @@ func TestPersistAndApplyAreObserved(t *testing.T) {
 func TestLeadershipIsCountedAsAnEvent(t *testing.T) {
 	n, _, reg := startNode(t)
 
-	// Becoming leader is itself a change, so it must already be counted by
-	// the time the node reports Leader.
 	if got := gatherValue(t, reg, "raftkv_leader_changes_total"); got < 1 {
 		t.Errorf("leader_changes_total = %v, want at least 1", got)
 	}
@@ -227,15 +196,12 @@ func TestSnapshotMetricsFollowCompaction(t *testing.T) {
 	if got := gatherValue(t, reg, "raftkv_snapshots_created_total"); got != 1 {
 		t.Errorf("snapshots_created_total = %v, want 1", got)
 	}
-	// The index must be the applied index, not a placeholder.
 	applied := float64(n.Status().Applied)
 	if got := gatherValue(t, reg, "raftkv_snapshot_index"); got != applied {
 		t.Errorf("snapshot_index = %v, want the applied index %v", got, applied)
 	}
 }
 
-// fakeStatus lets the collector be tested against values a real node would
-// take a long time to reach.
 type fakeStatus struct{ st node.Status }
 
 func (f fakeStatus) Status() node.Status { return f.st }
@@ -269,9 +235,6 @@ raftkv_cluster_voters 3
 }
 
 func TestCollectorClampsImpossibleLag(t *testing.T) {
-	// Applied ahead of commit should never happen. If it ever did, the
-	// unsigned subtraction would wrap to something astronomically large and
-	// an operator would chase a phantom backlog, so it reports zero instead.
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(NewCollector(fakeStatus{node.Status{Commit: 5, Applied: 9}}, nil))
 
@@ -300,8 +263,6 @@ raftkv_peer_messages_dropped_total{address="localhost:9003",peer="3"} 0
 }
 
 func TestCollectorToleratesNoTransport(t *testing.T) {
-	// A single-node cluster has no peers at all. Collecting must still work
-	// rather than panicking on a nil source.
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(NewCollector(fakeStatus{node.Status{Commit: 3, Applied: 3}}, nil))
 
@@ -328,8 +289,6 @@ func TestHandlerServesExpositionFormat(t *testing.T) {
 }
 
 func TestOutcomeCountersStartAtZero(t *testing.T) {
-	// A dashboard panel reading "no data" is ambiguous in a way that "0" is
-	// not, so every outcome exists before the first one occurs.
 	reg := prometheus.NewRegistry()
 	New(reg)
 

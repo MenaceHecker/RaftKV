@@ -14,16 +14,6 @@ import (
 	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
 
-// Tests for the snapshot streaming path.
-//
-// A snapshot is the only Raft message whose size follows the data rather than
-// the protocol, and it is the only one a receiver assembles from pieces. That
-// makes it the only place where a partially arrived message is possible, and
-// a half-restored state machine is silently wrong rather than merely behind.
-// These tests are mostly about what the receiver refuses.
-
-// snapshotServer starts a RaftServer over a real connection and returns a
-// client for it along with the stepper it feeds.
 func snapshotServer(t *testing.T) (raftkvv1.RaftServiceClient, *recordingStepper) {
 	t.Helper()
 
@@ -52,7 +42,6 @@ func snapshotServer(t *testing.T) (raftkvv1.RaftServiceClient, *recordingStepper
 	return raftkvv1.NewRaftServiceClient(cc), stepper
 }
 
-// header builds a valid first frame for a snapshot stream.
 func header(index, term uint64) *raftkvv1.SnapshotChunk {
 	return &raftkvv1.SnapshotChunk{
 		Frame: &raftkvv1.SnapshotChunk_Header{
@@ -76,8 +65,6 @@ func dataFrame(b []byte) *raftkvv1.SnapshotChunk {
 func TestStreamedSnapshotIsReassembledInOrder(t *testing.T) {
 	client, stepper := snapshotServer(t)
 
-	// Three distinguishable pieces, so an implementation that reordered or
-	// dropped one would not produce the expected bytes by accident.
 	pieces := [][]byte{
 		bytes.Repeat([]byte("a"), 1000),
 		bytes.Repeat([]byte("b"), 1000),
@@ -120,8 +107,6 @@ func TestStreamedSnapshotIsReassembledInOrder(t *testing.T) {
 }
 
 func TestSnapshotStreamIsRefusedWithoutAHeader(t *testing.T) {
-	// Data with nothing describing it cannot be attributed to a snapshot, a
-	// term, or even a sender.
 	client, stepper := snapshotServer(t)
 
 	stream, err := client.DeliverSnapshot(context.Background())
@@ -159,8 +144,6 @@ func TestEmptySnapshotStreamIsRefused(t *testing.T) {
 }
 
 func TestSecondHeaderIsRefused(t *testing.T) {
-	// Two headers on one stream describe two different snapshots, and there
-	// is no correct way to pick one.
 	client, stepper := snapshotServer(t)
 
 	stream, err := client.DeliverSnapshot(context.Background())
@@ -173,8 +156,6 @@ func TestSecondHeaderIsRefused(t *testing.T) {
 	if err := stream.Send(dataFrame([]byte("x"))); err != nil {
 		t.Fatalf("sending data: %v", err)
 	}
-	// A second header may be refused on send or on close depending on when
-	// the server tears the stream down, so only the outcome is asserted.
 	_ = stream.Send(header(99, 9))
 	if _, err := stream.CloseAndRecv(); err == nil {
 		t.Fatal("the server accepted two headers on one stream")
@@ -185,11 +166,6 @@ func TestSecondHeaderIsRefused(t *testing.T) {
 }
 
 func TestSnapshotStreamStopsAtTheSizeLimit(t *testing.T) {
-	// A peer that never stops sending must not be able to exhaust the
-	// receiver's memory. The limit is generous, so this test drives it from
-	// the other side: it asserts the check is on the running total rather
-	// than on any single frame, by sending frames that are individually
-	// small.
 	if MaxSnapshotBytes < SnapshotChunkSize {
 		t.Fatalf("MaxSnapshotBytes %d is below one chunk", MaxSnapshotBytes)
 	}
@@ -203,8 +179,6 @@ func TestSnapshotStreamStopsAtTheSizeLimit(t *testing.T) {
 		t.Fatalf("sending header: %v", err)
 	}
 
-	// Send past the limit. The server should refuse partway through rather
-	// than accumulate everything and check at the end.
 	chunk := bytes.Repeat([]byte("z"), SnapshotChunkSize)
 	var sendErr error
 	for sent := 0; sent <= MaxSnapshotBytes; sent += len(chunk) {
@@ -221,8 +195,6 @@ func TestSnapshotStreamStopsAtTheSizeLimit(t *testing.T) {
 }
 
 func TestNonSnapshotMessagesStillUseTheUnaryCall(t *testing.T) {
-	// Streaming exists for the one message that needs it. Routing ordinary
-	// traffic through it would add a stream setup to every heartbeat.
 	client, stepper := snapshotServer(t)
 
 	m, err := MessageToWire(raft.Message{

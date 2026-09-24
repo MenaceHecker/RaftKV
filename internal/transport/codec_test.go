@@ -10,17 +10,6 @@ import (
 	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
 
-// Tests for the wire codec.
-//
-// Conversion bugs are the quiet kind. A message that decodes into something
-// subtly different from what was sent is worse than one that fails outright,
-// because the receiver acts on it and nothing reports a problem — a vote
-// request whose LastLogTerm was dropped, say, would make a voter grant a vote
-// it should have refused. So these tests check that every field survives, that
-// unrepresentable values are refused rather than coerced, and that the two
-// directions agree.
-
-// assertMessageEqual compares two core messages field by field.
 func assertMessageEqual(t *testing.T, got, want raft.Message) {
 	t.Helper()
 
@@ -134,10 +123,6 @@ func TestMessageRoundTrip(t *testing.T) {
 }
 
 func TestLocalSignalsHaveNoWireForm(t *testing.T) {
-	// Campaign, Propose, and ReadIndex are signals a node sends to itself. If
-	// they could be encoded, a peer could drive another node's internal state
-	// machine directly — forcing an election or injecting a proposal that
-	// never came from a client.
 	for _, typ := range []raft.MessageType{
 		raft.MsgCampaign,
 		raft.MsgPropose,
@@ -151,8 +136,6 @@ func TestLocalSignalsHaveNoWireForm(t *testing.T) {
 }
 
 func TestUnknownMessageTypeIsRejected(t *testing.T) {
-	// A peer speaking a newer protocol, or a damaged message, must not decode
-	// into a valid message of some other type.
 	wire := &raftkvv1.Message{
 		Type: raftkvv1.MessageType(9999),
 		From: 1, To: 2, Term: 3,
@@ -165,9 +148,6 @@ func TestUnknownMessageTypeIsRejected(t *testing.T) {
 }
 
 func TestUnspecifiedMessageTypeIsRejected(t *testing.T) {
-	// The zero value must not be meaningful. Proto3 cannot distinguish an
-	// unset field from one set to zero, so a truncated or empty message would
-	// otherwise decode as a valid vote request.
 	if _, err := MessageFromWire(&raftkvv1.Message{}); err == nil {
 		t.Fatal("an empty message decoded successfully; the zero enum value is meaningful")
 	}
@@ -188,9 +168,6 @@ func TestUnknownEntryTypeIsRejected(t *testing.T) {
 }
 
 func TestUnspecifiedEntryTypeIsRejected(t *testing.T) {
-	// Same reasoning one level down: an entry whose type field never arrived
-	// must not silently become a normal command that the state machine then
-	// tries to decode.
 	wire := &raftkvv1.Message{
 		Type: raftkvv1.MessageType_MESSAGE_TYPE_APPEND_REQUEST,
 		From: 1, To: 2, Term: 3,
@@ -218,18 +195,6 @@ func TestNilInputsAreRejected(t *testing.T) {
 }
 
 func TestEveryCoreMessageTypeIsMapped(t *testing.T) {
-	// A new inter-node message type added to the core must be given a wire
-	// form deliberately, not discovered missing at runtime when two nodes fail
-	// to talk to each other.
-	//
-	// This enumerates the core's message types rather than listing them,
-	// because a hand-written list cannot fail for a type nobody added to it.
-	// An earlier version of this test did list them, passed cleanly when
-	// pre-vote arrived, and the missing mapping surfaced instead as every
-	// election silently failing to send.
-	//
-	// Node-local signals are named explicitly, so adding one is a deliberate
-	// act too: the default for anything new is "must be on the wire".
 	localOnly := map[raft.MessageType]bool{
 		raft.MsgCampaign:  true,
 		raft.MsgPropose:   true,
@@ -242,7 +207,6 @@ func TestEveryCoreMessageTypeIsMapped(t *testing.T) {
 	for i := 0; i < 256; i++ {
 		typ := raft.MessageType(i)
 		if typ.String() == "Unknown" {
-			// Not a message type the core defines.
 			continue
 		}
 		checked++
@@ -274,8 +238,6 @@ func TestEveryCoreMessageTypeIsMapped(t *testing.T) {
 		}
 	}
 
-	// A guard on the guard: if String() ever stopped naming types, the loop
-	// above would quietly check nothing at all and still pass.
 	if checked < 10 {
 		t.Fatalf("only %d message types were found; the enumeration is broken", checked)
 	}
@@ -310,8 +272,6 @@ func TestEveryStateIsMapped(t *testing.T) {
 }
 
 func TestEmptyAndNilPayloadsAreDistinguishable(t *testing.T) {
-	// An entry with an empty payload is legitimate. It must survive the round
-	// trip as empty rather than becoming something the state machine rejects.
 	want := raft.Message{
 		Type: raft.MsgAppendRequest, From: 1, To: 2, Term: 1,
 		Entries: []raft.Entry{
@@ -337,8 +297,6 @@ func TestEmptyAndNilPayloadsAreDistinguishable(t *testing.T) {
 }
 
 func TestLargeEntryBatchRoundTrips(t *testing.T) {
-	// A follower far behind receives a large batch. Nothing may be dropped or
-	// reordered, or the log would silently diverge.
 	const count = 500
 
 	entries := make([]raft.Entry, count)
@@ -366,7 +324,6 @@ func TestLargeEntryBatchRoundTrips(t *testing.T) {
 
 	assertMessageEqual(t, got, want)
 
-	// Order is what the log depends on, so check indexes are still ascending.
 	for i, e := range got.Entries {
 		if e.Index != raft.Index(i+1) {
 			t.Fatalf("entry at position %d has index %d; the batch was reordered", i, e.Index)
@@ -375,9 +332,6 @@ func TestLargeEntryBatchRoundTrips(t *testing.T) {
 }
 
 func TestSnapshotMessageRoundTrips(t *testing.T) {
-	// A snapshot is the largest and most structured thing that crosses the
-	// wire, and the only message whose loss of a field would silently install
-	// the wrong state rather than fail. Every part of it has to survive.
 	want := raft.Message{
 		Type: raft.MsgInstallSnapshot, From: 1, To: 4, Term: 9,
 		Snapshot: &raft.Snapshot{
@@ -432,10 +386,6 @@ func TestSnapshotMessageRoundTrips(t *testing.T) {
 }
 
 func TestSnapshotJointFlagSurvivesAnEmptyIncomingSet(t *testing.T) {
-	// The flag is carried rather than inferred, and the wire form has to
-	// preserve that. A receiver that read "not joint" from an empty incoming
-	// set would decide on a single majority while the rest of the cluster
-	// still required two.
 	want := raft.Message{
 		Type: raft.MsgInstallSnapshot, From: 1, To: 2, Term: 3,
 		Snapshot: &raft.Snapshot{
@@ -459,8 +409,6 @@ func TestSnapshotJointFlagSurvivesAnEmptyIncomingSet(t *testing.T) {
 }
 
 func TestSnapshotResponseCarriesNoImage(t *testing.T) {
-	// The response only acknowledges; sending the image back would double the
-	// cost of every transfer for nothing.
 	want := raft.Message{
 		Type: raft.MsgInstallSnapshotResponse, From: 4, To: 1, Term: 9,
 		Success: true, MatchIndex: 500,
@@ -482,8 +430,6 @@ func TestSnapshotResponseCarriesNoImage(t *testing.T) {
 }
 
 func TestSnapshotWithNoIndexIsRejected(t *testing.T) {
-	// An image at index zero covers nothing while claiming to cover a prefix
-	// of the log. Installing it would replace a node's state with nothing.
 	wire := &raftkvv1.Message{
 		Type: raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT,
 		From: 1, To: 2, Term: 3,
@@ -496,8 +442,6 @@ func TestSnapshotWithNoIndexIsRejected(t *testing.T) {
 }
 
 func TestSnapshotWithNoConfigurationIsAccepted(t *testing.T) {
-	// A snapshot taken before membership ever changed legitimately records no
-	// configuration, and must not be mistaken for a damaged one.
 	wire := &raftkvv1.Message{
 		Type: raftkvv1.MessageType_MESSAGE_TYPE_INSTALL_SNAPSHOT,
 		From: 1, To: 2, Term: 3,
@@ -514,8 +458,6 @@ func TestSnapshotWithNoConfigurationIsAccepted(t *testing.T) {
 }
 
 func TestNonSnapshotMessagesCarryNoSnapshot(t *testing.T) {
-	// Every other message type must leave the field nil, or an ordinary append
-	// would arrive looking like a snapshot transfer.
 	for _, typ := range []raft.MessageType{
 		raft.MsgVoteRequest, raft.MsgVoteResponse,
 		raft.MsgAppendRequest, raft.MsgAppendResponse,

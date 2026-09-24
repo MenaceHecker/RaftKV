@@ -5,14 +5,6 @@ import (
 	"testing"
 )
 
-// Tests for compacting the in-memory storage.
-//
-// The index arithmetic here is the kind that is wrong by one and silent about
-// it: the log keeps a slice whose first element is not index one, and a
-// snapshot moves that origin. Getting it wrong would hand a follower the wrong
-// entry for an index and corrupt its log, so each boundary is checked rather
-// than assumed.
-
 func filledStorage(t *testing.T, n int) *MemoryStorage {
 	t.Helper()
 	st := NewMemoryStorage()
@@ -40,8 +32,6 @@ func TestCreateSnapshotKeepsLaterEntries(t *testing.T) {
 		t.Errorf("LastIndex = %d, want 10", got)
 	}
 
-	// Every surviving index must still return its own entry, not its
-	// neighbour's.
 	for i := Index(5); i <= 10; i++ {
 		got, err := st.Entries(i, i+1)
 		if err != nil {
@@ -57,9 +47,6 @@ func TestCreateSnapshotKeepsLaterEntries(t *testing.T) {
 }
 
 func TestCreateSnapshotAnswersForItsOwnIndex(t *testing.T) {
-	// The snapshot point's term has to remain answerable. A leader
-	// replicating the first entry after it asks for exactly this, and a
-	// storage that forgot would force a pointless snapshot transfer.
 	st := filledStorage(t, 10)
 	want, err := st.Term(4)
 	if err != nil {
@@ -86,9 +73,6 @@ func TestSnapshotCarriesWhatWasGiven(t *testing.T) {
 	st := filledStorage(t, 10)
 	conf := ConfState{Voters: []NodeID{1, 2, 3}}
 
-	// Read the term from the log rather than recomputing it: the entry at
-	// index 6 sits at slice position 5, and deriving it twice is how a test
-	// ends up asserting its own arithmetic instead of the code's.
 	wantTerm, err := st.Term(6)
 	if err != nil {
 		t.Fatalf("Term(6): %v", err)
@@ -111,7 +95,6 @@ func TestSnapshotCarriesWhatWasGiven(t *testing.T) {
 	if len(snap.Conf.Voters) != 3 {
 		t.Errorf("snapshot configuration = %v, want three voters", snap.Conf.Voters)
 	}
-	// The term must be the log's term at that index, not invented.
 	if snap.Term != wantTerm {
 		t.Errorf("snapshot term = %d, want %d", snap.Term, wantTerm)
 	}

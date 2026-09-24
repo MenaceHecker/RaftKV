@@ -1,8 +1,8 @@
 # RaftKV
 
-A distributed key-value store with the Raft consensus algorithm implemented from scratch. No `etcd/raft`, no `hashicorp/raft`, no consensus library underneath.
+A distributed key-value store built on the Raft consensus algorithm, written from scratch. No `etcd/raft`, no `hashicorp/raft`, no consensus library underneath.
 
-**Status: in progress.** Phases 1 and 2 are done. Phase 3 is close to completion . Everything below describes what actually exists and passes tests today; the roadmap at the bottom is honest about what doesn't.
+**Status: complete.** All six phases are done. Everything described here exists and passes tests today, and the one thing that is still unfinished has a section of its own near the bottom.
 
 ```
 go test ./...
@@ -10,67 +10,51 @@ go test ./...
 
 538 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
 
+The reasoning behind the code lives in [DESIGN.md](DESIGN.md): goals, requirements, every design decision and the claims this project makes about itself. The source files carry no prose, so that document is where the "why" is.
+
 ---
 
 ## Why this exists
 
-Plenty of portfolio projects show you can build on top of a distributed system. Very few show the layer underneath, which is how a handful of machines agree on a single source of truth when one of them crashes, or when the network splits them in half and both halves think they're in charge.
+Plenty of portfolio projects show you can build on top of a distributed system. Very few show the layer underneath, which is how a handful of machines agree on a single source of truth when one of them crashes, or when the network splits them in half and both halves think they are in charge.
 
-That's what this is. The Raft paper (Ongaro & Ousterhout) from first principles, with the parts that are easy to skip actually implemented, and the failure modes actually tested rather than described in a comment.
+That is what this is. The Raft paper by Ongaro and Ousterhout, from first principles, with the parts that are easy to skip actually implemented and the failure modes actually tested rather than asserted.
 
-The bar I set for myself: **every safety property in the paper should have a test that fails if I break it.** Not a test that passes because the happy path happens to work, but a test that would go red if I deleted the rule it's checking. More on that below, because it turned out to be harder than it sounds.
-
----
-
-## What works right now
-
-**Leader election.** Randomized timeouts, one vote per node per term, and the §5.4.1 restriction that stops a node with a stale log from ever winning. Split votes resolve instead of deadlocking.
-
-**Log replication.** AppendEntries with the log matching property, conflict repair that backs up a whole term per round trip rather than one entry at a time, and commit advancement that follows §5.4.2 properly. More on that in a second, because it's the rule most toy implementations get wrong.
-
-**Durable storage.** A hand-rolled write-ahead log in segment files, CRC-checked records, snapshotting with log compaction, and recovery that can tell the difference between "this file was cut off mid-write by a `kill -9`" and "this file is actually corrupt." Those two need different answers, and conflating them costs you data.
-
-**Linearizable reads.** The read-index protocol. A leader confirms with a majority that it is *still* the leader before answering, so a partitioned-off leader can't serve you stale data while believing everything is fine.
-
-**Client deduplication.** Client ID plus sequence number, checked inside the state machine so every replica reaches the same verdict.
-
-**Group commit.** Writes that are already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch instead of once per write. It never blocks waiting for writes that have not arrived, though it does yield once before concluding there are none: whether concurrent writes are actually waiting is the scheduler's decision, and with fewer processors than writers they are usually runnable rather than ready.
-
-**Batched read confirmation.** Concurrent linearizable reads share one leadership confirmation round instead of each sending its own, which took reads from 7,600 to 27,000 a second and cut median latency from 2ms to 0.5ms. A read arriving mid-round waits for the next one, because heartbeats sent before it existed cannot prove anything about it.
-
-**Bounded apply batches.** Committed entries are handed to the state machine a bounded number at a time, because applying shares a goroutine with ticking the clock and reading messages, and a node applying a large backlog is a node that has stopped being a cluster member for the duration.
-
-**Bounded replication messages.** A leader sends a lagging follower its backlog in slices rather than in one message, because how far behind a follower can fall has no limit and every transport has a maximum message size.
-
-**Streamed snapshots.** A state machine image is the one message whose size follows the data rather than the protocol, so it travels over its own streaming RPC in chunks instead of as one message that would fail past the receiver's size limit.
-
-**Check quorum.** A leader that has not heard from a majority within an election timeout steps down. Raft does not require it and is safe without it, but a leader cut off from everyone otherwise never finds out: it keeps advertising itself, so a readiness probe asking whether there is a leader gets yes forever and traffic keeps arriving at the one node that cannot serve it.
-
-**Pre-vote.** A node asks whether an election would be won before starting one (§9.6). Without it, a node that restarts or rejoins deposes a perfectly healthy leader simply by campaigning, because its vote request carries a higher term and everyone must step down to it.
-
-**A node driver.** The thing that owns the consensus core, the WAL, and the state machine, and runs the loop connecting them. Real goroutines, real timers, real recovery on restart.
-
-**A gRPC wire protocol.** Defined and generated, with the codec between it and the core fully tested, plus a server that redirects a client to the leader instead of just refusing it.
-
-**Cluster membership changes.** Joint consensus, so a node can be added or removed while the cluster keeps serving, with both the old and new configurations required to agree during the transition.
-
-**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Twenty-three scenarios covering membership changes, snapshot transfer, client retries and whole-cluster restarts, run across multiple seeds, and Election Safety checked on every tick.
-
-**Observability.** Prometheus metrics, health and readiness endpoints, a Grafana dashboard and alert rules. Details in [docs/observability.md](docs/observability.md).
-
-**A deployment story.** A multi-stage Docker image that runs the tests during the build, a five node compose stack with Prometheus and Grafana already wired up, and Kubernetes manifests verified against a real cluster. Details in [docs/deployment.md](docs/deployment.md).
+The bar I set for myself was that every safety property in the paper should have a test that fails if I break it. Not a test that passes because the happy path happens to work, but one that goes red when I delete the rule it is checking. That turned out to be much harder than it sounds, and most of what I learned on this project came out of the gap between those two things.
 
 ---
 
-## The design decision everything else follows from
+## What works
 
-The consensus core has **no clock, no goroutines, and no network.**
+**Consensus.** Leader election with randomized timeouts, one vote per node per term, and the §5.4.1 restriction that stops a node with a stale log from ever winning. Log replication with the log matching property, conflict repair that backs up a whole term per round trip instead of one entry at a time, and commit advancement that follows §5.4.2 properly. Split votes resolve rather than deadlock.
 
-Not "minimal", but none. `internal/raft` doesn't import `time`, doesn't start a goroutine, and never touches a socket. A node advances when you call `Tick()`, receives a message when you call `Step(msg)`, and hands you everything it wants to do (messages to send, entries to apply) from `Ready()`.
+**Durability.** A hand-rolled write-ahead log in segment files, CRC-checked records, snapshotting with log compaction, and recovery that can tell "this file was cut off mid-write by a `kill -9`" from "this file is corrupt". Those two need different answers, and conflating them costs you data. A node that cannot write stops rather than carrying on, because every safety property above that point assumes it can.
 
-This sounds like an inconvenience and it is the single best decision in the project. It means an entire five-node cluster runs inside one goroutine with a fake clock, and a test that fails does so *identically* every time. No sleeps, no polling, no "run it again and see." In the chaos harness, with partitions and message reordering and crashes mid-write, this is what makes those scenarios reproducible instead of a flaky mess I'd learn to ignore.
+**Linearizable reads.** The read-index protocol, where a leader confirms with a majority that it is still the leader before answering. A partitioned leader cannot serve you stale data while believing everything is fine. Concurrent reads share one confirmation round rather than each sending its own, which took reads from 7,600 to 27,000 a second and cut median latency from 2ms to 0.5ms. A read arriving mid-round waits for the next one, because heartbeats sent before it existed cannot prove anything about it.
 
-The cost is real. All the concurrency has to live somewhere, and it lives in exactly one place: a single loop in `internal/node` that owns the core and is the only thing allowed to touch it. Everything else talks to it over channels. One file to review when something's racy.
+**Client deduplication.** Client ID plus sequence number, checked inside the state machine so that every replica reaches the same verdict rather than only the node that saw the original.
+
+**Throughput work.** Writes already waiting are appended as one durable log write, so the fsync every write blocks on is paid once per batch. It never blocks waiting for writes that have not arrived, though it does yield once before concluding there are none, because whether concurrent writes are waiting is the scheduler's decision and with fewer processors than writers they are usually runnable rather than ready.
+
+**Bounds in the places that have none by default.** Committed entries reach the state machine a bounded number at a time, since applying shares a goroutine with ticking the clock and reading messages. A lagging follower gets its backlog in slices rather than one message, since how far behind it can fall has no limit and every transport has a maximum message size. A state machine image travels over its own streaming RPC in chunks, since its size follows the data rather than the protocol.
+
+**Staying available.** Check quorum steps a leader down when it has not heard from a majority within an election timeout. Raft is safe without it, but a leader cut off from everyone otherwise never finds out, so a readiness probe asking whether there is a leader gets yes forever while traffic keeps arriving at the one node that cannot serve it. Pre-vote (§9.6) has a node ask whether an election would be won before starting one, so a restarting node no longer deposes a healthy leader just by campaigning.
+
+**Membership changes.** Joint consensus, so a node can be added or removed while the cluster keeps serving, with both the old and new configurations required to agree during the transition. The transport learns a new member's address from the change that admits it, which it has to do when the entry is appended rather than when it commits.
+
+**The parts around the algorithm.** A node driver that owns the core, the WAL and the state machine and runs the loop connecting them, with real goroutines, real timers and real recovery on restart. A gRPC wire protocol with the codec between it and the core fully tested, and a server that redirects a client to the leader instead of refusing it. Prometheus metrics, health and readiness endpoints, a Grafana dashboard and alert rules, covered in [docs/observability.md](docs/observability.md). A multi-stage Docker image that runs the tests during the build, a five node compose stack, and Kubernetes manifests verified against a real cluster, covered in [docs/deployment.md](docs/deployment.md).
+
+**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Twenty-three scenarios covering membership changes, snapshot transfer, client retries and whole-cluster restarts, run across multiple seeds, with Election Safety checked on every tick.
+
+---
+
+## The decision everything else follows from
+
+The consensus core has no clock, no goroutines and no network. Not "minimal". None. `internal/raft` does not import `time`, does not start a goroutine and never touches a socket. A node advances when you call `Tick()`, receives a message when you call `Step(msg)`, and hands you everything it wants to do from `Ready()`.
+
+This sounds like an inconvenience and it is the best decision in the project. An entire five node cluster runs inside one goroutine with a fake clock, and a test that fails does so identically every time. No sleeps, no polling, no running it again to see. In the chaos harness, with partitions and reordering and crashes mid-write, that is the difference between reproducible scenarios and a flaky mess I would have learned to ignore.
+
+The cost is real. All the concurrency has to live somewhere, and it lives in exactly one place: a single loop in `internal/node` that owns the core and is the only thing allowed to touch it. Everything else talks to it over channels. One file to review when something looks racy.
 
 ---
 
@@ -85,13 +69,13 @@ if err != nil || t != n.term {
 }
 ```
 
-Raft says an entry is committed once a majority stores it. That is *not sufficient*, and §5.4.2 of the paper exists to explain why. An entry from a previous term can sit on a majority of nodes and **still get overwritten** by a future leader. If you commit it on replica count alone, two state machines diverge and nothing anywhere reports a problem. It's Figure 8 in the paper, and it's the difference between a Raft implementation and something that looks like one.
+Raft says an entry is committed once a majority stores it. That is not sufficient, and §5.4.2 exists to explain why. An entry from a previous term can sit on a majority of nodes and still be overwritten by a future leader. Commit it on replica count alone and two state machines diverge with nothing anywhere reporting a problem. It is Figure 8 in the paper, and it is the difference between a Raft implementation and something that looks like one.
 
-The entry only becomes safe once something from the leader's *own* term commits on top of it. That's why every new leader appends a no-op the moment it's elected: it gives the leader an in-term entry to commit immediately, which transitively secures everything inherited.
+The entry only becomes safe once something from the leader's own term commits on top of it. That is why every new leader appends a no-op the moment it is elected: it gives the leader an in-term entry to commit immediately, which transitively secures everything inherited.
 
-I wrote a test for this. **It passed, and it was worthless.** It only checked that a leader commits its own-term entry, and never built the dangerous case at all. A green test on the most important rule in the codebase, verifying nothing. I threw it out and wrote one that constructs the Figure 8 setup directly, then deleted the guard to confirm the test actually goes red. It does, and it's the only test that does.
+I wrote a test for this, it passed, and it was worthless. It only checked that a leader commits its own-term entry and never built the dangerous case at all. A green test on the most important rule in the codebase, verifying nothing. I threw it out and wrote one that constructs the Figure 8 setup directly, then deleted the guard to confirm the test goes red. It does, and it is the only test that does.
 
-That happened three more times over the project. It's the thing I'd most want someone to take from this repo: **a passing test is not evidence until you've watched it fail.**
+That happened three more times over the project. It is the thing I would most want someone to take from this repo: a passing test is not evidence until you have watched it fail.
 
 ---
 
@@ -192,7 +176,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 12,500 lines of implementation and 19,000 of tests, across 538 tests. The ratio is not an accident.
+Roughly 8,800 lines of implementation and 17,000 of tests, across 538 tests. The ratio is not an accident.
 
 ---
 
@@ -212,31 +196,35 @@ Plus the one that isn't in that list but should be: `TestCommitRequiresEntryFrom
 
 The core's usage contract has two runnable examples rather than only prose. Go compiles them and compares their printed output, so an example that stopped describing the code fails the suite: breaking a sole voter's ability to commit its own proposals makes one of them fail with a diff. They are the answer to "how do I drive this thing", in a form that cannot quietly stop being true.
 
-The numbers in this README are checked too. They had drifted twice, once claiming 177 tests in one paragraph and 367 in another when there were 434, so `internal/determinism` counts the tests, the fuzz targets and the lines and fails if the text disagrees. A document that is confidently wrong about something checkable invites doubt about the parts that are harder to check.
+The numbers in this README are checked. They had drifted twice, once claiming 177 tests in one paragraph and 367 in another when there were 434, so `internal/determinism` counts the tests, the fuzz targets and the lines and fails if the text disagrees. A document that is confidently wrong about something checkable invites doubt about the parts that are harder to check.
 
-The comments are checked for one specific lie: deferring to a phase that is finished. The transport dropped every message to a node it had no address for, under a comment saying that Phase 4's membership changes made this reachable and that for now it meant a stray message. Phase 4 had long since landed, so a member added at runtime joined the configuration and was never heard from again, and the sentence excusing it sat directly above the line doing it. Two more said the same kind of thing, one of them claiming the core did not act on configuration changes at all. A test now fails on any comment in shipped code that mentions a phase and then defers to it. The metric names are checked the same way, because a dashboard panel or an alert rule naming a metric nobody exports does not fail: it draws an empty graph, or it becomes an alert that can never fire, and both look exactly like a healthy cluster. Renaming a metric in Go compiles and passes everything while silently blanking whatever was watching it, so the alert rules, the dashboard and the observability document are checked against the names a registry actually exports.
+The same idea covers things outside Go. Metric names are checked against what a registry actually exports, because a dashboard panel or an alert rule naming a metric nobody exports does not fail: it draws an empty graph, or becomes an alert that can never fire, and both look exactly like a healthy cluster. The Kubernetes manifest is checked against the four settings [docs/deployment.md](docs/deployment.md) calls load bearing, including the disruption budget, which has to hold a majority of whatever the replica count happens to be. And every place the consensus core writes to storage is checked to mark its failure distinctly, because the driver stops the node for a failed write and ignores a malformed message, and the two used to arrive looking identical.
 
-The property underneath all of them is that the consensus core and the state machine are pure: no clock, no network, no goroutines, and no randomness a seed cannot reproduce. Everything above depends on it, and a plausible one-line fix breaks it without failing anything, so `internal/determinism` parses both packages and enforces it rather than trusting the comments that claim it.
+The property underneath all of it is that the consensus core and the state machine are pure: no clock, no network, no goroutines, and no randomness a seed cannot reproduce. Everything above depends on that, and a plausible one-line fix breaks it without failing anything, so `internal/determinism` parses both packages and enforces it rather than taking it on trust.
 
 ---
 
 ## Things I decided on purpose
 
-**Hand-rolled disk format, not protobuf or gob.** The Raft log is the part whose on-disk representation I should be able to explain byte by byte. A fixed little-endian layout is also debuggable with a hex dump when a record goes bad. (The KV *values* are opaque bytes, which is a different call, made deliberately.)
+These are the calls I would expect someone to push back on, with the reasoning. Longer versions of each are in [DESIGN.md](DESIGN.md).
 
-**Read-index rather than leader leases.** Leases are faster, with no round trip, but they buy that by assuming clocks don't drift more than some bound. Read-index costs one round trip and assumes nothing about clocks. For a project about correctness under adversarial conditions, trading a network assumption for a timing assumption is the wrong direction. The tradeoff is written up in `readonly.go`.
+A hand-rolled disk format rather than protobuf or gob, because the Raft log is the part whose on-disk representation I should be able to explain byte by byte, and a fixed little-endian layout is debuggable with a hex dump when a record goes bad. The KV values are opaque bytes, which is a different call, made deliberately.
 
-**Deduplication lives in the state machine, not the server.** A server-side check only filters duplicates arriving at the node that saw the original. The entry still commits and applies everywhere else, and the replicas **diverge**, which is strictly worse than a duplicate.
+Read-index rather than leader leases. Leases are faster and skip the round trip, but they buy that by assuming clocks do not drift more than some bound. Read-index costs one round trip and assumes nothing about clocks. For a project about correctness under adversarial conditions, trading a network assumption for a timing assumption is the wrong direction.
 
-**Sorted keys in snapshots.** Go randomizes map iteration, so an unsorted encoding produces different bytes every time for identical state. Sorting makes a snapshot a deterministic function of the state, which makes two replicas' snapshots directly comparable. That's the cheapest possible convergence check, and something the chaos harness will lean on.
+Deduplication in the state machine rather than the server. A server-side check only filters duplicates arriving at the node that saw the original. The entry still commits and applies everywhere else, and the replicas diverge, which is strictly worse than a duplicate.
 
-**`buf` instead of `protoc`.** It carries its own protobuf compiler in Go, so the whole toolchain installs with `go install` and nobody needs a system package manager to build this.
+Sorted keys in snapshots. Go randomizes map iteration, so an unsorted encoding produces different bytes every time for identical state. Sorting makes a snapshot a deterministic function of the state, which makes two replicas' snapshots directly comparable, and that is the cheapest possible convergence check.
+
+`buf` rather than `protoc`, because it carries its own protobuf compiler in Go and the whole toolchain installs with `go install`.
 
 ---
 
 ## Things that are honestly not done
 
-- **Snapshots are still materialized in memory** at both ends, though far less wastefully than they were: sizing the buffer exactly took producing a 64 MB snapshot from 353 MB of allocation down to 65 MB, leaving one copy rather than six. They now travel over the wire in chunks, so size no longer breaks transfer, but the sender holds the whole image and the receiver assembles the whole image before handing it over. Making the state machine serialize and restore through an `io.Reader` and `io.Writer` would remove that, and would ripple through the storage layer and the core's `Snapshot` type.
+Snapshots are still materialized in memory at both ends, though far less wastefully than they were. Sizing the buffer exactly took producing a 64 MB snapshot from 353 MB of allocation down to 65 MB, leaving one copy rather than six, and they travel over the wire in chunks so size no longer breaks transfer. But the sender holds the whole image and the receiver assembles the whole image before handing it over. Making the state machine serialize and restore through an `io.Reader` and `io.Writer` would remove that, and would ripple through the storage layer and the core's `Snapshot` type.
+
+Storage error paths are covered by reasoning rather than by tests. The core's behaviour when a write fails is tested thoroughly, using a storage implementation that fails on demand. What is not tested is the disk layer's own error returns, because reaching those needs fault injection at the filesystem level and the package has no seam for it.
 
 ---
 
@@ -341,4 +329,4 @@ Generated files are committed, so a fresh clone builds without any of that.
 
 ## Reference
 
-Diego Ongaro and John Ousterhout, *[In Search of an Understandable Consensus Algorithm](https://raft.github.io/raft.pdf)* (extended version). Section references throughout the code point at this paper.
+Diego Ongaro and John Ousterhout, *[In Search of an Understandable Consensus Algorithm](https://raft.github.io/raft.pdf)* (extended version). Section references throughout this README and [DESIGN.md](DESIGN.md) point at this paper.

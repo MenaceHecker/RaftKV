@@ -20,30 +20,12 @@ import (
 	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
 
-// Tests for the gRPC peer transport.
-//
-// Two kinds of test live here. The first drives a real cluster over real
-// sockets, because the point of this layer is that consensus works when the
-// messages actually cross a network rather than a channel. The second attacks
-// the property the driver depends on: Send is called inline from the Raft loop,
-// so it must return promptly no matter how badly a peer is behaving. A
-// transport that blocks there turns one dead node into a dead cluster, which
-// is the exact failure Raft exists to survive.
-
 const (
-	// grpcSettleTimeout is generous on purpose. Real sockets, real
-	// goroutines, and a shared machine mean these tests must tolerate a slow
-	// moment without reporting a consensus failure.
 	grpcSettleTimeout = 20 * time.Second
 
-	// unroutableAddr is in the TEST-NET-1 block reserved by RFC 5737. Nothing
-	// answers there, and unlike a closed port on localhost it does not refuse
-	// quickly, so it models a peer that has vanished rather than one that is
-	// actively rejecting.
 	unroutableAddr = "192.0.2.1:1"
 )
 
-// grpcCluster is a set of driver nodes wired together over real gRPC.
 type grpcCluster struct {
 	t *testing.T
 
@@ -54,13 +36,9 @@ type grpcCluster struct {
 	transports map[raft.NodeID]*PeerTransport
 	servers    map[raft.NodeID]*grpc.Server
 
-	// conns holds a client connection per node, so tests can exercise the
-	// client-facing API against any member — including a follower, which is
-	// where redirection has to be observed.
 	conns map[raft.NodeID]*grpc.ClientConn
 }
 
-// newGRPCCluster starts a cluster of the given size on loopback sockets.
 func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 	t.Helper()
 
@@ -77,8 +55,6 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 		c.ids = append(c.ids, raft.NodeID(i+1))
 	}
 
-	// Bind every listener first. Each node needs the full address map at
-	// construction, so the addresses have to exist before any node starts.
 	listeners := make(map[raft.NodeID]net.Listener, size)
 	for _, id := range c.ids {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -116,8 +92,6 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 		c.nodes[id] = n
 		t.Cleanup(func() { n.Stop() })
 
-		// Now that the node exists, close the loop for self-addressed
-		// messages.
 		tr.SetLocal(n)
 
 		srv, err := NewRaftServer(n)
@@ -127,9 +101,6 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 		gs := grpc.NewServer()
 		srv.Register(gs)
 
-		// Every node also serves the client API, which is what makes a
-		// redirect observable: a client has to be able to reach a follower
-		// and be told to go elsewhere.
 		kv, err := NewKVServer(n, c.addrs)
 		if err != nil {
 			t.Fatalf("creating client server for node %d: %v", id, err)
@@ -154,7 +125,6 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 	return c
 }
 
-// kv returns a key-value client for one node.
 func (c *grpcCluster) kv(id raft.NodeID) raftkvv1.KVServiceClient {
 	c.t.Helper()
 	conn, ok := c.conns[id]
@@ -164,7 +134,6 @@ func (c *grpcCluster) kv(id raft.NodeID) raftkvv1.KVServiceClient {
 	return raftkvv1.NewKVServiceClient(conn)
 }
 
-// cluster returns a membership client for one node.
 func (c *grpcCluster) cluster(id raft.NodeID) raftkvv1.ClusterServiceClient {
 	c.t.Helper()
 	conn, ok := c.conns[id]
@@ -174,7 +143,6 @@ func (c *grpcCluster) cluster(id raft.NodeID) raftkvv1.ClusterServiceClient {
 	return raftkvv1.NewClusterServiceClient(conn)
 }
 
-// followerOf returns some node that is not the given one.
 func (c *grpcCluster) followerOf(leader raft.NodeID) raft.NodeID {
 	c.t.Helper()
 	for _, id := range c.ids {
@@ -186,8 +154,6 @@ func (c *grpcCluster) followerOf(leader raft.NodeID) raft.NodeID {
 	return 0
 }
 
-// eventually polls until cond holds, failing with a cluster dump if it never
-// does.
 func (c *grpcCluster) eventually(what string, cond func() bool) {
 	c.t.Helper()
 
@@ -201,7 +167,6 @@ func (c *grpcCluster) eventually(what string, cond func() bool) {
 	c.t.Fatalf("timed out waiting for %s\n%s", what, c.dump())
 }
 
-// awaitLeader waits for exactly one leader and returns it.
 func (c *grpcCluster) awaitLeader() *node.Node {
 	c.t.Helper()
 
@@ -246,7 +211,6 @@ func (c *grpcCluster) dump() string {
 }
 
 func TestClusterFormsOverGRPC(t *testing.T) {
-	// The integration this layer exists for: consensus over real sockets.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 
@@ -311,8 +275,6 @@ func TestReplicationReachesEveryNodeOverGRPC(t *testing.T) {
 		return true
 	})
 
-	// The links must show real traffic, or the cluster converged some other
-	// way and this test is not exercising gRPC at all.
 	total := uint64(0)
 	for _, id := range c.ids {
 		for _, st := range c.transports[id].Stats() {
@@ -325,8 +287,6 @@ func TestReplicationReachesEveryNodeOverGRPC(t *testing.T) {
 }
 
 func TestClusterSurvivesOneNodeDying(t *testing.T) {
-	// Three nodes, one killed. A cluster of 2f+1 tolerates f failures, and
-	// the transport must not undermine that by blocking on the dead peer.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -339,7 +299,6 @@ func TestClusterSurvivesOneNodeDying(t *testing.T) {
 		}
 	}
 
-	// Stop the server so its address stops answering, and stop the node.
 	c.servers[victim].Stop()
 	if err := c.nodes[victim].Stop(); err != nil {
 		t.Fatalf("stopping node %d: %v", victim, err)
@@ -349,7 +308,6 @@ func TestClusterSurvivesOneNodeDying(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), grpcSettleTimeout)
 	defer cancel()
 
-	// The remaining majority must still commit.
 	for i := range 5 {
 		err := leader.Propose(ctx, statemachine.Command{
 			ClientID: 1, Seq: uint64(i + 1), Op: statemachine.OpPut,
@@ -362,9 +320,6 @@ func TestClusterSurvivesOneNodeDying(t *testing.T) {
 }
 
 func TestSendDoesNotBlockOnAnUnreachablePeer(t *testing.T) {
-	// The property the driver's contract depends on. Send runs inline on the
-	// Raft loop, so if a peer that never answers could make it block, one
-	// dead node would stall consensus with every healthy node too.
 	tr, err := NewPeerTransport(PeerConfig{
 		Self:      1,
 		Addresses: map[raft.NodeID]string{2: unroutableAddr},
@@ -389,8 +344,6 @@ func TestSendDoesNotBlockOnAnUnreachablePeer(t *testing.T) {
 
 	select {
 	case elapsed := <-done:
-		// The bound is loose because this measures scheduling, not the
-		// network. What matters is that it is nothing like the send timeout.
 		if elapsed > 2*time.Second {
 			t.Fatalf("Send took %v against an unreachable peer; it must not block "+
 				"the Raft loop", elapsed)
@@ -402,9 +355,6 @@ func TestSendDoesNotBlockOnAnUnreachablePeer(t *testing.T) {
 }
 
 func TestFullQueueDropsRatherThanBlocking(t *testing.T) {
-	// When a peer cannot keep up, messages are discarded rather than queued
-	// without limit. That is safe because Raft retransmits, and the counter
-	// is what makes it visible instead of silent.
 	tr, err := NewPeerTransport(PeerConfig{
 		Self:      1,
 		Addresses: map[raft.NodeID]string{2: unroutableAddr},
@@ -430,9 +380,6 @@ func TestFullQueueDropsRatherThanBlocking(t *testing.T) {
 }
 
 func TestMessagesToUnknownPeersAreIgnored(t *testing.T) {
-	// A message for a node this transport has no address for must be dropped
-	// quietly rather than panicking. Phase 4's membership changes make this
-	// reachable in normal operation.
 	tr, err := NewPeerTransport(PeerConfig{
 		Self:      1,
 		Addresses: map[raft.NodeID]string{2: unroutableAddr},
@@ -445,7 +392,6 @@ func TestMessagesToUnknownPeersAreIgnored(t *testing.T) {
 	tr.Send([]raft.Message{{Type: raft.MsgHeartbeat, From: 1, To: 99, Term: 1}})
 }
 
-// recordingStepper captures the messages handed to it.
 type recordingStepper struct {
 	mu   sync.Mutex
 	msgs []raft.Message
@@ -464,9 +410,6 @@ func (r *recordingStepper) count() int {
 }
 
 func TestSelfAddressedMessagesBypassTheNetwork(t *testing.T) {
-	// A node does not dial itself. Routing such a message through gRPC would
-	// be a round trip through loopback for no reason, and would fail outright
-	// if the node's own server were not up yet.
 	local := &recordingStepper{}
 
 	tr, err := NewPeerTransport(PeerConfig{
@@ -484,7 +427,6 @@ func TestSelfAddressedMessagesBypassTheNetwork(t *testing.T) {
 	if got := local.count(); got != 1 {
 		t.Fatalf("local stepper received %d messages, want 1", got)
 	}
-	// The address for self must not have been dialled at all.
 	for _, st := range tr.Stats() {
 		if st.ID == 1 {
 			t.Fatal("a connection was created to this node's own address")
@@ -493,8 +435,6 @@ func TestSelfAddressedMessagesBypassTheNetwork(t *testing.T) {
 }
 
 func TestSelfAddressedMessagesAreDroppedWithoutALocalStepper(t *testing.T) {
-	// Before SetLocal is called there is nowhere to put such a message. It
-	// must be discarded rather than panicking on a nil interface.
 	tr, err := NewPeerTransport(PeerConfig{
 		Self:      1,
 		Addresses: map[raft.NodeID]string{1: unroutableAddr},
@@ -508,9 +448,6 @@ func TestSelfAddressedMessagesAreDroppedWithoutALocalStepper(t *testing.T) {
 }
 
 func TestLocalSignalsAreNotSent(t *testing.T) {
-	// Node-local signals have no wire form. If one reached Send it would be
-	// counted as a failure rather than encoded, because putting it on the
-	// network would let a peer drive this node's internal state machine.
 	tr, err := NewPeerTransport(PeerConfig{
 		Self:      1,
 		Addresses: map[raft.NodeID]string{2: unroutableAddr},
@@ -532,9 +469,6 @@ func TestLocalSignalsAreNotSent(t *testing.T) {
 }
 
 func TestServerRejectsUndecodableMessages(t *testing.T) {
-	// A message that cannot be decoded exactly is refused rather than
-	// approximated. Acting on a half-understood message is worse than
-	// dropping it, and the sender retransmits either way.
 	local := &recordingStepper{}
 	srv, err := NewRaftServer(local)
 	if err != nil {
@@ -611,8 +545,6 @@ func TestTransportRequiresANonZeroSelfID(t *testing.T) {
 }
 
 func TestPeerWithNoAddressIsRejected(t *testing.T) {
-	// A blank address would produce a peer that silently never connects.
-	// Failing at construction says so while the operator can still fix it.
 	_, err := NewPeerTransport(PeerConfig{
 		Self:      1,
 		Addresses: map[raft.NodeID]string{2: ""},
@@ -640,8 +572,6 @@ func TestCloseIsIdempotent(t *testing.T) {
 }
 
 func TestConcurrentSendsAreSafe(t *testing.T) {
-	// The Raft loop is single-threaded, but nothing in the type promises
-	// that, and the chaos harness will drive it from several goroutines.
 	tr, err := NewPeerTransport(PeerConfig{
 		Self:      1,
 		Addresses: map[raft.NodeID]string{2: unroutableAddr, 3: unroutableAddr},
@@ -669,41 +599,16 @@ func TestConcurrentSendsAreSafe(t *testing.T) {
 }
 
 func TestSnapshotTransferOverGRPC(t *testing.T) {
-	// Snapshot transfer working in the core proves nothing about the wire: the
-	// image is the largest and most structured thing that crosses it, and
-	// until this message had a wire form the transport rejected it outright.
-	//
-	// A follower is stopped, the cluster moves on and compacts past what that
-	// follower needs, and then it is brought back. The only way it can catch
-	// up is an image sent over gRPC.
 	runSnapshotTransfer(t, 40, 5)
 }
 
 func TestLargeSnapshotTransferOverGRPC(t *testing.T) {
-	// The same scenario with a state machine too big to fit in a default
-	// gRPC message.
-	//
-	// Nothing about the small case exercises a size limit, and a snapshot is
-	// precisely the message that grows with the data. A cluster that worked
-	// perfectly in testing would fail to catch up a lagging follower once
-	// real data accumulated, and the symptom would be a follower that never
-	// recovers rather than anything that announces itself as a size problem.
-	//
-	// 64 writes of 128 KiB is about 8 MiB of state, comfortably past gRPC's
-	// 4 MiB default receive limit.
 	runSnapshotTransfer(t, 64, 128<<10)
 }
 
 func runSnapshotTransfer(t *testing.T, writes, valueSize int) {
 	t.Helper()
 
-	// Snapshot transfer working in the core proves nothing about the wire: the
-	// image is the largest and most structured thing that crosses it, and
-	// until this message had a wire form the transport rejected it outright.
-	//
-	// A follower is stopped, the cluster moves on and compacts past what that
-	// follower needs, and then it is brought back. The only way it can catch
-	// up is an image sent over gRPC.
 	c := newGRPCCluster(t, 3)
 	leader := c.awaitLeader()
 	leaderID := leader.Status().ID
@@ -719,15 +624,12 @@ func runSnapshotTransfer(t *testing.T, writes, valueSize int) {
 		}
 	}
 
-	// Take the follower down, and its server with it so nothing reaches it.
 	c.servers[victim].Stop()
 	if err := c.nodes[victim].Stop(); err != nil {
 		t.Fatalf("stopping node %d: %v", victim, err)
 	}
 	delete(c.nodes, victim)
 
-	// The remaining majority keeps working and compacts well past where the
-	// stopped node left off.
 	value := bytes.Repeat([]byte("x"), valueSize)
 	for i := range writes {
 		err := leader.Propose(ctx, statemachine.Command{
@@ -739,11 +641,6 @@ func runSnapshotTransfer(t *testing.T, writes, valueSize int) {
 		}
 	}
 
-	// Every running node compacts, not just the one that happens to be leading
-	// now. Leadership can move while the follower is away, and only a leader
-	// that has actually compacted is unable to catch it up from the log —
-	// compacting one node would leave the test passing through ordinary
-	// replication instead.
 	for _, id := range c.ids {
 		n, ok := c.nodes[id]
 		if !ok {
@@ -754,8 +651,6 @@ func runSnapshotTransfer(t *testing.T, writes, valueSize int) {
 		}
 	}
 
-	// Bring it back. Its log stops long before the leader's first retained
-	// entry, so only a snapshot can reconcile them.
 	l, err := net.Listen("tcp", c.addrs[victim])
 	if err != nil {
 		t.Fatalf("re-binding node %d: %v", victim, err)
@@ -800,9 +695,6 @@ func runSnapshotTransfer(t *testing.T, writes, valueSize int) {
 		return c.nodes[victim].Status().Applied >= want
 	})
 
-	// It must have got there by snapshot, not by log. Without this the test
-	// would still pass if the leader had never compacted far enough, and would
-	// be exercising ordinary replication instead.
 	if got := c.nodes[victim].Status().SnapshotsReceived; got == 0 {
 		t.Fatalf("node %d caught up without receiving a snapshot, so this test is "+
 			"not exercising snapshot transfer\n%s", victim, c.dump())

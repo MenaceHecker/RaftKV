@@ -1,13 +1,3 @@
-// Package raft implements the Raft consensus algorithm (Ongaro & Ousterhout,
-// "In Search of an Understandable Consensus Algorithm") from first principles.
-//
-// The core is deliberately free of side effects: it owns no goroutines, opens
-// no sockets, and reads no clocks. Time advances only when the caller invokes
-// Tick, inbound messages arrive only through Step, and every outbound effect
-// (messages to send, entries to apply) is returned from Ready. That makes a
-// whole cluster reproducible inside a single process and a single goroutine,
-// which is what the deterministic test harness, and later the chaos harness,
-// are built on.
 package raft
 
 import (
@@ -15,45 +5,23 @@ import (
 	"fmt"
 )
 
-// NodeID identifies a single member of the cluster. IDs are stable for the
-// lifetime of a node and must be non-zero; zero is reserved to mean "no node",
-// for example a vote that has not been cast.
 type NodeID uint64
 
-// None is the zero NodeID, used wherever "no node" needs to be expressed.
 const None NodeID = 0
 
-// Term is a Raft term number: a logical clock that increases monotonically and
-// divides time into election epochs. Every message carries a term, and a node
-// that sees a term higher than its own always steps down to follower.
 type Term uint64
 
-// Index is a position in the replicated log. The log is 1-indexed; index 0 is
-// the sentinel "before the first entry" position, so a node with an empty log
-// reports a last index of 0.
 type Index uint64
 
-// State is the role a node currently plays. A Raft node is always in exactly
-// one of these three states (§5.1).
 type State uint8
 
 const (
-	// Follower is passive: it responds to candidates and leaders but issues
-	// no requests of its own. All nodes start here.
 	Follower State = iota
-	// PreCandidate is asking whether an election it has not yet started
-	// would be won. It has not raised its term and has not voted, so a node
-	// in this state is still a follower as far as the rest of the cluster is
-	// concerned (§9.6).
 	PreCandidate
-	// Candidate is campaigning for leadership of a particular term.
 	Candidate
-	// Leader handles all client requests and replicates them to followers.
-	// There is at most one leader per term (Election Safety).
 	Leader
 )
 
-// String renders the state for logs and test failure messages.
 func (s State) String() string {
 	switch s {
 	case Follower:
@@ -69,31 +37,14 @@ func (s State) String() string {
 	}
 }
 
-// EntryType distinguishes ordinary state-machine commands from entries the
-// Raft layer itself interprets.
 type EntryType uint8
 
 const (
-	// EntryNormal carries an opaque command for the state machine. The Raft
-	// core never inspects Data; only the KV state machine does.
 	EntryNormal EntryType = iota
-	// EntryNoOp is the empty entry a new leader appends to its own log on
-	// election. Committing it commits everything before it from earlier
-	// terms, which is what makes the leader's commit index safe to advance
-	// (§5.4.2).
 	EntryNoOp
-	// EntryConfChange carries a cluster membership change (§6). The core
-	// acts on one as soon as it is appended rather than when it commits,
-	// by rebuilding the configuration from the log.
 	EntryConfChange
 )
 
-// Valid reports whether t is a type this implementation defines.
-//
-// Decoders need it because the type is written in a fixed width field wider
-// than the type itself, so a damaged field can hold a value that truncates
-// into a perfectly legal one and decodes as an ordinary entry. Checking the
-// decoded value against the defined set turns that into an error instead.
 func (t EntryType) Valid() bool {
 	switch t {
 	case EntryNormal, EntryNoOp, EntryConfChange:
@@ -103,10 +54,6 @@ func (t EntryType) Valid() bool {
 	}
 }
 
-// Entry is a single record in the replicated log. The pair (Term, Index)
-// uniquely identifies an entry across the whole cluster: if two logs hold an
-// entry with the same index and term, those entries are identical and every
-// preceding entry is identical too — the Log Matching Property (§5.3).
 type Entry struct {
 	Term  Term
 	Index Index
@@ -114,81 +61,24 @@ type Entry struct {
 	Data  []byte
 }
 
-// MessageType enumerates everything that crosses a node boundary. Raft defines
-// two RPCs; each is modelled here as a request/response pair. Node-local
-// signals (campaign, propose) share the same envelope so that a node can be
-// driven entirely through Step, which is what lets tests trigger an election
-// at an exact moment instead of waiting one out.
 type MessageType uint8
 
 const (
-	// MsgVoteRequest is a candidate soliciting a vote (RequestVote, §5.2).
 	MsgVoteRequest MessageType = iota
-	// MsgVoteResponse answers a MsgVoteRequest.
 	MsgVoteResponse
-	// MsgAppendRequest is a leader replicating entries, or a heartbeat when
-	// Entries is empty (AppendEntries, §5.3).
 	MsgAppendRequest
-	// MsgAppendResponse answers a MsgAppendRequest.
 	MsgAppendResponse
-	// MsgHeartbeat is a leader asking its followers to confirm, right now,
-	// that they still recognize it. It carries no entries and replicates
-	// nothing.
-	//
-	// This is deliberately separate from MsgAppendRequest even though an
-	// empty append also serves as a heartbeat. A linearizable read has to
-	// know that a majority acknowledged leadership *after* the read was
-	// registered, and an append response cannot prove that: it may have been
-	// sent before the read arrived and merely be slow, during which time
-	// another leader could have been elected. The echoed Context is what
-	// makes an acknowledgement attributable to a specific round.
 	MsgHeartbeat
-	// MsgHeartbeatResponse answers a MsgHeartbeat, echoing its Context.
 	MsgHeartbeatResponse
-	// MsgCampaign is a local signal telling a node to start an election now
-	// rather than waiting out its election timeout.
 	MsgCampaign
-	// MsgPropose is a local signal carrying a client command for a leader to
-	// append to its log.
 	MsgPropose
-	// MsgReadIndex is a local signal asking the leader to establish a read
-	// index for a linearizable read (§6.4).
 	MsgReadIndex
-	// MsgInstallSnapshot is a leader sending its state machine image to a
-	// follower that has fallen behind the leader's compaction point (§7).
-	//
-	// It exists because the log is not always enough. Once a leader compacts,
-	// the entries a lagging follower still needs are gone, and no amount of
-	// backing off can find a matching position. The snapshot replaces the
-	// follower's state wholesale rather than reconciling with it.
 	MsgInstallSnapshot
-	// MsgInstallSnapshotResponse answers a MsgInstallSnapshot.
 	MsgInstallSnapshotResponse
-	// MsgPreVoteRequest asks whether a node would grant a vote, without
-	// anyone changing their term (§9.6).
-	//
-	// It exists because a real vote request is destructive: it carries a
-	// higher term, and the term rules of §5.1 force every recipient to step
-	// down to it. A node that has been partitioned away, or has just
-	// restarted, will campaign on a term nobody else has reason to respect,
-	// and in doing so deposes a leader that was serving perfectly well.
-	//
-	// A pre-vote asks the question hypothetically. Its Term is the term the
-	// sender *would* campaign in, and receiving one changes nothing about
-	// the receiver: no term change, no vote recorded, no election timer
-	// reset. Only after a majority answers yes does the sender raise its
-	// term for real.
 	MsgPreVoteRequest
-	// MsgPreVoteResponse answers a MsgPreVoteRequest.
-	//
-	// A grant echoes the hypothetical term it was asked about. A rejection
-	// carries the responder's own real term instead, so a node campaigning
-	// on stale information learns the truth without having disrupted anyone
-	// to find it out.
 	MsgPreVoteResponse
 )
 
-// String renders the message type for logs and test failure messages.
 func (t MessageType) String() string {
 	switch t {
 	case MsgVoteRequest:
@@ -222,119 +112,54 @@ func (t MessageType) String() string {
 	}
 }
 
-// Message is the single envelope for every inter-node interaction. Not all
-// fields are meaningful for every type; the comments say which types use which.
-// Keeping one flat struct means the transport — and later the chaos harness
-// that delays, drops, and reorders traffic — has only one shape to understand.
 type Message struct {
 	Type MessageType
 	From NodeID
 	To   NodeID
 
-	// Term is the sender's term. It is checked before anything else: a
-	// higher term forces the receiver to step down, a lower term makes the
-	// message stale (§5.1).
 	Term Term
 
-	// LastLogIndex and LastLogTerm describe the candidate's log in a
-	// MsgVoteRequest. A voter refuses a candidate whose log is less
-	// up-to-date than its own — the election restriction (§5.4.1).
 	LastLogIndex Index
 	LastLogTerm  Term
 
-	// PrevLogIndex and PrevLogTerm identify the entry immediately before
-	// Entries in a MsgAppendRequest. The receiver rejects the append unless
-	// its log holds a matching entry at that position (§5.3).
 	PrevLogIndex Index
 	PrevLogTerm  Term
 
-	// Entries carries the log entries being replicated in a
-	// MsgAppendRequest, or the command being proposed in a MsgPropose. Empty
-	// in a MsgAppendRequest means the message is a heartbeat.
 	Entries []Entry
 
-	// CommitIndex is the leader's commit index in a MsgAppendRequest, which
-	// is how followers learn what is safe to apply.
 	CommitIndex Index
 
-	// Granted reports whether a vote was given, in a MsgVoteResponse.
 	Granted bool
 
-	// Success reports whether an append was accepted, in a
-	// MsgAppendResponse.
 	Success bool
 
-	// MatchIndex is the highest index the responder now agrees with, in a
-	// successful MsgAppendResponse. The leader advances its commit index
-	// once a majority of match indices reach a given entry.
 	MatchIndex Index
 
-	// ConflictIndex and ConflictTerm let a rejecting follower tell the leader
-	// enough to back up by a whole term at a time rather than one index per
-	// round trip (§5.3). ConflictTerm is zero when the follower's log is
-	// simply too short, in which case ConflictIndex is one past its last
-	// entry.
 	ConflictIndex Index
 	ConflictTerm  Term
 
-	// Context is an opaque token carried by MsgReadIndex, MsgHeartbeat, and
-	// MsgHeartbeatResponse. The leader mints one per read-index round and
-	// followers echo it back unchanged, which is what lets the leader count
-	// only the acknowledgements belonging to that round.
-	//
-	// The Raft core never interprets it; the layer above uses it to match a
-	// completed read index back to the client request that asked for it.
 	Context []byte
 
-	// Snapshot carries a state machine image in a MsgInstallSnapshot. It is
-	// nil for every other message type.
 	Snapshot *Snapshot
 }
 
-// Snapshot is a state machine image at a point in the log, together with the
-// cluster configuration in force there.
-//
-// It is the unit a leader sends to a follower it can no longer catch up from
-// the log alone. The configuration travels with it for the same reason it
-// travels into storage: the conf-change entries it was derived from may have
-// been compacted away, so the image is the only remaining record of them.
 type Snapshot struct {
-	// Index is the last log index included. A node holding this snapshot has,
-	// by definition, applied everything through Index.
 	Index Index
-	// Term is the term of the entry at Index. Together with Index it gives the
-	// snapshot a position the log-matching rules can reason about.
-	Term Term
-	// Conf is the cluster membership as of Index.
-	Conf ConfState
-	// Data is the serialized state machine. The Raft core never inspects it.
-	Data []byte
+	Term  Term
+	Conf  ConfState
+	Data  []byte
 }
 
-// IsEmpty reports whether the snapshot describes no state at all, which is
-// what a node that has never taken one reads back.
 func (s *Snapshot) IsEmpty() bool { return s == nil || s.Index == 0 }
 
-// ConfChangeType describes what a membership change does.
 type ConfChangeType uint8
 
 const (
-	// ConfChangeAddNode adds a new voting member to the cluster.
 	ConfChangeAddNode ConfChangeType = iota
-	// ConfChangeRemoveNode removes an existing voting member.
 	ConfChangeRemoveNode
-	// ConfChangeLeaveJoint is the second half of a joint-consensus transition.
-	// It carries no NodeID; the leader proposes it automatically once the
-	// enter-joint entry commits. Its commit finalises the move from C_joint to
-	// C_new.
 	ConfChangeLeaveJoint
 )
 
-// Valid reports whether t is a change this implementation defines.
-//
-// A conf change decides who may vote, so a byte that names no known operation
-// must be refused rather than carried into the configuration machinery to be
-// interpreted by whichever branch happens to catch it.
 func (t ConfChangeType) Valid() bool {
 	switch t {
 	case ConfChangeAddNode, ConfChangeRemoveNode, ConfChangeLeaveJoint:
@@ -344,27 +169,12 @@ func (t ConfChangeType) Valid() bool {
 	}
 }
 
-// ConfChange is the payload stored in an EntryConfChange log entry. Every
-// cluster reconfiguration — add, remove, or finalise — travels through the
-// log as a ConfChange so the transition is replicated and durable before
-// taking effect.
 type ConfChange struct {
-	// Type describes the operation.
-	Type ConfChangeType
-	// NodeID is the node being added or removed. It is zero for a
-	// ConfChangeLeaveJoint, which carries no target node.
+	Type   ConfChangeType
 	NodeID NodeID
-	// Addr is the network address of the node being added (e.g. "host:port").
-	// It is empty for removals and leave-joint entries. The transport uses it
-	// to open a connection to the new peer once the entry is applied.
-	Addr string
+	Addr   string
 }
 
-// Encode serialises cc into a compact binary form for storage in a log
-// entry's Data field. The layout is:
-//
-//	[type: 1 byte] [nodeID: 8 bytes, big-endian uint64]
-//	[addrLen: 4 bytes, big-endian uint32] [addr: addrLen bytes]
 func (cc ConfChange) Encode() []byte {
 	addr := []byte(cc.Addr)
 	b := make([]byte, 1+8+4+len(addr))
@@ -375,7 +185,6 @@ func (cc ConfChange) Encode() []byte {
 	return b
 }
 
-// DecodeConfChange deserialises a ConfChange from bytes written by Encode.
 func DecodeConfChange(b []byte) (ConfChange, error) {
 	const minLen = 1 + 8 + 4
 	if len(b) < minLen {
@@ -383,10 +192,6 @@ func DecodeConfChange(b []byte) (ConfChange, error) {
 	}
 	addrLen := int(binary.BigEndian.Uint32(b[9:13]))
 	if len(b) != minLen+addrLen {
-		// Exactly, not at least. A payload longer than its own declared
-		// address is not this encoding with something appended, it is a
-		// payload that does not describe itself, and reading it anyway would
-		// let two different byte strings name the same membership change.
 		return ConfChange{}, fmt.Errorf("raft: conf change payload is %d bytes, but its "+
 			"address length declares %d", len(b), minLen+addrLen)
 	}

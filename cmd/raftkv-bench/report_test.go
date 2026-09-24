@@ -14,18 +14,6 @@ import (
 	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
 
-// The numbers this tool prints are quoted in the README and in
-// docs/benchmarks.md as measurements. Every one of them comes out of this
-// arithmetic, and until now only the percentile function was tested, which is
-// the one place a mistake had already been found and fixed.
-//
-// The rest matters for the same reason. A throughput figure that counted
-// failures, or a mean taken over a different set of samples than the count it
-// is printed beside, is not a number that is slightly off: it is a number
-// that says the system did something it did not do, in a document that
-// presents it as evidence.
-
-// capture runs f with stdout redirected and returns what it wrote.
 func capture(t *testing.T, f func()) string {
 	t.Helper()
 
@@ -37,8 +25,6 @@ func capture(t *testing.T, f func()) string {
 	saved := os.Stdout
 	os.Stdout = w
 
-	// Read concurrently so that output larger than the pipe buffer cannot
-	// deadlock the writer.
 	done := make(chan string, 1)
 	go func() {
 		b, _ := io.ReadAll(r)
@@ -54,7 +40,6 @@ func capture(t *testing.T, f func()) string {
 	return out
 }
 
-// line returns the value on the report line starting with the given label.
 func line(t *testing.T, out, label string) string {
 	t.Helper()
 
@@ -68,9 +53,6 @@ func line(t *testing.T, out, label string) string {
 }
 
 func TestThroughputCountsOnlySuccessfulOperations(t *testing.T) {
-	// Six hundred operations in two seconds is three hundred a second. The
-	// forty failures are reported, and are not operations the system
-	// performed.
 	r := result{
 		reads:     400,
 		writes:    200,
@@ -96,8 +78,6 @@ func TestThroughputCountsOnlySuccessfulOperations(t *testing.T) {
 }
 
 func TestTheMeanIsTakenOverEverySample(t *testing.T) {
-	// One sample of 1ms and one of 3ms is a mean of 2ms. Printed beside a
-	// count of two, so the two have to describe the same set.
 	r := result{
 		reads:     2,
 		elapsed:   time.Second,
@@ -110,8 +90,6 @@ func TestTheMeanIsTakenOverEverySample(t *testing.T) {
 	if got := line(t, out, "latency mean"); got != "2ms" {
 		t.Errorf("mean = %q, want 2ms", got)
 	}
-	// And sorting happened, so the percentiles and the max are not reading
-	// the samples in arrival order.
 	if got := line(t, out, "latency max"); got != "3ms" {
 		t.Errorf("max = %q, want 3ms", got)
 	}
@@ -121,9 +99,6 @@ func TestTheMeanIsTakenOverEverySample(t *testing.T) {
 }
 
 func TestARunThatAchievedNothingSaysSo(t *testing.T) {
-	// The case that would otherwise divide by zero, and the one most worth
-	// getting right: a run where the cluster refused everything must not
-	// print a latency table that looks like a result.
 	r := result{
 		elapsed: time.Second,
 		errors:  map[string]int{"Unavailable": 17},
@@ -150,8 +125,6 @@ func TestClassifyNamesTheStatusCode(t *testing.T) {
 	}{
 		{"deadline", status.Error(codes.DeadlineExceeded, "too slow"), "DeadlineExceeded"},
 		{"unavailable", status.Error(codes.Unavailable, "down"), "Unavailable"},
-		// Named for where it came from, not for a code it does not have.
-		// "unknown" would differ from gRPC's Unknown only in case.
 		{"not a status", errors.New("a plain error"), "local:a plain error"},
 	}
 
@@ -165,8 +138,6 @@ func TestClassifyNamesTheStatusCode(t *testing.T) {
 }
 
 func TestNotLeaderFindsTheRedirect(t *testing.T) {
-	// Without this the benchmark cannot find the leader, and a run against a
-	// healthy cluster reports failures rather than numbers.
 	st, err := status.New(codes.FailedPrecondition, "not the leader").
 		WithDetails(&raftkvv1.NotLeader{LeaderId: 2, LeaderAddress: "10.0.0.2:9001"})
 	if err != nil {
@@ -183,9 +154,6 @@ func TestNotLeaderFindsTheRedirect(t *testing.T) {
 }
 
 func TestOtherFailuresAreNotMistakenForRedirects(t *testing.T) {
-	// A redirect is retried; anything else is an error to report. Treating
-	// an ordinary failure as a redirect would spin until the attempt limit
-	// and then report the wrong reason.
 	for _, err := range []error{
 		status.Error(codes.Unavailable, "no connection"),
 		status.Error(codes.FailedPrecondition, "failed, but with no redirect attached"),

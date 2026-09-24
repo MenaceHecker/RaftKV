@@ -1,12 +1,3 @@
-// Package statemachine implements the replicated state machine that sits on
-// top of the Raft log: an in-memory key-value store rebuilt by applying
-// committed entries in order.
-//
-// The one property everything here is built around is determinism. Every node
-// applies the same entries in the same order, so every node must arrive at
-// byte-identical state — otherwise the cluster agrees on the log but disagrees
-// on what the log means, which is a worse failure than not agreeing at all
-// because nothing detects it.
 package statemachine
 
 import (
@@ -19,21 +10,10 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Op is the kind of mutation a command performs.
-//
-// Reads are absent on purpose. A linearizable Get is served by confirming
-// leadership and reading local state, not by appending to the log — putting
-// reads in the log would make every read a full round of replication for no
-// gain in correctness.
 type Op uint8
 
 const (
-	// OpPut sets a key to a value, creating it if absent.
-	OpPut Op = 1
-	// OpDelete removes a key. Deleting a key that does not exist is not an
-	// error: commands must be applicable on every replica regardless of what
-	// that replica happens to hold, and a delete that failed on some nodes
-	// and succeeded on others would diverge the cluster.
+	OpPut    Op = 1
 	OpDelete Op = 2
 )
 
@@ -49,47 +29,24 @@ func (o Op) String() string {
 }
 
 var (
-	// ErrMalformedCommand means an entry's payload could not be decoded. On a
-	// follower this means the log itself is damaged, since the leader only
-	// ever replicates commands it encoded.
 	ErrMalformedCommand = errors.New("statemachine: malformed command")
 
-	// ErrOutOfOrder means an entry arrived that does not follow the last one
-	// applied. The Raft core delivers committed entries in index order, so a
-	// gap is a bug in the caller rather than a recoverable condition.
 	ErrOutOfOrder = errors.New("statemachine: entry is out of order")
 
-	// ErrMalformedSnapshot means a snapshot could not be decoded.
 	ErrMalformedSnapshot = errors.New("statemachine: malformed snapshot")
 )
 
-// maxFieldSize bounds any length prefix read from an encoded command or
-// snapshot, so a corrupt length cannot drive an unbounded allocation before
-// the rest of the decode discovers something is wrong.
-const maxFieldSize = 64 << 20 // 64 MiB
+const maxFieldSize = 64 << 20
 
-// Command is a single mutation of the store, the thing carried in an entry's
-// opaque Data field.
 type Command struct {
-	// ClientID identifies the client session this request belongs to, or
-	// NoClient for a request that is not deduplicated.
 	ClientID uint64
-	// Seq is the client's strictly increasing sequence number. Together with
-	// ClientID it lets the state machine recognize a retry and ignore it.
-	Seq uint64
+	Seq      uint64
 
 	Op    Op
 	Key   string
-	Value []byte // ignored for OpDelete
+	Value []byte
 }
 
-// Encode serializes a command for the log.
-//
-// The layout is fixed and hand-rolled rather than reflective, for the same
-// reason the log records are: an encoding whose bytes are decided by struct
-// field order or map iteration would make the same logical command serialize
-// differently on different nodes or Go versions, and the whole point of the
-// state machine is that every replica does exactly the same thing.
 func (c Command) Encode() []byte {
 	buf := make([]byte, 0, 1+16+8+len(c.Key)+8+len(c.Value))
 	buf = append(buf, byte(c.Op))
@@ -100,7 +57,6 @@ func (c Command) Encode() []byte {
 	return buf
 }
 
-// DecodeCommand deserializes a command from an entry's payload.
 func DecodeCommand(b []byte) (Command, error) {
 	if len(b) == 0 {
 		return Command{}, fmt.Errorf("%w: empty payload", ErrMalformedCommand)
@@ -132,15 +88,6 @@ func DecodeCommand(b []byte) (Command, error) {
 		return Command{}, fmt.Errorf("%w: reading value: %w", ErrMalformedCommand, err)
 	}
 
-	// Nothing may follow the value. A decoder that ignored trailing bytes
-	// would accept two different encodings of the same command, which costs
-	// the encoding its only useful structural property: that a command and
-	// its bytes determine each other. It also throws away a free corruption
-	// check, since damage that happens to leave the prefix intact would be
-	// applied as though the entry were sound.
-	//
-	// The snapshot decoder below has always rejected trailing bytes. This
-	// one did not, which a fuzzer noticed in about fifty milliseconds.
 	if r.pos != len(r.b) {
 		return Command{}, fmt.Errorf("%w: %d trailing bytes after the value",
 			ErrMalformedCommand, len(r.b)-r.pos)
@@ -155,33 +102,19 @@ func DecodeCommand(b []byte) (Command, error) {
 	}, nil
 }
 
-// KV is the replicated key-value store.
-//
-// It is safe for concurrent use: Raft applies entries from one goroutine while
-// clients read from others.
 type KV struct {
 	mu   sync.RWMutex
 	data map[string][]byte
 
-	// sessions deduplicates client retries. It is part of the state machine,
-	// not a server-side cache, so every replica reaches the same conclusion
-	// about which requests are duplicates.
 	sessions *sessions
 
-	// applied is the index of the last entry incorporated into this state.
-	// It travels with the snapshot, so a restored replica knows where in the
-	// log to resume.
 	applied raft.Index
 }
 
-// New returns an empty store, as a node with no snapshot and no log starts.
 func New() *KV {
 	return NewWithMaxSessions(DefaultMaxSessions)
 }
 
-// NewWithMaxSessions returns an empty store that remembers at most max client
-// sessions. Tests use it to exercise eviction without generating thousands of
-// clients.
 func NewWithMaxSessions(max int) *KV {
 	return &KV{
 		data:     make(map[string][]byte),
@@ -189,21 +122,11 @@ func NewWithMaxSessions(max int) *KV {
 	}
 }
 
-// Apply incorporates one committed entry.
-//
-// Entries must arrive in index order. An entry at or below the last applied
-// index is ignored rather than rejected: after a crash the node replays from
-// the log, and re-delivering entries the snapshot already covers is the normal
-// path, not an error.
 func (kv *KV) Apply(e raft.Entry) error {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
 	if e.Index <= kv.applied {
-		// Already reflected in this state. Applying it again would be
-		// harmless for Put and Delete, which are idempotent, but silently
-		// double-applying is a habit that stops being safe the moment a
-		// non-idempotent command type is added.
 		return nil
 	}
 	if e.Index != kv.applied+1 {
@@ -216,17 +139,11 @@ func (kv *KV) Apply(e raft.Entry) error {
 		if err != nil {
 			return fmt.Errorf("applying entry %d: %w", e.Index, err)
 		}
-		// A duplicate still consumes its index: the entry is committed and
-		// every replica must move its applied cursor past it, whether or not
-		// the command takes effect.
 		if kv.sessions.shouldApply(cmd.ClientID, cmd.Seq, e.Index) {
 			kv.applyCommand(cmd)
 		}
 
 	case raft.EntryNoOp, raft.EntryConfChange:
-		// Not state machine commands. They still occupy an index, so the
-		// applied cursor must advance past them or the log and the state
-		// machine drift apart by one for every leader election.
 
 	default:
 		return fmt.Errorf("applying entry %d: %w: unknown entry type %d",
@@ -237,12 +154,9 @@ func (kv *KV) Apply(e raft.Entry) error {
 	return nil
 }
 
-// applyCommand performs the mutation. The caller must hold the write lock.
 func (kv *KV) applyCommand(cmd Command) {
 	switch cmd.Op {
 	case OpPut:
-		// Copy the value: it came from a decoded log entry whose buffer the
-		// caller may reuse, and the store must own what it holds.
 		v := make([]byte, len(cmd.Value))
 		copy(v, cmd.Value)
 		kv.data[cmd.Key] = v
@@ -252,11 +166,6 @@ func (kv *KV) applyCommand(cmd Command) {
 	}
 }
 
-// Get returns the value for a key.
-//
-// This reads local state, which is only linearizable once the caller has
-// confirmed the node is still leader. That confirmation belongs to the layer
-// above; the store deliberately does not pretend to provide it.
 func (kv *KV) Get(key string) ([]byte, bool) {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
@@ -266,44 +175,35 @@ func (kv *KV) Get(key string) ([]byte, bool) {
 		return nil, false
 	}
 
-	// Copy on the way out too, so a caller cannot mutate committed state by
-	// holding on to the returned slice.
 	out := make([]byte, len(v))
 	copy(out, v)
 	return out, true
 }
 
-// LastSeq returns the highest sequence number applied for a client, and
-// whether that client is tracked at all. A client that is not tracked has
-// either never been seen or has been evicted, and cannot be told apart.
 func (kv *KV) LastSeq(clientID uint64) (uint64, bool) {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
 	return kv.sessions.lastSeq(clientID)
 }
 
-// Sessions returns how many client sessions are currently tracked.
 func (kv *KV) Sessions() int {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
 	return kv.sessions.len()
 }
 
-// Applied returns the index of the last entry applied.
 func (kv *KV) Applied() raft.Index {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
 	return kv.applied
 }
 
-// Len returns the number of keys held.
 func (kv *KV) Len() int {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
 	return len(kv.data)
 }
 
-// Keys returns every key, sorted. Intended for tests and debugging.
 func (kv *KV) Keys() []string {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
@@ -319,14 +219,6 @@ func (kv *KV) sortedKeysLocked() []string {
 	return keys
 }
 
-// Snapshot serializes the entire store.
-//
-// Keys are written in sorted order, which matters more than it looks. Go
-// randomizes map iteration, so an unsorted encoding would produce different
-// bytes on every call and on every node for identical state. Sorting makes a
-// snapshot a deterministic function of the state, which in turn makes two
-// replicas' snapshots directly comparable — the cheapest possible check that
-// they really did converge, and the basis for verifying it in tests.
 func (kv *KV) Snapshot() ([]byte, error) {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
@@ -341,44 +233,19 @@ func (kv *KV) Snapshot() ([]byte, error) {
 		buf = appendBytes(buf, kv.data[k])
 	}
 
-	// The session table travels with the snapshot. A replica that restored
-	// without it would have forgotten every client's progress and would
-	// re-apply the next retry it saw, which is exactly the reordering hazard
-	// the table exists to prevent.
 	buf = kv.sessions.encode(buf)
 	return buf, nil
 }
 
-// snapshotSizeLocked returns exactly how many bytes Snapshot will produce.
-//
-// The buffer is sized from this rather than from a guess. The guess it
-// replaces assumed thirty-two bytes per pair, which is about right for tiny
-// values and wrong by two orders of magnitude for real ones: a store of
-// sixteen thousand four kilobyte values produced a 64 MB snapshot from a
-// 0.5 MB hint, so the buffer doubled seven times and copied itself on each
-// one. That cost 353 MB of allocation to produce 64 MB of output, and a peak
-// heap of nearly three times the store it was snapshotting, at exactly the
-// moment a node is least able to spare it.
-//
-// Everything here is already known: the store holds its own keys and values,
-// and the session table is fixed width per client.
 func (kv *KV) snapshotSizeLocked(keys []string) int {
-	// applied index and key count.
 	size := 8 + 8
 	for _, k := range keys {
-		// Each pair is a length-prefixed key and a length-prefixed value.
 		size += 8 + len(k) + 8 + len(kv.data[k])
 	}
-	// The session table: a count, then a client ID, sequence and index each.
 	size += 8 + len(kv.sessions.entries)*24
 	return size
 }
 
-// Restore replaces the store's contents with a snapshot.
-//
-// It is all-or-nothing: the new state is built separately and swapped in only
-// once it has decoded cleanly, so a corrupt snapshot leaves the existing state
-// untouched rather than half-overwritten.
 func (kv *KV) Restore(b []byte) error {
 	r := &reader{b: b}
 
@@ -394,16 +261,6 @@ func (kv *KV) Restore(b []byte) error {
 		return fmt.Errorf("%w: implausible key count %d", ErrMalformedSnapshot, count)
 	}
 
-	// The count has to be consistent with the bytes that follow it before a
-	// single one of them is trusted. Every pair costs at least two eight byte
-	// length prefixes, so a payload cannot hold more than a sixteenth of its
-	// remaining length in keys.
-	//
-	// Without this the count alone decides how large a map to allocate, and
-	// it arrives from a peer or off a disk. A sixteen byte payload declaring
-	// fifty million keys allocated three gigabytes before the very next read
-	// failed and rejected it, which is a node lost to a message too small to
-	// bother checking.
 	const minBytesPerPair = 16
 	if remaining := uint64(len(r.b) - r.pos); count > remaining/minBytesPerPair {
 		return fmt.Errorf("%w: %d keys declared but only %d bytes remain",
@@ -422,15 +279,6 @@ func (kv *KV) Restore(b []byte) error {
 			return fmt.Errorf("%w: reading value for key %q: %w", ErrMalformedSnapshot, key, err)
 		}
 
-		// Keys must arrive strictly ascending, which is the order Snapshot
-		// writes them in. Accepting any other order would mean several
-		// different byte strings encode the same state, and the encoding's
-		// one structural guarantee is that they do not: comparing two
-		// replicas' snapshots directly is how convergence is checked, here
-		// and in the chaos suite.
-		//
-		// Strictness also rules out a repeated key, which would otherwise be
-		// resolved silently by whichever copy happened to be written last.
 		if i > 0 && string(key) <= previous {
 			return fmt.Errorf("%w: key %q follows %q, but keys must ascend",
 				ErrMalformedSnapshot, key, previous)
@@ -458,21 +306,17 @@ func (kv *KV) Restore(b []byte) error {
 	return nil
 }
 
-// appendUint64 writes v in little-endian order.
 func appendUint64(dst []byte, v uint64) []byte {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], v)
 	return append(dst, buf[:]...)
 }
 
-// appendBytes writes a length-prefixed byte slice.
 func appendBytes(dst []byte, b []byte) []byte {
 	dst = appendUint64(dst, uint64(len(b)))
 	return append(dst, b...)
 }
 
-// reader walks an encoded buffer, reporting a shortfall rather than panicking
-// on a slice bound.
 type reader struct {
 	b   []byte
 	pos int

@@ -6,40 +6,14 @@ import (
 	"math/rand"
 )
 
-// ErrNotLeader is returned when a proposal reaches a node that is not the
-// leader. Phase 3's transport turns this into a redirect to the address of the
-// node named by Leader.
 var ErrNotLeader = errors.New("raft: node is not the leader")
 
-// DefaultMaxAppendBytes is how much entry payload one AppendEntries carries
-// when nothing else is specified.
-//
-// It is chosen to sit well under the message size limits transports impose by
-// default, gRPC's four megabytes among them, with room for the envelope and
-// for entries whose recorded size underestimates their encoded size.
-const DefaultMaxAppendBytes = 1 << 20 // 1 MiB
+const DefaultMaxAppendBytes = 1 << 20
 
-// DefaultMaxCommittedEntries is how many committed entries one Ready hands
-// back when nothing else is specified.
-//
-// It is a count rather than a byte budget because the cost of applying is
-// dominated by per-entry work rather than by payload size: twenty thousand
-// tiny entries are slow to apply and would fit comfortably inside any
-// sensible byte limit.
 const DefaultMaxCommittedEntries = 1000
 
-// entryOverheadBytes is a rough per-entry allowance for the term, index and
-// type that travel with the payload. The budget only has to be approximately
-// right: it exists to keep messages far from a hard limit, not to predict
-// their encoded size exactly.
 const entryOverheadBytes = 32
 
-// limitEntries returns the longest prefix of entries that fits in budget.
-//
-// It always returns at least one entry. A single entry larger than the whole
-// budget still has to be sent, because the alternative is a follower that can
-// never be given it and therefore never catches up. Refusing to send it would
-// turn a large write into a permanently stuck replica.
 func limitEntries(entries []Entry, budget int) []Entry {
 	total := 0
 	for i, e := range entries {
@@ -52,98 +26,27 @@ func limitEntries(entries []Entry, budget int) []Entry {
 	return entries
 }
 
-// Config describes one node's participation in a cluster. Every field except
-// Rand is required.
 type Config struct {
-	// ID is this node's identifier. It must be non-zero and must appear in
-	// Peers.
 	ID NodeID
 
-	// Peers is the cluster membership this node is started with. It is used
-	// only when there is no configuration to restore, which means the very
-	// first boot of a cluster.
-	//
-	// It must contain this node's ID. Once membership has changed, the log and
-	// any snapshot are authoritative and this field is ignored.
 	Peers []NodeID
 
-	// InitialConfState is the membership recovered from a snapshot, if there
-	// was one. It supersedes Peers.
-	//
-	// A node restarting after its log was compacted past a membership change
-	// cannot derive that change from the log any more, because the entry is
-	// gone. The snapshot is the only remaining record of it, so restoring from
-	// there is what keeps a compacted node's view of the cluster in step with
-	// everyone else's.
 	InitialConfState *ConfState
 
-	// ElectionTick is how many Tick calls a follower tolerates without
-	// hearing from a leader before it starts an election. The effective
-	// timeout is randomized in [ElectionTick, 2*ElectionTick) so nodes
-	// rarely campaign simultaneously and split the vote (§5.2).
 	ElectionTick int
 
-	// HeartbeatTick is how many Tick calls pass between a leader's
-	// heartbeats. It must be well below ElectionTick, or followers will time
-	// out under a perfectly healthy leader.
 	HeartbeatTick int
 
-	// MaxCommittedEntries bounds how many committed entries one Ready hands
-	// back for applying. Zero means the default.
-	//
-	// Applying happens on whatever goroutine drives the node, and that is
-	// the same goroutine that ticks the clock and reads incoming messages.
-	// An unbounded batch therefore stops the node doing anything else for as
-	// long as it takes: measured at 478ms for a 20,000 entry replay, which
-	// is half a default election timeout spent unable to send a heartbeat,
-	// answer one, or even notice its own timer. Handing the work back in
-	// pieces lets the loop breathe between them.
 	MaxCommittedEntries int
 
-	// MaxAppendBytes bounds the entry payload the leader puts in one
-	// AppendEntries message. Zero means the default.
-	//
-	// Without a bound, a follower that has fallen behind is sent every entry
-	// it is missing in a single message, and how far behind a follower can
-	// fall has no limit at all. Any transport imposes a maximum message
-	// size, so past some backlog the message is simply undeliverable and the
-	// follower never recovers. Sending the backlog in pieces costs a few
-	// extra round trips and removes the cliff.
 	MaxAppendBytes int
 
-	// CheckQuorum makes a leader step down if it has not heard from a
-	// majority within an election timeout.
-	//
-	// Raft does not require this. A leader that loses contact with everyone
-	// keeps believing it leads, and that is safe: it cannot commit anything
-	// without a majority, and read-index will not let it answer a read. What
-	// it cannot do is notice. It goes on advertising itself as the leader,
-	// so anything routing by that signal keeps sending it work it is unable
-	// to finish, and a readiness probe asking "is there a leader" gets the
-	// wrong answer indefinitely.
-	//
-	// With this set, a leader that cannot reach a majority discovers it
-	// within an election timeout and becomes a follower, which is the same
-	// conclusion the rest of the cluster reached the moment it disappeared.
 	CheckQuorum bool
 
-	// PreVote makes a node ask whether an election would be won before
-	// starting one, rather than raising its term and finding out (§9.6).
-	//
-	// Without it, a node that has been partitioned away or has just
-	// restarted disrupts a healthy leader simply by campaigning: its vote
-	// request carries a higher term, and the term rules force everyone to
-	// step down to it. The cluster then has to elect a leader again, often
-	// the same one, having served nothing in the meantime.
 	PreVote bool
 
-	// Storage holds the persistent state. The node reads its hard state from
-	// it at startup and writes through it on every term change and vote.
 	Storage Storage
 
-	// Rand supplies the randomized election timeout. Tests pass a seeded
-	// source so a whole cluster run is reproducible; leaving it nil derives
-	// a source from the node ID.
 	Rand *rand.Rand
 }
 
@@ -152,8 +55,6 @@ func (c *Config) validate() error {
 		return errors.New("raft: config ID must be non-zero")
 	}
 
-	// A restored configuration replaces the peer list entirely, so the peer
-	// list only has to make sense when there is nothing to restore.
 	if c.InitialConfState != nil && !c.InitialConfState.IsEmpty() {
 		if c.Storage == nil {
 			return errors.New("raft: config Storage must not be nil")
@@ -207,135 +108,61 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// progress is a leader's bookkeeping for one follower.
 type progress struct {
-	// next is the index of the next entry to send. It is optimistic: the
-	// leader guesses its own last index plus one and backs off on rejection.
-	next Index
-	// match is the highest index known to be replicated on that follower. It
-	// is conservative — only a successful append moves it. Commit decisions
-	// are made from match values, never from next.
-	match Index
-	// heldBack records that the last append to this follower was cut short
-	// by the size budget, so entries are waiting that were deliberately not
-	// sent.
-	//
-	// It is the difference between a follower that is catching up and one
-	// that is merely a batch behind a busy leader. The first should be sent
-	// the rest immediately; the second is already going to receive it with
-	// the next proposal, and chasing it produces an extra message per
-	// response for no gain.
+	next     Index
+	match    Index
 	heldBack bool
-	// active records that this follower has been heard from since the last
-	// quorum check. Any message counts: what is being established is that
-	// the node is reachable and still recognises this leader, not that any
-	// particular exchange completed.
-	active bool
+	active   bool
 }
 
-// Node is a single Raft peer, and it is a pure state machine: it never blocks,
-// never spawns a goroutine, and never reads the wall clock. The caller drives
-// it by calling Tick to advance logical time and Step to deliver a message,
-// then drains the resulting effects with Ready.
-//
-// That design is what makes a five-node cluster reproducible in one goroutine,
-// and it is the foundation the Phase 5 chaos harness needs: with no real time
-// and no real network anywhere in the core, a failing scenario replays exactly.
-//
-// A Node is not safe for concurrent use. The intended pattern is one goroutine
-// per node owning all of Tick, Step, Ready, and Advance.
 type Node struct {
 	id NodeID
 
-	// conf is the cluster membership. Every quorum decision — commit,
-	// election, read-index confirmation — is asked of it rather than computed
-	// from a peer count, because during a joint transition there are two
-	// voter sets and a majority of one is not a decision.
 	conf config
 
-	// confSeq counts configuration changes, so a driver can notice one
-	// without rebuilding and comparing a ConfState on every pass.
 	confSeq uint64
 
-	// jointEntryIndex is the log index of the entry that opened the current
-	// transition, or zero when none is open. The leader waits for it to commit
-	// before finishing the transition.
 	jointEntryIndex Index
 
-	// baseConf is the membership as of the point the log begins: the
-	// configuration every conf-change entry still in the log is applied on top
-	// of. conf is always baseConf plus those entries, which is what lets a
-	// truncation that removes a change be undone by simply deriving conf
-	// again.
-	//
-	// It comes from the snapshot when there is one, and from the statically
-	// configured peer set only on a cluster's very first boot. That is what
-	// makes compaction safe alongside membership changes: an entry that has
-	// been compacted away is already reflected in the base.
 	baseConf config
 
-	state State
-	// term is the node's current term, mirroring the persisted hard state.
-	term Term
-	// vote is who this node voted for in term, or None.
-	vote NodeID
-	// leader is the leader this node currently recognizes, or None if it
-	// knows of none in this term.
+	state  State
+	term   Term
+	vote   NodeID
 	leader NodeID
 
 	log *raftLog
 
-	// votes records responses to this node's own campaign, keyed by voter.
-	// Only meaningful while Candidate.
 	votes map[NodeID]bool
 
-	// progress tracks replication to each peer. Only meaningful while
-	// Leader; rebuilt from scratch on election.
 	progress map[NodeID]*progress
 
-	// readOnly tracks in-flight read-index confirmations. Only meaningful
-	// while Leader; abandoned on any state change.
 	readOnly *readOnly
 
-	// readStates accumulates completed read indexes until Ready collects
-	// them, mirroring how msgs accumulates outbound messages.
 	readStates []ReadState
 
-	// pendingSnapshot holds a snapshot installed from a leader, waiting for
-	// Ready to hand it to the state machine.
 	pendingSnapshot *Snapshot
 
 	electionElapsed  int
 	heartbeatElapsed int
 	electionTick     int
 
-	// preVote enables the pre-vote round described on Config.PreVote.
 	preVote bool
 
-	// checkQuorum enables the step-down described on Config.CheckQuorum.
 	checkQuorum bool
 
-	// maxAppendBytes bounds one AppendEntries payload; see Config.
 	maxAppendBytes int
 
-	// maxCommittedEntries bounds one Ready's committed batch; see Config.
-	maxCommittedEntries int
-	heartbeatTick       int
-	// randomizedElectionTimeout is redrawn on every state change, so a
-	// repeated split vote does not repeat the same timing.
+	maxCommittedEntries       int
+	heartbeatTick             int
 	randomizedElectionTimeout int
 
 	rand    *rand.Rand
 	storage Storage
 
-	// msgs accumulates outbound messages until Ready collects them.
 	msgs []Message
 }
 
-// NewNode builds a node from cfg and restores whatever the previous
-// incarnation persisted. A node always starts as a follower, even if it was
-// leader before it crashed: leadership is not durable, only the term and vote
-// are.
 func NewNode(cfg Config) (*Node, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -351,9 +178,6 @@ func NewNode(cfg Config) (*Node, error) {
 		rng = rand.New(rand.NewSource(int64(cfg.ID)))
 	}
 
-	// A restored configuration wins over the static peer list: it reflects
-	// every membership change that committed before the snapshot was taken,
-	// including ones whose log entries have since been compacted away.
 	maxAppendBytes := cfg.MaxAppendBytes
 	if maxAppendBytes <= 0 {
 		maxAppendBytes = DefaultMaxAppendBytes
@@ -392,10 +216,6 @@ func NewNode(cfg Config) (*Node, error) {
 	}
 	n.resetElectionTimeout()
 
-	// A restarting node's membership lives in its log, not in the peer list it
-	// was started with. Deriving it here means a node that crashed part-way
-	// through a membership change comes back believing whatever its log says,
-	// which is the same thing every other node derives from the same entries.
 	if err := n.rebuildConfig(); err != nil {
 		return nil, err
 	}
@@ -403,92 +223,44 @@ func NewNode(cfg Config) (*Node, error) {
 	return n, nil
 }
 
-// ID returns this node's identifier.
 func (n *Node) ID() NodeID { return n.id }
 
-// State returns the node's current role.
 func (n *Node) State() State { return n.state }
 
-// Term returns the node's current term.
 func (n *Node) Term() Term { return n.term }
 
-// Leader returns the leader this node currently recognizes, or None if it
-// knows of none. A follower learns the leader from the first AppendEntries of
-// the term.
 func (n *Node) Leader() NodeID { return n.leader }
 
-// LastIndex returns the index of the last entry in this node's log.
 func (n *Node) LastIndex() Index { return n.log.lastIndex() }
 
-// CommitIndex returns the highest index this node knows to be committed.
 func (n *Node) CommitIndex() Index { return n.log.committed }
 
-// TermAt returns the term of the entry at an index.
-//
-// It is how a caller tells "my entry committed" from "a different entry took
-// that index". The two are indistinguishable from the index alone, and
-// confusing them would report a write as successful when a new leader had
-// actually overwritten it.
-//
-// It reports ErrCompacted for an index below the log's start and
-// ErrUnavailable for one past its end.
 func (n *Node) TermAt(i Index) (Term, error) { return n.log.term(i) }
 
-// Members returns every node in any currently active configuration, sorted.
 func (n *Node) Members() []NodeID { return n.conf.members() }
 
-// InJointConfiguration reports whether a membership change is in progress.
 func (n *Node) InJointConfiguration() bool { return n.conf.inJoint() }
 
-// isSoleVoter reports whether this node alone constitutes every majority the
-// cluster needs.
-//
-// A single-node cluster has nobody to hear from, so decisions that would
-// otherwise wait for acknowledgements are settled immediately. Asking the
-// configuration rather than counting peers keeps that true during a joint
-// transition, where being the only member of one set is not enough.
 func (n *Node) isSoleVoter() bool {
 	members := n.conf.members()
 	return len(members) == 1 && members[0] == n.id
 }
 
-// Ready is the batch of effects produced since the previous Ready. The caller
-// sends Messages, applies CommittedEntries in order, then calls Advance.
 type Ready struct {
-	// Messages are the messages to deliver to other nodes. Anything these
-	// promise has already been persisted, so they are safe to send the
-	// moment they are handed over.
 	Messages []Message
 
-	// CommittedEntries are the entries newly known to be committed, in index
-	// order, ready for the state machine.
 	CommittedEntries []Entry
 
-	// ReadStates are read indexes whose leadership has been confirmed. The
-	// caller must wait until the state machine has applied through each
-	// Index before serving the corresponding read.
 	ReadStates []ReadState
 
-	// Snapshot is a state machine image received from the leader, or nil.
-	//
-	// When present it must be restored *before* CommittedEntries are applied:
-	// it replaces the state machine wholesale, and anything applied first
-	// would be overwritten by it.
 	Snapshot *Snapshot
 }
 
-// IsEmpty reports whether there is nothing for the caller to do.
 func (r Ready) IsEmpty() bool {
 	return len(r.Messages) == 0 && len(r.CommittedEntries) == 0 &&
 		len(r.ReadStates) == 0 && r.Snapshot == nil
 }
 
-// Ready drains the pending effects.
-//
-// It deliberately does not mark the committed entries as applied. The caller
-// does that through Advance once they are durable in the state machine, so a
-// crash part-way through applying replays those entries rather than skipping
-// them.
 func (n *Node) Ready() Ready {
 	rd := Ready{Messages: n.msgs, ReadStates: n.readStates, Snapshot: n.pendingSnapshot}
 	n.msgs = nil
@@ -503,16 +275,8 @@ func (n *Node) Ready() Ready {
 	return rd
 }
 
-// quorumActive reports whether a majority has been heard from since the last
-// check.
-//
-// The tally goes through the configuration rather than a raw count, for the
-// same reason elections do: during a joint transition a majority of one voter
-// set is not a majority, and a leader that counted it as one would keep
-// believing it led a cluster the other set had already moved past.
 func (n *Node) quorumActive() bool {
 	active := make(map[NodeID]bool, len(n.progress))
-	// A leader is trivially in touch with itself.
 	active[n.id] = true
 	for id, pr := range n.progress {
 		if pr.active {
@@ -522,24 +286,16 @@ func (n *Node) quorumActive() bool {
 	return n.conf.voteGranted(active)
 }
 
-// clearActive starts a new observation interval.
 func (n *Node) clearActive() {
 	for _, pr := range n.progress {
 		pr.active = false
 	}
 }
 
-// HasUnapplied reports whether committed entries are still waiting.
-//
-// A caller that has just applied a bounded batch uses this to know it should
-// come back for more rather than waiting for the next message or tick.
 func (n *Node) HasUnapplied() bool { return n.log.hasUnapplied() }
 
-// Advance reports that the entries from rd have been applied.
 func (n *Node) Advance(rd Ready) {
 	if rd.Snapshot != nil {
-		// The state machine has been rebuilt from the image, so it is applied
-		// through the snapshot's index whether or not entries followed.
 		if rd.Snapshot.Index > n.log.applied {
 			n.log.applied = rd.Snapshot.Index
 		}
@@ -549,13 +305,6 @@ func (n *Node) Advance(rd Ready) {
 	}
 }
 
-// Tick advances the node's logical clock by one unit. A follower or candidate
-// that goes its whole election timeout without contact starts an election; a
-// leader sends heartbeats every HeartbeatTick ticks.
-//
-// It returns an error only when starting an election fails to persist the new
-// term. That is unrecoverable: the node must not carry on as though the term
-// change had happened.
 func (n *Node) Tick() error {
 	switch n.state {
 	case Leader:
@@ -564,10 +313,6 @@ func (n *Node) Tick() error {
 			if n.electionElapsed >= n.randomizedElectionTimeout {
 				n.electionElapsed = 0
 				if !n.quorumActive() {
-					// Nobody has been in touch for a whole election timeout,
-					// so this node is on the wrong side of a partition or
-					// the rest of the cluster is gone. Either way it is not
-					// leading anything.
 					return n.becomeFollower(n.term, None)
 				}
 				n.clearActive()
@@ -588,12 +333,6 @@ func (n *Node) Tick() error {
 	return nil
 }
 
-// Step delivers a message to the node.
-//
-// Every message is filtered through the term rules of §5.1 before its type is
-// considered: a higher term always makes this node a follower of that term,
-// and a lower term is stale. Handling this once, here, is what keeps the
-// per-message handlers free of term checks.
 func (n *Node) Step(m Message) error {
 	switch {
 	case m.Type == MsgCampaign:
@@ -606,35 +345,18 @@ func (n *Node) Step(m Message) error {
 		return n.handleReadIndex(m)
 
 	case m.Type == MsgPreVoteRequest:
-		// Deliberately ahead of the term rules. A pre-vote carries the term
-		// the sender would campaign in, which is by construction higher than
-		// its own, and letting §5.1 act on it would cause exactly the
-		// disruption pre-vote exists to prevent.
 		return n.handlePreVoteRequest(m)
 
 	case m.Type == MsgPreVoteResponse && m.Granted:
-		// A grant echoes a hypothetical term that nobody has adopted, so it
-		// must not be treated as evidence of a newer one.
 		return n.handlePreVoteResponse(m)
 
 	case m.Type == MsgPreVoteResponse && m.Term > n.term:
-		// A rejection carrying a real higher term is the one case where a
-		// pre-vote teaches the sender something: its information is stale.
-		// Standing down here costs nothing, because no term was raised to
-		// get this answer.
 		return n.becomeFollower(m.Term, None)
 
 	case m.Type == MsgPreVoteResponse:
 		return n.handlePreVoteResponse(m)
 
 	case m.Term > n.term:
-		// A newer term means this node's information is out of date,
-		// whatever its role. Step down, then handle the message as a
-		// follower of the new term.
-		//
-		// The leader is taken from the message only when the sender must be
-		// the leader. A vote request proves an election is under way, not
-		// who won it, so in that case the leader stays unknown.
 		leader := m.From
 		if m.Type == MsgVoteRequest {
 			leader = None
@@ -644,9 +366,6 @@ func (n *Node) Step(m Message) error {
 		}
 
 	case m.Term < n.term:
-		// Stale message. A vote request gets an explicit rejection so the
-		// sender learns the real term and steps down promptly. Anything else
-		// is dropped: the sender will find out from its own traffic.
 		if m.Type == MsgVoteRequest {
 			n.send(Message{
 				Type:    MsgVoteResponse,
@@ -684,26 +403,10 @@ func (n *Node) Step(m Message) error {
 	}
 }
 
-// Propose asks a leader to append a command to the log. It returns
-// ErrNotLeader on any other node.
 func (n *Node) Propose(data []byte) error {
 	return n.ProposeBatch([][]byte{data})
 }
 
-// ProposeBatch appends several client commands as a single log write.
-//
-// This is the entry point group commit is built on. The commands become
-// contiguous entries appended in one call, so the storage layer makes them
-// durable with one fsync rather than one each. Since a write cannot be
-// acknowledged until it is durable, and an fsync costs the same whether it
-// covers one entry or a hundred, batching is the difference between write
-// throughput being capped at one fsync per write and being capped at one
-// fsync per batch.
-//
-// Ordering within the batch is preserved, and the caller can locate the
-// entries afterwards: they occupy the last len(datas) indexes of the log.
-// Either every command is appended or none is, because a failure happens
-// before anything is written.
 func (n *Node) ProposeBatch(datas [][]byte) error {
 	if len(datas) == 0 {
 		return nil
@@ -719,24 +422,16 @@ func (n *Node) ProposeBatch(datas [][]byte) error {
 	})
 }
 
-// send queues a message for delivery. From is filled in here so no caller can
-// forget it.
 func (n *Node) send(m Message) {
 	m.From = n.id
 	n.msgs = append(n.msgs, m)
 }
 
-// becomeFollower steps down to term, recognizing leader, which may be None. It
-// persists the term change before returning, because a node may not act on a
-// term it has not durably recorded.
 func (n *Node) becomeFollower(term Term, leader NodeID) error {
 	if term < n.term {
 		return fmt.Errorf("raft: cannot step down from term %d to %d", n.term, term)
 	}
 
-	// Entering a new term clears the vote, since this node has not voted in
-	// it yet. Staying in the same term keeps the existing vote, which is what
-	// stops a node voting twice in one term.
 	if term > n.term {
 		if err := n.persist(term, None); err != nil {
 			return err
@@ -749,7 +444,6 @@ func (n *Node) becomeFollower(term Term, leader NodeID) error {
 	return nil
 }
 
-// becomeCandidate advances to the next term and votes for itself.
 func (n *Node) becomeCandidate() error {
 	if n.state == Leader {
 		return errors.New("raft: a leader cannot become a candidate")
@@ -765,12 +459,6 @@ func (n *Node) becomeCandidate() error {
 	return nil
 }
 
-// becomePreCandidate starts a pre-vote round.
-//
-// Nothing durable happens here, and that is the entire point. The term is not
-// raised, no vote is recorded, and the node remains as harmless to the rest of
-// the cluster as the follower it still is. The only state that changes is
-// local bookkeeping for counting the answers.
 func (n *Node) becomePreCandidate() error {
 	if n.state == Leader {
 		return errors.New("raft: a leader cannot become a pre-candidate")
@@ -779,14 +467,10 @@ func (n *Node) becomePreCandidate() error {
 	n.state = PreCandidate
 	n.leader = None
 	n.reset()
-	// A node always answers its own hypothetical question with yes.
 	n.votes = map[NodeID]bool{n.id: true}
 	return nil
 }
 
-// becomeLeader takes leadership of the current term and appends the no-op entry
-// that lets a new leader commit entries carried over from earlier terms
-// (§5.4.2).
 func (n *Node) becomeLeader() error {
 	if n.state != Candidate {
 		return fmt.Errorf("raft: cannot become leader from %s", n.state)
@@ -796,8 +480,6 @@ func (n *Node) becomeLeader() error {
 	n.leader = n.id
 	n.reset()
 
-	// Reset replication state: next is optimistic, match is empty. A new
-	// leader knows nothing about its followers' logs until they respond.
 	members := n.conf.members()
 	n.progress = make(map[NodeID]*progress, len(members))
 	for _, p := range members {
@@ -812,27 +494,15 @@ func (n *Node) becomeLeader() error {
 	if _, err := n.log.append([]Entry{noop}); err != nil {
 		return err
 	}
-	// A leader trivially holds its own entries.
 	n.progress[n.id].match = n.log.lastIndex()
 	n.progress[n.id].next = n.log.lastIndex() + 1
 
-	// Reconsider the commit index before sending anything. In a single-node
-	// cluster the leader's own append is already a majority, and no response
-	// will ever arrive to trigger this later — without it such a cluster
-	// elects a leader that can never commit its own no-op, and therefore
-	// never commits anything at all.
-	//
-	// In a larger cluster this is a no-op: the followers' match indexes are
-	// still zero, so no majority exists yet.
 	n.maybeCommit()
 
 	n.broadcastAppend()
 	return nil
 }
 
-// persist records a term and vote to stable storage, updating the in-memory
-// copy only after the write succeeds so the two can never disagree in the
-// dangerous direction.
 func (n *Node) persist(term Term, vote NodeID) error {
 	if err := n.storage.SetHardState(HardState{Term: term, VotedFor: vote}); err != nil {
 		return fmt.Errorf("raft: persisting hard state: %w: %w", ErrStorage, err)
@@ -842,25 +512,16 @@ func (n *Node) persist(term Term, vote NodeID) error {
 	return nil
 }
 
-// reset clears the per-role timers and vote tally on a state change.
 func (n *Node) reset() {
 	n.electionElapsed = 0
 	n.heartbeatElapsed = 0
 	n.votes = make(map[NodeID]bool)
 
-	// In-flight read confirmations belong to the role being left. A node that
-	// is no longer leader cannot confirm anything, and one that has just
-	// become leader must not inherit acknowledgements collected under a
-	// previous term.
 	n.readOnly.reset()
 
 	n.resetElectionTimeout()
 }
 
-// resetElectionTimeout draws a fresh timeout from
-// [ElectionTick, 2*ElectionTick). Redrawing on every reset is what breaks the
-// symmetry of a split vote: two candidates that tied will almost certainly not
-// tie again.
 func (n *Node) resetElectionTimeout() {
 	n.randomizedElectionTimeout = n.electionTick + n.rand.Intn(n.electionTick)
 }

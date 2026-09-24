@@ -5,25 +5,8 @@ import (
 	"testing"
 )
 
-// What the core does when the disk refuses.
-//
-// The Storage comment states the contract: the core calls into it
-// synchronously and treats a returned error as fatal, because Raft's safety
-// argument assumes that state reported as persisted really is. Nothing
-// checked that the core keeps its side of that, and the interface makes it
-// checkable without touching the disk at all.
-//
-// The vote is where it matters most. A node votes at most once per term, and
-// that rule is only worth anything if the vote outlives a crash. A node that
-// answered a candidate and then died before the write landed would come back
-// with no record of having voted, grant a second vote in the same term, and
-// two leaders could be elected in it. So the answer must not leave until the
-// write has.
-
 var errDiskGone = errors.New("the disk is gone")
 
-// brokenStorage fails hard state writes from the moment it is armed, and
-// counts the attempts so a test can tell "refused" from "never tried".
 type brokenStorage struct {
 	Storage
 	armed       bool
@@ -67,8 +50,6 @@ func (b *brokenStorage) Snapshot() (Snapshot, error) {
 	return b.Storage.Snapshot()
 }
 
-// newFragileNode returns a follower in a three-node cluster whose storage can
-// be made to fail on demand.
 func newFragileNode(t *testing.T) (*Node, *brokenStorage) {
 	t.Helper()
 
@@ -86,15 +67,6 @@ func newFragileNode(t *testing.T) (*Node, *brokenStorage) {
 	return n, st
 }
 
-// atTerm moves the node into a term with a working disk, so that a later vote
-// request does not trip the term rules on its way in.
-//
-// This matters more than it looks. A vote request carrying a higher term
-// makes the node a follower in that term first, and that step persists too.
-// Arming the failure before it means the request never reaches the code that
-// decides about the vote, and a test written that way passes whatever the
-// vote path does. This one did, until the mutation that removed the check
-// left it green.
 func atTerm(t *testing.T, n *Node, term Term) {
 	t.Helper()
 
@@ -104,10 +76,9 @@ func atTerm(t *testing.T, n *Node, term Term) {
 	if n.term != term {
 		t.Fatalf("node is in term %d, want %d", n.term, term)
 	}
-	n.Ready() // drain, so only what follows is examined
+	n.Ready()
 }
 
-// voteResponses returns the vote answers the node is trying to send.
 func voteResponses(n *Node) []Message {
 	var out []Message
 	for _, m := range n.Ready().Messages {
@@ -119,9 +90,6 @@ func voteResponses(n *Node) []Message {
 }
 
 func TestNoVoteIsAnsweredUntilItIsDurable(t *testing.T) {
-	// The two-leaders bug, from the one direction a test can reach: if the
-	// answer can go out while the write is failing, then it can go out
-	// before the write lands.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 	st.armed = true
@@ -143,12 +111,6 @@ func TestNoVoteIsAnsweredUntilItIsDurable(t *testing.T) {
 }
 
 func TestAVoteThatCouldNotBeWrittenIsNotRemembered(t *testing.T) {
-	// persist updates memory only after the write succeeds, so that the two
-	// can never disagree in the dangerous direction. The dangerous direction
-	// is believing a vote was recorded when it was not: this node would
-	// refuse to vote again in the term, having never actually voted, which
-	// costs an election rather than safety. Believing the opposite costs
-	// safety, and this is the check that the code is on the right side.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 	st.armed = true
@@ -166,8 +128,6 @@ func TestAVoteThatCouldNotBeWrittenIsNotRemembered(t *testing.T) {
 }
 
 func TestAVoteIsAnsweredOnceItIsDurable(t *testing.T) {
-	// The same path with a working disk, so the test above is known to be
-	// failing for the reason it claims rather than never getting that far.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 
@@ -191,10 +151,6 @@ func TestAVoteIsAnsweredOnceItIsDurable(t *testing.T) {
 }
 
 func TestAnElectionIsNotStartedIfTheTermCannotBePersisted(t *testing.T) {
-	// Campaigning raises the term and votes for itself, both of which have to
-	// be durable first. A node that campaigned on an unwritten term could
-	// come back after a crash in an earlier term and vote again in the one it
-	// had already voted in.
 	n, st := newFragileNode(t)
 	st.armed = true
 
@@ -217,9 +173,6 @@ func TestAnElectionIsNotStartedIfTheTermCannotBePersisted(t *testing.T) {
 }
 
 func TestSteppingUpATermIsNotRememberedIfItCannotBePersisted(t *testing.T) {
-	// A message from a later term makes this node a follower in that term,
-	// which clears its vote. Doing that in memory alone would let it vote in
-	// the new term, crash, come back in the old one, and vote again.
 	n, st := newFragileNode(t)
 	st.armed = true
 
@@ -232,7 +185,6 @@ func TestSteppingUpATermIsNotRememberedIfItCannotBePersisted(t *testing.T) {
 	}
 }
 
-// appendResponses returns the acknowledgements the node is trying to send.
 func appendResponses(n *Node) []Message {
 	var out []Message
 	for _, m := range n.Ready().Messages {
@@ -243,7 +195,6 @@ func appendResponses(n *Node) []Message {
 	return out
 }
 
-// oneEntry is an append a leader in term 1 would send to an empty follower.
 func oneEntry() Message {
 	return Message{
 		Type: MsgAppendRequest, From: 2, To: 1, Term: 1,
@@ -254,11 +205,6 @@ func oneEntry() Message {
 }
 
 func TestAnAppendIsNotAcknowledgedUntilItIsDurable(t *testing.T) {
-	// The counterpart to the vote. A leader commits an entry once a majority
-	// has acknowledged it, and then tells clients it is safe. An
-	// acknowledgement from a follower that did not write the entry is a
-	// promise the follower cannot keep: if it restarts, the entry is gone
-	// from a majority that was counted as holding it.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 	st.appendsFail = true
@@ -280,9 +226,6 @@ func TestAnAppendIsNotAcknowledgedUntilItIsDurable(t *testing.T) {
 }
 
 func TestAFailedAppendDoesNotAdvanceTheCommitIndex(t *testing.T) {
-	// The leader's commit index travels with the append. Adopting it while
-	// the entries it refers to were not written would leave this node
-	// reporting as applied a prefix it does not hold.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 	before := n.log.committed
@@ -302,8 +245,6 @@ func TestAFailedAppendDoesNotAdvanceTheCommitIndex(t *testing.T) {
 }
 
 func TestAnAppendIsAcknowledgedOnceItIsDurable(t *testing.T) {
-	// With a working disk, so the two above are known to be failing for the
-	// reason they claim rather than never reaching the write at all.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 
@@ -326,11 +267,6 @@ func TestAnAppendIsAcknowledgedOnceItIsDurable(t *testing.T) {
 	}
 }
 
-// snapshotResponses returns the acknowledgements for an installed image.
-//
-// Not appendResponses: a snapshot is answered with its own message type, and
-// filtering for the wrong one makes "nothing was acknowledged" true no matter
-// what the code does. The paired test on a working disk is what caught that.
 func snapshotResponses(n *Node) []Message {
 	var out []Message
 	for _, m := range n.Ready().Messages {
@@ -341,8 +277,6 @@ func snapshotResponses(n *Node) []Message {
 	return out
 }
 
-// anImage is a state machine image a leader in term 1 would install on a
-// follower that has fallen too far behind to catch up from the log.
 func anImage() Snapshot {
 	return Snapshot{
 		Index: 5, Term: 1,
@@ -352,10 +286,6 @@ func anImage() Snapshot {
 }
 
 func TestASnapshotIsNotAcknowledgedUntilItIsStored(t *testing.T) {
-	// A snapshot moves everything at once: the log is replaced and the commit
-	// and applied cursors jump to its index. Acknowledging one that was not
-	// stored would tell the leader this node holds a prefix it would lose on
-	// restart, and the leader would then send only what follows it.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 	st.snapshotWritesFail = true
@@ -382,8 +312,6 @@ func TestASnapshotIsNotAcknowledgedUntilItIsStored(t *testing.T) {
 }
 
 func TestASnapshotIsAcknowledgedOnceItIsStored(t *testing.T) {
-	// The same path with a working disk, so the test above is known to be
-	// reaching the write rather than failing earlier.
 	n, st := newFragileNode(t)
 	atTerm(t, n, 1)
 
@@ -408,8 +336,6 @@ func TestASnapshotIsAcknowledgedOnceItIsStored(t *testing.T) {
 	}
 }
 
-// electLeader wins an election for node 1 through the ordinary path, so the
-// leader state under test is one the code actually produces.
 func electLeader(t *testing.T, n *Node) {
 	t.Helper()
 
@@ -428,12 +354,6 @@ func electLeader(t *testing.T, n *Node) {
 }
 
 func TestASnapshotThatCannotBeReadIsNotCountedAsSent(t *testing.T) {
-	// The leader assumes a snapshot it sends will be installed and moves the
-	// follower's next index past it. If the image could not be read, nothing
-	// was sent, and moving the index anyway would have the leader resume from
-	// a point the follower never reached. The entries in between would never
-	// be sent again: a hole, in the one direction the log-matching check
-	// cannot see.
 	n, st := newFragileNode(t)
 	electLeader(t, n)
 
@@ -458,14 +378,8 @@ func TestASnapshotThatCannotBeReadIsNotCountedAsSent(t *testing.T) {
 }
 
 func TestStorageFailuresAreMarkedAsSuch(t *testing.T) {
-	// The marker is what lets a caller tell "this message was nonsense" from
-	// "this node can no longer store anything". Every path that touches the
-	// disk has to carry it, or the caller silently makes the wrong choice on
-	// whichever one was missed.
 	cases := []struct {
-		name string
-		// before runs while the disk still works, for a case that needs the
-		// node in a particular state to reach the write under test.
+		name   string
 		before func(*testing.T, *Node)
 		arm    func(*brokenStorage)
 		step   func(*Node) error
@@ -483,9 +397,6 @@ func TestStorageFailuresAreMarkedAsSuch(t *testing.T) {
 			step: func(n *Node) error { return n.Step(oneEntry()) },
 		},
 		{
-			// The leader's own append, which is a different function from the
-			// one a follower uses and was missed the first time precisely
-			// because the follower's was the one being tested.
 			name:   "an entry a leader cannot append",
 			before: func(t *testing.T, n *Node) { electLeader(t, n) },
 			arm:    func(b *brokenStorage) { b.appendsFail = true },
@@ -528,9 +439,6 @@ func TestStorageFailuresAreMarkedAsSuch(t *testing.T) {
 }
 
 func TestAnUnusableMessageIsNotAStorageFailure(t *testing.T) {
-	// The other half of the distinction. If everything were marked, a caller
-	// acting on the marker would stop the node over one bad message, which is
-	// exactly what a hostile peer would want.
 	n, _ := newFragileNode(t)
 	atTerm(t, n, 1)
 

@@ -16,14 +16,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// Tests for the entrypoint's handling of what an operator types.
-//
-// This is the only code in the system whose input is a human under time
-// pressure, and it had no tests. Misconfiguration is not an exotic failure
-// here: the peer list is how every node learns who the cluster is, and the
-// ways it can be wrong mostly fail late and quietly rather than at startup.
-// The parser's job is to turn those into a refusal with a reason.
-
 func TestParsePeersAcceptsAWellFormedList(t *testing.T) {
 	peers, err := parsePeers("1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003")
 	if err != nil {
@@ -38,8 +30,6 @@ func TestParsePeersAcceptsAWellFormedList(t *testing.T) {
 }
 
 func TestParsePeersToleratesWhitespaceAndStrayCommas(t *testing.T) {
-	// An operator pasting a list across lines should not have to think about
-	// spacing.
 	peers, err := parsePeers(" 1 = host-a:9001 , 2=host-b:9002 , ")
 	if err != nil {
 		t.Fatalf("a spaced list was rejected: %v", err)
@@ -53,9 +43,6 @@ func TestParsePeersToleratesWhitespaceAndStrayCommas(t *testing.T) {
 }
 
 func TestParsePeersRejectsMalformedLists(t *testing.T) {
-	// Each of these has a specific reason, and the message has to name it:
-	// an operator reading it at three in the morning should not have to
-	// diff the string by eye.
 	for _, tc := range []struct {
 		name  string
 		spec  string
@@ -86,8 +73,6 @@ func TestParsePeersRejectsMalformedLists(t *testing.T) {
 }
 
 func TestParsePeersNamesBothSidesOfAnAddressCollision(t *testing.T) {
-	// The whole value of catching this is being told which two lines to
-	// look at.
 	_, err := parsePeers("1=host-a:9001,2=host-b:9002,3=host-a:9001")
 	if err == nil {
 		t.Fatal("two peers sharing an address were accepted")
@@ -100,8 +85,6 @@ func TestParsePeersNamesBothSidesOfAnAddressCollision(t *testing.T) {
 }
 
 func TestSortedIDsAreAscendingRegardlessOfInputOrder(t *testing.T) {
-	// Every node derives its initial configuration from this order, so two
-	// nodes given the same members in a different order must still agree.
 	a, err := parsePeers("3=c:3,1=a:1,2=b:2")
 	if err != nil {
 		t.Fatalf("parsing: %v", err)
@@ -138,9 +121,6 @@ func TestNewLoggerRejectsAnUnknownLevel(t *testing.T) {
 	}
 }
 
-// blockingRaft is a RaftService whose Deliver never returns until released.
-// It stands in for the situation that made shutdown unbounded: a request the
-// node can no longer finish, held open by a client that has not given up.
 type blockingRaft struct {
 	raftkvv1.UnimplementedRaftServiceServer
 	entered chan struct{}
@@ -158,11 +138,6 @@ func (b *blockingRaft) Deliver(ctx context.Context, _ *raftkvv1.DeliverRequest) 
 }
 
 func TestStopServerDoesNotWaitForeverOnAStuckRequest(t *testing.T) {
-	// GracefulStop refuses new calls on every service at once, Raft's
-	// included, so a leader stops being able to commit and the client writes
-	// already in its hands cannot finish. Before this was bounded, shutdown
-	// lasted exactly as long as the client was willing to wait: measured at
-	// 3, 10 and 20 seconds for clients configured with those timeouts.
 	blocker := &blockingRaft{entered: make(chan struct{}), release: make(chan struct{})}
 	defer close(blocker.release)
 
@@ -181,9 +156,6 @@ func TestStopServerDoesNotWaitForeverOnAStuckRequest(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// A call that will still be in flight when the shutdown begins. Its
-	// context outlives the grace period, which is the case that used to
-	// hold the process open.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*shutdownGrace)
 	defer cancel()
 	go raftkvv1.NewRaftServiceClient(conn).Deliver(ctx, &raftkvv1.DeliverRequest{
@@ -202,9 +174,6 @@ func TestStopServerDoesNotWaitForeverOnAStuckRequest(t *testing.T) {
 	stopServer(srv)
 	took := time.Since(start)
 
-	// Bounded by the grace period rather than by the caller's patience. The
-	// slack absorbs scheduling on a loaded machine without admitting the
-	// failure this guards against, which was an order of magnitude larger.
 	if limit := shutdownGrace + 3*time.Second; took > limit {
 		t.Errorf("stopping took %v with one request stuck; it should give up after about %v",
 			took, shutdownGrace)
@@ -216,7 +185,6 @@ func TestStopServerDoesNotWaitForeverOnAStuckRequest(t *testing.T) {
 }
 
 func TestStopServerReturnsImmediatelyWhenIdle(t *testing.T) {
-	// The common case must not pay the grace period.
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listening: %v", err)

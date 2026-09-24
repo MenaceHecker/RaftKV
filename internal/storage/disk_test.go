@@ -12,33 +12,8 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/statemachine"
 )
 
-// Tests for the disk-backed raft.Storage.
-//
-// This is where Phase 2's exit criterion is checked: kill a node mid-operation,
-// restart it, and it comes back with correct state. A crash is modelled by
-// abandoning a DiskStorage without closing it and opening the same directory
-// again — no flush, no cleanup, exactly what a process that stopped existing
-// leaves behind.
-//
-// Several tests run DiskStorage and MemoryStorage side by side. MemoryStorage
-// is the reference implementation of the raft.Storage contract, so any place
-// the two disagree is a place the consensus core would behave differently on
-// disk than it does in the tests from Phase 1.
-
-// testConf is a stand-in cluster configuration for tests that are about
-// compaction rather than membership. It is non-empty on purpose: a snapshot
-// recording no configuration would be indistinguishable from one written
-// before configurations travelled with snapshots at all.
 var testConf = raft.ConfState{Voters: []raft.NodeID{1, 2, 3}}
 
-// openDisk opens a DiskStorage, failing the test on error.
-// crash models the process dying rather than shutting down.
-//
-// Whatever reached the disk stays there and the write-ahead log is never
-// closed cleanly, which is the point of these tests. The one thing that does
-// have to happen is releasing the directory lock, because a kernel drops it
-// when the process holding it goes away, and without that the reopen below
-// would be refused for a process that no longer exists.
 func crash(t *testing.T, s *DiskStorage) {
 	t.Helper()
 	if err := s.lock.release(); err != nil {
@@ -56,13 +31,10 @@ func openDisk(t *testing.T, dir string) (*DiskStorage, Snapshot) {
 	return s, snap
 }
 
-// putCommand encodes a state machine Put, so the entries under test carry
-// realistic payloads rather than arbitrary bytes.
 func putCommand(key, value string) []byte {
 	return statemachine.Command{Op: statemachine.OpPut, Key: key, Value: []byte(value)}.Encode()
 }
 
-// logEntries builds a contiguous run of command entries.
 func logEntries(term raft.Term, from raft.Index, count int) []raft.Entry {
 	out := make([]raft.Entry, count)
 	for i := range out {
@@ -100,9 +72,6 @@ func TestDiskStorageStartsEmpty(t *testing.T) {
 }
 
 func TestDiskStorageMatchesMemoryStorage(t *testing.T) {
-	// The two implementations must be indistinguishable to the Raft core.
-	// Phase 1's whole test suite runs against MemoryStorage, so any divergence
-	// here is behaviour that was never actually tested.
 	dir := t.TempDir()
 	disk, _ := openDisk(t, dir)
 	mem := raft.NewMemoryStorage()
@@ -122,7 +91,6 @@ func TestDiskStorageMatchesMemoryStorage(t *testing.T) {
 		t.Fatalf("LastIndex: disk %d, memory %d", disk.LastIndex(), mem.LastIndex())
 	}
 
-	// Probe every index, including the sentinels either side of the log.
 	for i := raft.Index(0); i <= 12; i++ {
 		dt, derr := disk.Term(i)
 		mt, merr := mem.Term(i)
@@ -131,7 +99,6 @@ func TestDiskStorageMatchesMemoryStorage(t *testing.T) {
 		}
 	}
 
-	// And every range, valid or not.
 	for lo := raft.Index(0); lo <= 12; lo++ {
 		for hi := raft.Index(0); hi <= 12; hi++ {
 			de, derr := disk.Entries(lo, hi)
@@ -159,8 +126,6 @@ func TestDiskStorageMatchesMemoryStorage(t *testing.T) {
 }
 
 func TestDiskStorageSurvivesCrash(t *testing.T) {
-	// The core promise. Everything written is still there after the process
-	// vanishes without closing anything.
 	dir := t.TempDir()
 
 	first, _, err := OpenDiskStorage(DiskConfig{Dir: dir})
@@ -174,7 +139,6 @@ func TestDiskStorageSurvivesCrash(t *testing.T) {
 	if err := first.Append(want); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	// Deliberately not closed: the process died rather than shut down.
 	crash(t, first)
 
 	second, _ := openDisk(t, dir)
@@ -203,9 +167,6 @@ func TestDiskStorageSurvivesCrash(t *testing.T) {
 }
 
 func TestConflictingAppendSurvivesCrash(t *testing.T) {
-	// A follower resolving a log conflict overwrites a suffix. On disk that is
-	// only more appends, so recovery has to reconstruct the intended result
-	// rather than the raw sequence of writes.
 	dir := t.TempDir()
 
 	s, _, err := OpenDiskStorage(DiskConfig{Dir: dir})
@@ -215,7 +176,6 @@ func TestConflictingAppendSurvivesCrash(t *testing.T) {
 	if err := s.Append(logEntries(1, 1, 5)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	// The leader's version of index 3 onward, in a later term.
 	replacement := logEntries(2, 3, 2)
 	if err := s.Append(replacement); err != nil {
 		t.Fatalf("conflicting Append: %v", err)
@@ -239,9 +199,6 @@ func TestConflictingAppendSurvivesCrash(t *testing.T) {
 }
 
 func TestCompactionRemovesEntriesAndKeepsBoundary(t *testing.T) {
-	// After compaction the entries below the snapshot are gone, but the
-	// boundary itself must still answer: a leader replicating the first entry
-	// after a snapshot asks for the term at exactly that index.
 	dir := t.TempDir()
 	s, _ := openDisk(t, dir)
 
@@ -259,7 +216,6 @@ func TestCompactionRemovesEntriesAndKeepsBoundary(t *testing.T) {
 		t.Fatalf("LastIndex = %d, want 30", got)
 	}
 
-	// The boundary answers.
 	term, err := s.Term(20)
 	if err != nil {
 		t.Fatalf("Term at the compaction boundary: %v; a follower could never be caught up", err)
@@ -268,7 +224,6 @@ func TestCompactionRemovesEntriesAndKeepsBoundary(t *testing.T) {
 		t.Fatalf("Term(20) = %d, want 3", term)
 	}
 
-	// Below it does not.
 	if _, err := s.Term(19); !errors.Is(err, raft.ErrCompacted) {
 		t.Fatalf("Term(19) gave %v, want ErrCompacted", err)
 	}
@@ -276,7 +231,6 @@ func TestCompactionRemovesEntriesAndKeepsBoundary(t *testing.T) {
 		t.Fatalf("Entries(19, 25) gave %v, want ErrCompacted", err)
 	}
 
-	// And the surviving range is intact.
 	got, err := s.Entries(21, 31)
 	if err != nil {
 		t.Fatalf("Entries(21, 31): %v", err)
@@ -287,8 +241,6 @@ func TestCompactionRemovesEntriesAndKeepsBoundary(t *testing.T) {
 }
 
 func TestCompactionSurvivesCrash(t *testing.T) {
-	// The full recovery path: restore the snapshot, then replay only the
-	// entries after it. This is the Phase 2 exit criterion in one test.
 	dir := t.TempDir()
 
 	s, _, err := OpenDiskStorage(DiskConfig{Dir: dir})
@@ -296,7 +248,6 @@ func TestCompactionSurvivesCrash(t *testing.T) {
 		t.Fatalf("opening: %v", err)
 	}
 
-	// Build state through a real state machine so the snapshot is meaningful.
 	kv := statemachine.New()
 	entries := logEntries(2, 1, 30)
 	if err := s.Append(entries); err != nil {
@@ -308,7 +259,6 @@ func TestCompactionSurvivesCrash(t *testing.T) {
 		}
 	}
 
-	// Snapshot at 20, leaving 10 entries in the log.
 	appliedThrough := raft.Index(20)
 	partial := statemachine.New()
 	for _, e := range entries[:appliedThrough] {
@@ -323,7 +273,6 @@ func TestCompactionSurvivesCrash(t *testing.T) {
 	if err := s.CreateSnapshot(appliedThrough, data, testConf); err != nil {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
-	// Crash here.
 	crash(t, s)
 
 	recovered, snap := openDisk(t, dir)
@@ -335,7 +284,6 @@ func TestCompactionSurvivesCrash(t *testing.T) {
 		t.Fatalf("recovered LastIndex = %d, want 30", got)
 	}
 
-	// Rebuild: snapshot first, then the tail of the log on top.
 	rebuilt := statemachine.New()
 	if err := rebuilt.Restore(snap.Data); err != nil {
 		t.Fatalf("restoring snapshot: %v", err)
@@ -363,8 +311,6 @@ func TestCompactionSurvivesCrash(t *testing.T) {
 }
 
 func TestRepeatedCompaction(t *testing.T) {
-	// Compaction happens over and over in a long-running node, so each round
-	// has to leave the storage in a state the next one can work from.
 	dir := t.TempDir()
 	s, _ := openDisk(t, dir)
 
@@ -387,7 +333,6 @@ func TestRepeatedCompaction(t *testing.T) {
 		}
 	}
 
-	// It must still recover after all that.
 	crash(t, s)
 	recovered, snap := openDisk(t, dir)
 	if snap.Meta.Index != 96 {
@@ -421,8 +366,6 @@ func TestCompactionRejectsInvalidIndexes(t *testing.T) {
 }
 
 func TestAppendBelowSnapshotIsIgnored(t *testing.T) {
-	// A stale retransmission can carry entries the snapshot already covers.
-	// Re-adding them would put the cache behind the snapshot it follows.
 	dir := t.TempDir()
 	s, _ := openDisk(t, dir)
 
@@ -433,7 +376,6 @@ func TestAppendBelowSnapshotIsIgnored(t *testing.T) {
 		t.Fatalf("CreateSnapshot: %v", err)
 	}
 
-	// Entirely below the snapshot: nothing to do.
 	if err := s.Append(logEntries(1, 5, 5)); err != nil {
 		t.Fatalf("appending fully superseded entries: %v", err)
 	}
@@ -444,8 +386,7 @@ func TestAppendBelowSnapshotIsIgnored(t *testing.T) {
 		t.Fatalf("LastIndex = %d after a superseded append, want 20", got)
 	}
 
-	// Straddling the boundary: only the part above it applies.
-	straddle := logEntries(9, 10, 12) // indexes 10..21
+	straddle := logEntries(9, 10, 12)
 	if err := s.Append(straddle); err != nil {
 		t.Fatalf("appending straddling entries: %v", err)
 	}
@@ -462,9 +403,6 @@ func TestAppendBelowSnapshotIsIgnored(t *testing.T) {
 }
 
 func TestMissingSnapshotIsRefused(t *testing.T) {
-	// If the log records a snapshot the disk cannot produce, the entries it
-	// covered are gone too. Starting from an empty state machine would
-	// silently lose committed data, so recovery has to refuse.
 	dir := t.TempDir()
 
 	s, _, err := OpenDiskStorage(DiskConfig{Dir: dir})
@@ -481,7 +419,6 @@ func TestMissingSnapshotIsRefused(t *testing.T) {
 		t.Fatalf("closing: %v", err)
 	}
 
-	// Delete every snapshot, leaving the log's record of them behind.
 	snaps, err := filepath.Glob(filepath.Join(dir, snapshotSubdir, "*"+snapshotSuffix))
 	if err != nil {
 		t.Fatalf("listing snapshots: %v", err)
@@ -501,8 +438,6 @@ func TestMissingSnapshotIsRefused(t *testing.T) {
 }
 
 func TestTornTailIsRepairedThroughDiskStorage(t *testing.T) {
-	// The WAL repairs a torn record; this checks the repair is visible as a
-	// consistent log through the storage layer rather than only inside the WAL.
 	dir := t.TempDir()
 
 	s, _, err := OpenDiskStorage(DiskConfig{Dir: dir})
@@ -526,7 +461,6 @@ func TestTornTailIsRepairedThroughDiskStorage(t *testing.T) {
 	if got := recovered.LastIndex(); got != 5 {
 		t.Fatalf("recovered LastIndex = %d, want 5 (the torn entry dropped)", got)
 	}
-	// Whatever survived must be a contiguous, readable log.
 	got, err := recovered.Entries(1, 6)
 	if err != nil {
 		t.Fatalf("Entries after repair: %v", err)
@@ -539,7 +473,6 @@ func TestTornTailIsRepairedThroughDiskStorage(t *testing.T) {
 }
 
 func TestReturnedEntriesAreCopies(t *testing.T) {
-	// A caller must not be able to reach into the cache and mutate the log.
 	dir := t.TempDir()
 	s, _ := openDisk(t, dir)
 
@@ -588,9 +521,6 @@ func TestDiskOperationsAfterCloseAreRejected(t *testing.T) {
 }
 
 func TestHardStateSurvivesCompaction(t *testing.T) {
-	// Compaction deletes WAL segments, and the vote lives in one of them.
-	// Checked here as well as in the WAL tests because this is the path a
-	// real node actually takes.
 	dir := t.TempDir()
 
 	s, _, err := OpenDiskStorage(DiskConfig{Dir: dir, SegmentSize: 256})
@@ -630,8 +560,6 @@ func TestHardStateSurvivesCompaction(t *testing.T) {
 }
 
 func TestDataDirectoryLayout(t *testing.T) {
-	// A node's durable state must be one directory, so it can be copied,
-	// archived, or wiped as a unit.
 	dir := t.TempDir()
 	s, _ := openDisk(t, dir)
 
@@ -654,13 +582,6 @@ func TestDataDirectoryLayout(t *testing.T) {
 }
 
 func TestConfigurationSurvivesCompaction(t *testing.T) {
-	// The reason snapshots carry a configuration at all.
-	//
-	// Membership lives in the log as conf-change entries, and compaction
-	// deletes them. Without the configuration recorded alongside the snapshot,
-	// a node whose log was compacted past a membership change would come back
-	// with whatever peer list it was started with — a cluster that stopped
-	// existing however long ago the change was made.
 	dir := t.TempDir()
 	s, _ := openDisk(t, dir)
 
@@ -668,7 +589,6 @@ func TestConfigurationSurvivesCompaction(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 
-	// A configuration that could not be guessed from any static peer list.
 	grown := raft.ConfState{
 		Voters: []raft.NodeID{1, 2, 3, 4, 5},
 		Addrs:  map[raft.NodeID]string{4: "host-4:9000", 5: "host-5:9000"},
@@ -697,9 +617,6 @@ func TestConfigurationSurvivesCompaction(t *testing.T) {
 }
 
 func TestJointConfigurationSurvivesCompaction(t *testing.T) {
-	// A node can be compacted while a membership change is still open. Coming
-	// back believing the transition had finished would let it decide on a
-	// single majority while the rest of the cluster still requires two.
 	dir := t.TempDir()
 	s, _ := openDisk(t, dir)
 
@@ -731,9 +648,6 @@ func TestJointConfigurationSurvivesCompaction(t *testing.T) {
 }
 
 func TestSnapshotWithConfigurationIsDeterministic(t *testing.T) {
-	// Two replicas holding identical membership must write identical bytes, or
-	// comparing snapshots stops being a way to check convergence. Address maps
-	// have no order of their own, so the encoding has to impose one.
 	conf := raft.ConfState{
 		Voters: []raft.NodeID{1, 2, 3},
 		Addrs: map[raft.NodeID]string{
@@ -768,10 +682,6 @@ func TestSnapshotWithConfigurationIsDeterministic(t *testing.T) {
 }
 
 func TestTruncatedConfigurationIsRejected(t *testing.T) {
-	// The configuration sits at the end of a snapshot's payload, so a file cut
-	// short there would otherwise decode into a snapshot with no membership —
-	// which reads exactly like a legitimate one from before configurations
-	// were carried.
 	dir := t.TempDir()
 	s := newSnapshotter(t, dir)
 

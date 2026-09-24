@@ -1,14 +1,3 @@
-// Package node drives a Raft peer: it owns the consensus core, the durable
-// storage, and the key-value state machine, and runs the loop that connects
-// them.
-//
-// Everything below this package is a pure state machine with no clock, no
-// goroutines, and no network. This is where those arrive. The design keeps
-// that boundary intact: a single goroutine owns the raft.Node and is the only
-// thing that ever touches it, while callers interact through channels. That
-// preserves the property the whole system is built on — the consensus logic
-// stays deterministic and testable, and all the concurrency lives in one
-// reviewable loop.
 package node
 
 import (
@@ -26,121 +15,56 @@ import (
 )
 
 var (
-	// ErrNotLeader means this node cannot serve the request. Status().Leader
-	// names who can, so the server layer can redirect rather than fail.
 	ErrNotLeader = raft.ErrNotLeader
 
-	// ErrLostLeadership means a request was accepted but leadership changed
-	// before it committed, so its outcome is unknown. A client should retry;
-	// deduplication makes that safe.
 	ErrLostLeadership = errors.New("node: leadership changed before the request committed")
 
-	// ErrStopped means the node's consensus loop has exited, either because
-	// Stop was called or because it could no longer write.
 	ErrStopped = errors.New("node: stopped")
 
-	// ErrTimeout means a request did not complete before its context expired.
 	ErrTimeout = errors.New("node: request timed out")
 )
 
-// Transport delivers Raft messages to other nodes.
-//
-// It is deliberately fire-and-forget with no error return. Raft already treats
-// the network as unreliable — every message is retried by the next heartbeat,
-// and correctness never depends on a particular one arriving — so surfacing
-// send failures would add error handling that has nothing useful to do.
 type Transport interface {
-	// Send delivers messages to their destinations. It must not block the
-	// caller: the Raft loop calls it inline, and a slow peer must not stall
-	// consensus with the rest.
 	Send(msgs []raft.Message)
 }
 
-// Reconfigurable is implemented by transports that can learn about members
-// admitted or removed after startup.
-//
-// It is optional, and deliberately separate from Transport. The in-memory
-// transports the deterministic tests and the chaos harness use route by node
-// ID and can reach anybody they were built with, so there is nothing for them
-// to update. Only a transport that has to dial an address needs this, and
-// that transport is the one where the gap was invisible: membership changes
-// were exercised everywhere except the layer that has to find the new member.
 type Reconfigurable interface {
-	// AddPeer makes a node reachable at an address. It must be idempotent,
-	// because the driver reconciles the whole membership after every change.
 	AddPeer(id raft.NodeID, addr string) error
 
-	// RemovePeer drops a node that is no longer a member.
 	RemovePeer(id raft.NodeID)
 }
 
-// Config describes one node.
 type Config struct {
-	// ID is this node's identifier, non-zero and present in Peers.
 	ID raft.NodeID
 
-	// Peers is the full cluster membership including this node.
 	Peers []raft.NodeID
 
-	// DataDir holds this node's write-ahead log and snapshots.
 	DataDir string
 
-	// Transport sends messages to peers.
 	Transport Transport
 
-	// TickInterval is how much wall time one logical tick represents.
-	// Election and heartbeat timeouts are counted in ticks, so this is what
-	// converts them into real durations.
 	TickInterval time.Duration
 
-	// ElectionTick and HeartbeatTick are in units of TickInterval.
 	ElectionTick  int
 	HeartbeatTick int
 
-	// SnapshotThreshold is how many entries may be applied past the last
-	// snapshot before another is taken. Zero means the default.
 	SnapshotThreshold uint64
 
-	// Sync selects the WAL durability policy. The zero value fsyncs every
-	// write, which is what Raft's guarantees assume.
 	Sync storage.SyncPolicy
 
-	// Metrics receives observations about what this node is doing. It is
-	// optional; a nil Recorder discards everything.
 	Metrics Recorder
 
-	// MaxCommittedEntries caps how many committed entries are applied in one
-	// pass of the loop. Zero means the core's default.
-	//
-	// Applying shares a goroutine with ticking and with reading messages, so
-	// an unbounded batch takes the node off the air for as long as it runs.
 	MaxCommittedEntries int
 
-	// MaxProposalBatch caps how many client writes are grouped into one
-	// durable log write. Zero means the default.
-	//
-	// Larger batches raise write throughput, because the fsync every write
-	// waits on is paid once per batch rather than once per write. They also
-	// raise the cost of that single fsync, so the value trades throughput
-	// against the latency of the unlucky write that starts a batch.
 	MaxProposalBatch int
 }
 
-// Defaults for a node that does not specify otherwise.
 const (
 	DefaultTickInterval      = 100 * time.Millisecond
 	DefaultElectionTick      = 10
 	DefaultHeartbeatTick     = 1
 	DefaultSnapshotThreshold = 10000
 
-	// DefaultMaxProposalBatch is how many writes are grouped into one
-	// durable log write by default.
-	//
-	// The value matters less than it looks. A batch only ever contains
-	// writes that were already waiting when the loop came around, so an
-	// idle cluster batches one at a time and pays nothing, while a loaded
-	// one fills batches without anybody waiting longer than they already
-	// were.
 	DefaultMaxProposalBatch = 64
 )
 
@@ -178,7 +102,6 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// Status is a snapshot of what a node currently believes about the cluster.
 type Status struct {
 	ID      raft.NodeID
 	Leader  raft.NodeID
@@ -187,45 +110,22 @@ type Status struct {
 	Commit  raft.Index
 	Applied raft.Index
 
-	// Members is the cluster membership this node currently believes in,
-	// with addresses where they are known. It comes from the log rather than
-	// from configuration, so it reflects changes made since startup.
 	Members raft.ConfState
 
-	// SnapshotsReceived counts state machine images installed from a leader.
-	//
-	// It is worth surfacing because a node being caught up by snapshot rather
-	// than by log means it had fallen behind the leader's compaction point,
-	// which is the difference between a node that is merely lagging and one
-	// that could not have recovered on its own.
 	SnapshotsReceived uint64
 }
 
-// proposal is a client write waiting for its entry to commit.
 type proposal struct {
-	// term is the term the entry was appended in. If an entry with a
-	// different term turns up at the same index, this proposal's entry was
-	// overwritten by a new leader and the outcome is unknown.
 	term raft.Term
 	done chan error
 }
 
-// read is a linearizable read waiting for its read index to be confirmed and
-// then applied.
 type read struct {
-	// index is filled in once the read index is confirmed. Until then the
-	// read is waiting on the leadership round.
 	index    raft.Index
 	resolved bool
 	done     chan error
 }
 
-// Node is a running Raft peer.
-//
-// The raft.Node inside is owned exclusively by the run loop goroutine and is
-// never touched from anywhere else. Every public method here works by sending
-// the loop a request over a channel and waiting for an answer, which is what
-// lets the consensus core stay a single-threaded state machine.
 type Node struct {
 	cfg Config
 
@@ -233,7 +133,6 @@ type Node struct {
 	storage *storage.DiskStorage
 	kv      *statemachine.KV
 
-	// Inbound work for the run loop.
 	recvc    chan raft.Message
 	proposec chan proposalRequest
 	readc    chan readRequest
@@ -241,56 +140,28 @@ type Node struct {
 	compactc chan chan error
 	confc    chan confChangeRequest
 
-	stopc chan struct{}
-	donec chan struct{}
-	// stopOnce guards Stop so that closing stopc twice cannot panic.
+	stopc    chan struct{}
+	donec    chan struct{}
 	stopOnce sync.Once
 
-	// pending tracks in-flight proposals by log index, and in-flight reads by
-	// context. Both are owned by the run loop.
 	pending map[raft.Index]*proposal
 	reads   map[string]*read
 
-	// deferred holds reads that arrived while the leader had not yet
-	// committed an entry in its own term. They are retried rather than
-	// failed; see startRead.
 	deferred []readRequest
 
-	// readSeq mints unique read contexts. It is atomic because the context is
-	// generated by the calling goroutine, before the request reaches the loop.
 	readSeq atomic.Uint64
 
-	// confSeq is the configuration counter last pushed to the transport, and
-	// transportPeers is what the transport was told. Together they keep
-	// reconciliation to one integer comparison while the membership is
-	// steady, which is almost always.
 	confSeq        uint64
 	transportPeers map[raft.NodeID]string
 
-	// lastSnapshot is the index the most recent snapshot was taken at.
 	lastSnapshot raft.Index
 
-	// snapshotsReceived counts images installed from a leader.
 	snapshotsReceived uint64
 
-	// applyc wakes the loop when a bounded apply batch left more behind.
-	//
-	// Applying is capped so the loop can tick and read messages between
-	// batches, but the remainder still has to be picked up promptly. Without
-	// this the loop would sit in its select until some unrelated event
-	// arrived, and a replay would proceed one batch per tick instead of as
-	// fast as the state machine can take it.
 	applyc chan struct{}
 
-	// proposalBatch is reused across iterations so grouping writes does not
-	// allocate on every pass of the loop.
 	proposalBatch []proposalRequest
 
-	// lastTerm and lastLeader are the leadership this node last reported to
-	// the Recorder. They are kept so a change can be counted as an event:
-	// sampling term and leader at scrape time would miss every election that
-	// began and ended between two scrapes, which is exactly the situation
-	// worth alerting on.
 	lastTerm   raft.Term
 	lastLeader raft.NodeID
 }
@@ -310,8 +181,6 @@ type confChangeRequest struct {
 	done   chan error
 }
 
-// Start opens a node's durable state, restores its state machine, and begins
-// running.
 func Start(cfg Config) (*Node, error) {
 	cfg.applyDefaults()
 	if err := cfg.validate(); err != nil {
@@ -328,9 +197,6 @@ func Start(cfg Config) (*Node, error) {
 
 	kv := statemachine.New()
 
-	// Restore the snapshot before anything else. The log entries that follow
-	// it are replayed on top; replaying from the beginning would be correct
-	// but needlessly slow, and skipping the snapshot would be silently wrong.
 	if snap.Meta.Index > 0 {
 		if err := kv.Restore(snap.Data); err != nil {
 			store.Close()
@@ -338,9 +204,6 @@ func Start(cfg Config) (*Node, error) {
 		}
 	}
 
-	// A snapshot carries the membership as of the point it was taken, which
-	// may include changes whose log entries have since been compacted away.
-	// When there is one it supersedes the statically configured peer list.
 	var initialConf *raft.ConfState
 	if !snap.Conf.IsEmpty() {
 		conf := snap.Conf
@@ -354,15 +217,9 @@ func Start(cfg Config) (*Node, error) {
 		ElectionTick:        cfg.ElectionTick,
 		HeartbeatTick:       cfg.HeartbeatTick,
 		MaxCommittedEntries: cfg.MaxCommittedEntries,
-		// Always on, for the same reason as pre-vote: a leader that cannot
-		// reach a majority should find that out rather than keep telling
-		// everything that routes by leadership that it is still in charge.
-		CheckQuorum: true,
-		// Always on. A restarting node that deposes a healthy leader costs
-		// real availability, and there is no workload for which paying an
-		// extra round trip before an election is the worse trade.
-		PreVote: true,
-		Storage: meteredStorage{Storage: store, rec: cfg.Metrics},
+		CheckQuorum:         true,
+		PreVote:             true,
+		Storage:             meteredStorage{Storage: store, rec: cfg.Metrics},
 	})
 	if err != nil {
 		store.Close()
@@ -392,29 +249,20 @@ func Start(cfg Config) (*Node, error) {
 	return n, nil
 }
 
-// Stop shuts the node down and releases its files. It is safe to call more
-// than once.
 func (n *Node) Stop() error {
 	n.stopOnce.Do(func() { close(n.stopc) })
 	<-n.donec
 	return n.storage.Close()
 }
 
-// Step delivers a message received from another node. It never blocks the
-// caller: if the loop is behind, the message is dropped, which Raft already
-// tolerates because the sender retries on its next heartbeat.
 func (n *Node) Step(m raft.Message) {
 	select {
 	case n.recvc <- m:
 	case <-n.stopc:
 	default:
-		// The loop is saturated. Dropping is better than blocking a
-		// transport goroutine, and the sender will try again.
 	}
 }
 
-// Status returns what this node currently believes about the cluster. The
-// server layer uses Leader to redirect clients.
 func (n *Node) Status() Status {
 	reply := make(chan Status, 1)
 	select {
@@ -425,15 +273,8 @@ func (n *Node) Status() Status {
 	}
 }
 
-// Done returns a channel closed once the consensus loop has exited.
-//
-// It closes on Stop, and on its own if the node stopped because it could no
-// longer write. The second case is why this is exported: nothing else tells a
-// caller that its node has gone, and a process that goes on serving a node
-// which has stopped is one an orchestrator has no way to notice is broken.
 func (n *Node) Done() <-chan struct{} { return n.donec }
 
-// Stopped reports whether the consensus loop has exited.
 func (n *Node) Stopped() bool {
 	select {
 	case <-n.donec:
@@ -443,13 +284,6 @@ func (n *Node) Stopped() bool {
 	}
 }
 
-// Propose submits a command and waits for it to commit and apply.
-//
-// It returns ErrNotLeader if this node cannot accept writes, and
-// ErrLostLeadership if the entry was appended but leadership changed before it
-// committed. In the second case the write may or may not have taken effect —
-// which is exactly why commands carry a client ID and sequence number, so the
-// retry is deduplicated rather than double-applied.
 func (n *Node) Propose(ctx context.Context, cmd statemachine.Command) error {
 	start := time.Now()
 	var err error
@@ -479,19 +313,11 @@ func (n *Node) Propose(ctx context.Context, cmd statemachine.Command) error {
 	}
 }
 
-// Get performs a linearizable read.
-//
-// It establishes a read index, waits for a majority to confirm this node is
-// still leader, and only then reads local state. A read served without that
-// confirmation could come from a leader that has already been deposed, and
-// would be stale with nothing to detect it.
 func (n *Node) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	start := time.Now()
 	var err error
 	defer func() { n.cfg.Metrics.ObserveRead(classify(err), time.Since(start)) }()
 
-	// A unique context per read: it is what attributes a leadership
-	// acknowledgement to this specific request.
 	seq := n.readSeq.Add(1)
 	rctx := make([]byte, 8)
 	for i := range rctx {
@@ -523,15 +349,10 @@ func (n *Node) Get(ctx context.Context, key string) ([]byte, bool, error) {
 		return nil, false, err
 	}
 
-	// The read index has been confirmed and applied, so local state now
-	// reflects everything committed when the read arrived.
 	value, ok := n.kv.Get(key)
 	return value, ok, nil
 }
 
-// run is the node's single goroutine. Everything that touches the raft.Node
-// happens here, in the order the Ready contract requires: deliver inputs,
-// drain effects, send messages, apply entries, acknowledge.
 func (n *Node) run() {
 	defer close(n.donec)
 
@@ -546,9 +367,6 @@ func (n *Node) run() {
 
 		case <-ticker.C:
 			if err := n.raft.Tick(); err != nil {
-				// A tick only fails when a term change could not be
-				// persisted, which means durability is gone. Continuing
-				// would risk the safety properties that rest on it.
 				n.failAllPending(fmt.Errorf("node: %w", err))
 				return
 			}
@@ -559,8 +377,6 @@ func (n *Node) run() {
 					n.failAllPending(fmt.Errorf("node: %w", err))
 					return
 				}
-				// A malformed or unexpected message is not fatal; the
-				// cluster carries on without it.
 				continue
 			}
 
@@ -586,10 +402,6 @@ func (n *Node) run() {
 			}
 
 		case <-n.applyc:
-			// More committed entries are waiting from a capped batch. This
-			// case carries no work of its own; it exists so the loop comes
-			// back round rather than blocking, while still letting the
-			// ticker and incoming messages compete for the same select.
 		}
 
 		n.processReady()
@@ -597,8 +409,6 @@ func (n *Node) run() {
 	}
 }
 
-// status builds a Status from the loop goroutine, where reading the raft.Node
-// is safe.
 func (n *Node) status() Status {
 	return Status{
 		ID:      n.raft.ID(),
@@ -613,13 +423,7 @@ func (n *Node) status() Status {
 	}
 }
 
-// handleProposal appends a client command and registers a waiter for it.
 func (n *Node) handleProposal(req proposalRequest) error {
-	// Take everything else that is already waiting. Clients block on an
-	// unbuffered channel until the loop receives, so anything ready to send
-	// right now is a write that would otherwise sit through a whole fsync
-	// waiting its turn. Grouping them costs those writes nothing and saves
-	// the cluster one fsync each.
 	batch := append(n.proposalBatch[:0], req)
 	yielded := false
 collect:
@@ -628,23 +432,6 @@ collect:
 		case next := <-n.proposec:
 			batch = append(batch, next)
 		default:
-			// Nothing more is waiting. The channel is unbuffered, so a
-			// receive succeeds here only when a client is already blocked
-			// sending. That is the precise condition worth batching on:
-			// never wait for writes that have not arrived.
-			//
-			// Finding nobody, though, can mean two different things. It can
-			// mean there genuinely is one writer, or it can mean the others
-			// are runnable and have simply not reached their send yet, which
-			// is what happens whenever there are fewer processors than
-			// writers. On a single core that was every time: batches were
-			// always one entry and group commit quietly did nothing.
-			//
-			// So an empty first look yields once and asks again. Under load
-			// this costs nothing, because the batch is already larger than
-			// one by the time it empties and there is nothing to gain from
-			// waiting; yielding on every batch regardless measured a third
-			// of the write throughput at sixty-four clients.
 			if len(batch) == 1 && !yielded {
 				yielded = true
 				runtime.Gosched()
@@ -664,21 +451,12 @@ collect:
 		for _, r := range batch {
 			r.done <- err
 		}
-		// Telling the clients is not enough when the reason is that nothing
-		// can be written. A leader that cannot append holds the cluster: it
-		// goes on heartbeating, so nobody else campaigns, while refusing
-		// every write and committing nothing. Standing down is the only
-		// thing that lets the cluster carry on without this node.
 		if fatal(err) {
 			return err
 		}
 		return nil
 	}
 
-	// The entries the core just appended occupy the last len(batch) indexes
-	// of the log, in order. Recording each entry's term as well as its index
-	// is what lets the loop tell "committed" from "overwritten by a new
-	// leader at the same index".
 	last := n.raft.LastIndex()
 	term := n.raft.Term()
 	first := last - raft.Index(len(batch)) + 1
@@ -688,20 +466,10 @@ collect:
 	return nil
 }
 
-// handleRead starts a read-index round, or defers it if the leader is not yet
-// able to produce a read index.
 func (n *Node) handleRead(req readRequest) {
 	n.startRead(req)
 }
 
-// startRead attempts to begin a read-index round.
-//
-// A leader that has just been elected cannot hand out a read index until it
-// has committed an entry in its own term (§5.4.2). That window is brief and
-// self-resolving — the no-op appended on election closes it within a
-// heartbeat — so the read is held and retried rather than failed. Surfacing
-// the condition to the client would turn an ordinary leader change into a
-// visible error for a request that was always going to succeed.
 func (n *Node) startRead(req readRequest) {
 	err := n.raft.ReadIndex(req.context)
 	switch {
@@ -714,9 +482,6 @@ func (n *Node) startRead(req readRequest) {
 	}
 }
 
-// retryDeferredReads re-attempts reads that were held back, once the leader
-// can serve them. If leadership was lost in the meantime they are failed, so
-// the client can be redirected instead of waiting.
 func (n *Node) retryDeferredReads() {
 	if len(n.deferred) == 0 {
 		return
@@ -729,21 +494,9 @@ func (n *Node) retryDeferredReads() {
 	}
 }
 
-// processReady drains the effects the core produced and acts on them.
 func (n *Node) processReady() {
-	// Leadership is a property of the node, not of this batch of work, so it
-	// is observed before anything might return early. A leader that stands
-	// down because it cannot reach a majority produces no messages and no
-	// entries, so its Ready is empty and the metrics would otherwise go on
-	// reporting it as the leader indefinitely: the gauge that says whether
-	// this node leads would be wrong exactly when someone is looking at it
-	// to find out why nothing is being served.
 	n.observeLeadership()
 
-	// Before anything is sent, because this batch may be the one carrying the
-	// first append to a member that was just admitted. Raft would retransmit
-	// on the next heartbeat either way, but there is no reason to make a new
-	// member wait for that.
 	n.reconcileTransport()
 
 	rd := n.raft.Ready()
@@ -751,27 +504,15 @@ func (n *Node) processReady() {
 		return
 	}
 
-	// Messages first. The core has already persisted anything they promise,
-	// so they are safe to send before the entries are applied.
 	if len(rd.Messages) > 0 {
 		n.cfg.Transport.Send(rd.Messages)
 	}
 
-	// A snapshot must be restored before any entries are applied. It replaces
-	// the state machine wholesale, so anything applied first would be thrown
-	// away by it — and the entries in this same batch are the ones that follow
-	// the snapshot, not the ones it contains.
 	if rd.Snapshot != nil {
 		if err := n.kv.Restore(rd.Snapshot.Data); err != nil {
-			// The image cannot be decoded, so this node has no way to reach
-			// the state the rest of the cluster agreed on. Continuing would
-			// mean serving reads from a state machine that silently stopped
-			// tracking the log.
 			n.failAllPending(fmt.Errorf("node: restoring snapshot: %w", err))
 			return
 		}
-		// The log below the snapshot is gone, so the next compaction has to
-		// measure from here rather than from a point that no longer exists.
 		n.lastSnapshot = rd.Snapshot.Index
 		n.snapshotsReceived++
 		n.cfg.Metrics.SnapshotReceived()
@@ -785,8 +526,6 @@ func (n *Node) processReady() {
 		n.cfg.Metrics.ObserveApply(len(rd.CommittedEntries), time.Since(start))
 	}
 
-	// Read indexes are recorded before resolving waiters, because a read may
-	// have been confirmed at an index this batch has only just applied.
 	for _, rs := range rd.ReadStates {
 		if r, ok := n.reads[string(rs.Context)]; ok {
 			r.index = rs.Index
@@ -796,21 +535,14 @@ func (n *Node) processReady() {
 	n.resolveReads()
 
 	n.raft.Advance(rd)
-	// Advancing can change leadership too, so it is checked again rather
-	// than waiting for the next pass.
 	n.observeLeadership()
 
-	// Leadership changes invalidate everything in flight: a follower cannot
-	// commit proposals or confirm reads.
 	if n.raft.State() != raft.Leader {
 		n.failAllPending(ErrNotLeader)
 	}
 
 	n.maybeSnapshot()
 
-	// A capped batch can leave committed entries behind. Ask the loop to come
-	// straight back for them. The channel holds one token, so a burst of
-	// batches cannot pile up.
 	if n.raft.HasUnapplied() {
 		select {
 		case n.applyc <- struct{}{}:
@@ -819,27 +551,10 @@ func (n *Node) processReady() {
 	}
 }
 
-// fatal reports whether an error from the consensus core means this node must
-// stop rather than carry on.
-//
-// Stepping a message fails for two unrelated reasons and the difference is
-// the entire decision. A message that makes no sense is one message: the
-// cluster drops it and continues, which is what a hostile or buggy peer
-// should cost. A write that did not land means this node can no longer
-// promise anything it stores, and every safety property above it assumes it
-// can.
-//
-// The two arrived indistinguishably until the core started marking the
-// second, so the loop dropped both. A tick that could not persist a term
-// already stopped the node; the same failure carried in on a vote request, an
-// append or a snapshot did not, and the node went on looking healthy while
-// being unable to record a single thing.
 func fatal(err error) bool {
 	return errors.Is(err, raft.ErrStorage)
 }
 
-// applyEntry hands one committed entry to the state machine and completes the
-// proposal waiting on it, if any.
 func (n *Node) applyEntry(e raft.Entry) {
 	err := n.kv.Apply(e)
 
@@ -853,17 +568,12 @@ func (n *Node) applyEntry(e raft.Entry) {
 	case err != nil:
 		p.done <- err
 	case e.Term != p.term:
-		// A different entry reached this index, so the proposal's own entry
-		// was overwritten by a later leader. The client must retry; its
-		// sequence number keeps that safe.
 		p.done <- ErrLostLeadership
 	default:
 		p.done <- nil
 	}
 }
 
-// resolveReads completes every read whose index has been both confirmed and
-// applied.
 func (n *Node) resolveReads() {
 	applied := n.kv.Applied()
 	for key, r := range n.reads {
@@ -875,8 +585,6 @@ func (n *Node) resolveReads() {
 	}
 }
 
-// failAllPending completes every in-flight request with an error, so callers
-// learn the outcome instead of waiting for a context deadline.
 func (n *Node) failAllPending(err error) {
 	for index, p := range n.pending {
 		delete(n.pending, index)
@@ -892,12 +600,6 @@ func (n *Node) failAllPending(err error) {
 	n.deferred = nil
 }
 
-// AddNode brings a new member into the cluster and waits for the change to
-// commit.
-//
-// The address is required. A member the cluster cannot reach would count
-// toward every majority while never answering, which makes the cluster less
-// available than it was before the node was added — the opposite of the point.
 func (n *Node) AddNode(ctx context.Context, id raft.NodeID, addr string) error {
 	if addr == "" {
 		return errors.New("node: a new member needs an address")
@@ -907,21 +609,12 @@ func (n *Node) AddNode(ctx context.Context, id raft.NodeID, addr string) error {
 	})
 }
 
-// RemoveNode takes a member out of the cluster and waits for the change to
-// commit.
 func (n *Node) RemoveNode(ctx context.Context, id raft.NodeID) error {
 	return n.proposeConfChange(ctx, raft.ConfChange{
 		Type: raft.ConfChangeRemoveNode, NodeID: id,
 	})
 }
 
-// proposeConfChange submits a membership change and waits for its entry to
-// commit.
-//
-// Waiting matters more here than for an ordinary write. A membership change
-// that was appended but never committed can be undone by the next leader, so
-// returning as soon as it was accepted would tell an operator the cluster had
-// grown when it might not have.
 func (n *Node) proposeConfChange(ctx context.Context, cc raft.ConfChange) error {
 	req := confChangeRequest{change: cc, done: make(chan error, 1)}
 
@@ -943,8 +636,6 @@ func (n *Node) proposeConfChange(ctx context.Context, cc raft.ConfChange) error 
 	}
 }
 
-// handleConfChange proposes a membership change and registers a waiter for the
-// entry it produced.
 func (n *Node) handleConfChange(req confChangeRequest) error {
 	before := n.raft.LastIndex()
 
@@ -958,7 +649,6 @@ func (n *Node) handleConfChange(req confChangeRequest) error {
 
 	index := n.raft.LastIndex()
 	if index == before {
-		// Nothing was appended, so there is nothing to wait for.
 		req.done <- nil
 		return nil
 	}
@@ -966,12 +656,6 @@ func (n *Node) handleConfChange(req confChangeRequest) error {
 	return nil
 }
 
-// Compact takes a snapshot and truncates the log immediately, rather than
-// waiting for enough entries to accumulate.
-//
-// Operators need this for the same reason the automatic threshold exists, just
-// on demand: bounding the log before a planned restart, or before adding a
-// member that would otherwise have to replay everything ever written.
 func (n *Node) Compact(ctx context.Context) error {
 	reply := make(chan error, 1)
 
@@ -993,15 +677,12 @@ func (n *Node) Compact(ctx context.Context) error {
 	}
 }
 
-// compact snapshots and truncates. It runs on the loop goroutine, where
-// reading the state machine and the raft node is safe.
 func (n *Node) compact() error {
 	applied := n.kv.Applied()
 	if applied == 0 {
 		return errors.New("node: nothing has been applied yet")
 	}
 	if applied <= n.lastSnapshot {
-		// Already compacted to here; nothing to do.
 		return nil
 	}
 
@@ -1018,12 +699,6 @@ func (n *Node) compact() error {
 	return nil
 }
 
-// maybeSnapshot compacts the log once enough entries have been applied past
-// the last snapshot.
-//
-// A failure here is deliberately not fatal. Snapshotting is an optimization:
-// it bounds the log and speeds up recovery, but the node is entirely correct
-// without it, so a full disk should slow the system rather than stop it.
 func (n *Node) maybeSnapshot() {
 	applied := n.kv.Applied()
 	if applied < n.lastSnapshot+raft.Index(n.cfg.SnapshotThreshold) {
@@ -1035,8 +710,6 @@ func (n *Node) maybeSnapshot() {
 	if err != nil {
 		return
 	}
-	// The configuration travels with the snapshot: compaction is about to
-	// remove the conf-change entries it was derived from.
 	if err := n.storage.CreateSnapshot(applied, data, n.raft.ConfState()); err != nil {
 		return
 	}
@@ -1044,22 +717,6 @@ func (n *Node) maybeSnapshot() {
 	n.cfg.Metrics.SnapshotCreated(uint64(applied), time.Since(start))
 }
 
-// reconcileTransport tells the transport which members exist and where, so
-// that a node admitted at runtime can actually be reached.
-//
-// It reads the configuration the core is using now rather than waiting for
-// committed entries. A configuration takes effect when its entry is appended,
-// and that entry cannot commit without the agreement of the members it adds,
-// so reconciling at commit time would deadlock any change that needs the new
-// member's vote. Growing a single-node cluster is the clearest case: the
-// joint configuration requires a majority of {1} and a majority of {1,2}, so
-// the entry admitting node 2 does not commit until node 2 answers, and node 2
-// cannot answer until somebody can reach it.
-//
-// Removal is handled for members this reconciler added. One that came from
-// the static peer list keeps its connection until the transport is closed,
-// which costs a socket and a goroutine and nothing else: the core stops
-// addressing messages to a node it has removed.
 func (n *Node) reconcileTransport() {
 	tr, ok := n.cfg.Transport.(Reconfigurable)
 	if !ok {
@@ -1079,17 +736,12 @@ func (n *Node) reconcileTransport() {
 		if addr := conf.Addrs[id]; addr != "" {
 			wanted[id] = addr
 		}
-		// A member with no address in the configuration came from the static
-		// peer list, where the transport was given its address at startup.
-		// Nothing here knows a better one.
 	}
 
 	if n.transportPeers == nil {
 		n.transportPeers = make(map[raft.NodeID]string, len(wanted))
 	}
 
-	// A dial that fails is left out of the record rather than retried here,
-	// so the next pass picks it up. The loop must not block on the network.
 	complete := true
 	for id, addr := range wanted {
 		if n.transportPeers[id] == addr {
@@ -1114,12 +766,6 @@ func (n *Node) reconcileTransport() {
 	}
 }
 
-// observeLeadership reports a change of term or leader exactly once.
-//
-// It runs on the loop goroutine after every Ready, which is the only place
-// that sees every transition. An election that starts and finishes between
-// two scrapes is invisible to a sampled gauge but is precisely the event an
-// operator wants counted, so it is recorded here as it happens.
 func (n *Node) observeLeadership() {
 	term, leader := n.raft.Term(), n.raft.Leader()
 	if term == n.lastTerm && leader == n.lastLeader {

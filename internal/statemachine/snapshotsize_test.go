@@ -8,7 +8,6 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
-// fill puts n values of the given size into a store.
 func fill(t testing.TB, kv *KV, n, valueSize int) {
 	t.Helper()
 	value := make([]byte, valueSize)
@@ -22,11 +21,6 @@ func fill(t testing.TB, kv *KV, n, valueSize int) {
 }
 
 func TestSnapshotBufferIsSizedExactly(t *testing.T) {
-	// The buffer is allocated once, from a computed size, and never grown.
-	// Comparing capacity to length is the cheapest way to say that: if the
-	// computation were low the buffer would have been reallocated and its
-	// capacity would exceed its length, and if it were high the excess is
-	// memory reserved at exactly the wrong moment.
 	for _, tc := range []struct {
 		name      string
 		keys      int
@@ -55,10 +49,6 @@ func TestSnapshotBufferIsSizedExactly(t *testing.T) {
 }
 
 func TestSnapshotDoesNotAllocateAMultipleOfItsOutput(t *testing.T) {
-	// The guard against the regrowth this replaced. A store of sixteen
-	// thousand four kilobyte values used to allocate 353 MB to produce 64 MB,
-	// because the buffer was sized from a guess of thirty-two bytes per pair
-	// and doubled seven times.
 	kv := New()
 	fill(t, kv, 16<<10, 4<<10)
 
@@ -74,8 +64,6 @@ func TestSnapshotDoesNotAllocateAMultipleOfItsOutput(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	allocated := after.TotalAlloc - before.TotalAlloc
 
-	// Producing n bytes should cost about n. Anything approaching a multiple
-	// of the output means the buffer is being grown rather than sized.
 	if limit := uint64(len(snap)) * 3 / 2; allocated > limit {
 		t.Errorf("producing a %d byte snapshot allocated %d bytes, over the %d byte budget; "+
 			"the buffer is being regrown", len(snap), allocated, limit)
@@ -83,9 +71,6 @@ func TestSnapshotDoesNotAllocateAMultipleOfItsOutput(t *testing.T) {
 }
 
 func TestSnapshotContentIsUnchangedBySizing(t *testing.T) {
-	// Sizing the buffer must not change a single byte. Snapshots are compared
-	// between replicas to check convergence, so the encoding is part of the
-	// contract rather than an implementation detail.
 	kv := New()
 	fill(t, kv, 32, 64)
 

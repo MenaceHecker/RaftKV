@@ -2,21 +2,7 @@ package raft
 
 import "testing"
 
-// Tests for leader election (§5.2, §5.4.1).
-//
-// These cover the first two of the paper's five safety properties:
-//
-//   - Election Safety: at most one leader per term. The harness asserts this on
-//     every call to leader(), so every test in the package checks it
-//     continuously; the tests here drive the cases where it is most at risk.
-//   - Leader Completeness (in part): a candidate whose log is behind cannot win,
-//     which is what stops a leader from ever missing a committed entry. The
-//     replication tests finish this off by showing committed data survives a
-//     leader change.
-
 func TestSingleNodeElectsItself(t *testing.T) {
-	// A one-node cluster is its own majority, so campaigning is decided by the
-	// self-vote alone with no messages exchanged.
 	c := newCluster(t, 1, clusterOpts{seed: 1})
 	c.campaign(1)
 
@@ -27,10 +13,6 @@ func TestSingleNodeElectsItself(t *testing.T) {
 		t.Fatalf("term = %d, want 1", got)
 	}
 
-	// Becoming leader is not enough: with no peers, no acknowledgement will
-	// ever arrive to advance the commit index, so the leader must recognize
-	// its own append as a majority immediately. Otherwise the cluster elects a
-	// leader that can never commit anything.
 	if got := c.node(1).CommitIndex(); got != c.node(1).LastIndex() {
 		t.Fatalf("commit index = %d, last index = %d; a single-node leader must commit "+
 			"its own entries without waiting for anyone\n%s",
@@ -46,8 +28,6 @@ func TestSingleNodeElectsItself(t *testing.T) {
 }
 
 func TestElectionTimeoutProducesLeader(t *testing.T) {
-	// No node is told to campaign. A leader must emerge purely from election
-	// timeouts firing, which is the real startup path.
 	c := newCluster(t, 5, clusterOpts{seed: 2})
 
 	for _, id := range c.ids {
@@ -56,16 +36,12 @@ func TestElectionTimeoutProducesLeader(t *testing.T) {
 		}
 	}
 
-	// Two full election timeouts is ample: the randomized timeout is drawn
-	// from [ElectionTick, 2*ElectionTick), so every node has campaigned at
-	// least once by then.
 	leader := c.awaitLeader(defaultElectionTick * 2)
 
 	if got := c.node(leader).Term(); got < 1 {
 		t.Fatalf("leader %d has term %d, want at least 1", leader, got)
 	}
 
-	// Everyone else must be a follower that recognizes this leader.
 	for _, id := range c.ids {
 		if id == leader {
 			continue
@@ -85,9 +61,6 @@ func TestElectionTimeoutProducesLeader(t *testing.T) {
 }
 
 func TestCandidateWinsWithMajority(t *testing.T) {
-	// Three of five nodes is a majority, so an election succeeds with two
-	// nodes unreachable. This is the availability guarantee: a cluster of
-	// 2f+1 tolerates f failures.
 	c := newCluster(t, 5, clusterOpts{seed: 3})
 	c.partition([]NodeID{1, 2, 3}, []NodeID{4}, []NodeID{5})
 
@@ -99,9 +72,6 @@ func TestCandidateWinsWithMajority(t *testing.T) {
 }
 
 func TestCandidateLosesWithoutMajority(t *testing.T) {
-	// Two of five is not a majority, so the candidate must not win — even
-	// though nothing rejects it and it simply never hears back from three
-	// nodes. Silence must never be read as consent.
 	c := newCluster(t, 5, clusterOpts{seed: 4})
 	c.partition([]NodeID{1, 2}, []NodeID{3, 4, 5})
 
@@ -113,13 +83,8 @@ func TestCandidateLosesWithoutMajority(t *testing.T) {
 }
 
 func TestOneVotePerTerm(t *testing.T) {
-	// Two candidates campaign in the same term. A voter that has already voted
-	// must refuse the second, which is what makes it arithmetically impossible
-	// for both to reach a majority (Election Safety).
 	c := newCluster(t, 3, clusterOpts{seed: 5})
 
-	// Isolate everyone so the campaigns do not interfere, then hand-deliver
-	// the vote requests to node 3 and watch how it answers each.
 	c.partition([]NodeID{1}, []NodeID{2}, []NodeID{3})
 	c.campaign(1)
 	c.campaign(2)
@@ -165,9 +130,6 @@ func TestOneVotePerTerm(t *testing.T) {
 }
 
 func TestVoteIsIdempotentForSameCandidate(t *testing.T) {
-	// A repeated request from the candidate already voted for must be granted
-	// again. The retry exists because the first response may have been lost,
-	// and refusing it would turn a dropped message into a lost election.
 	c := newCluster(t, 3, clusterOpts{seed: 6})
 	n := c.node(3)
 
@@ -192,12 +154,8 @@ func TestVoteIsIdempotentForSameCandidate(t *testing.T) {
 }
 
 func TestStaleLogCandidateIsRejected(t *testing.T) {
-	// The election restriction (§5.4.1). A candidate whose log is behind must
-	// not win, however high its term — this is what guarantees a new leader
-	// already holds every committed entry.
 	c := newCluster(t, 3, clusterOpts{seed: 7})
 
-	// Give node 1 a log by electing it and committing a command.
 	c.campaign(1)
 	if err := c.propose(1, "set x=1"); err != nil {
 		t.Fatalf("propose: %v", err)
@@ -206,9 +164,6 @@ func TestStaleLogCandidateIsRejected(t *testing.T) {
 	voter := c.node(1)
 	behind := voter.LastIndex() - 1
 
-	// A candidate from a much later term, but with a shorter log at an older
-	// term. The high term forces the voter to step down; the stale log must
-	// still cost it the vote.
 	stale := Message{
 		Type:         MsgVoteRequest,
 		From:         3,
@@ -236,8 +191,6 @@ func TestStaleLogCandidateIsRejected(t *testing.T) {
 			behind, voter.LastIndex(), c.dump())
 	}
 
-	// The higher term must still have been adopted: the vote is refused, but
-	// the term information in the message is valid and cannot be ignored.
 	if voter.Term() != stale.Term {
 		t.Fatalf("term = %d, want %d; a higher term must be adopted even when the vote is refused",
 			voter.Term(), stale.Term)
@@ -248,9 +201,6 @@ func TestStaleLogCandidateIsRejected(t *testing.T) {
 }
 
 func TestHigherTermDeposesLeader(t *testing.T) {
-	// A leader that sees a higher term steps down immediately. Without this a
-	// partitioned-then-rejoined leader would keep issuing appends in a dead
-	// term and could conflict with the real leader.
 	c := newCluster(t, 3, clusterOpts{seed: 8})
 	c.campaign(1)
 
@@ -282,23 +232,16 @@ func TestHigherTermDeposesLeader(t *testing.T) {
 }
 
 func TestLeaderIsElectedAfterSplitVote(t *testing.T) {
-	// An even-sized cluster where two candidates campaign at once can tie with
-	// no winner. Liveness depends on the randomized timeout: the next round
-	// must not reproduce the same split.
 	c := newCluster(t, 4, clusterOpts{seed: 9})
 
 	c.partition([]NodeID{1, 3}, []NodeID{2, 4})
 	c.campaign(1)
 	c.campaign(2)
 
-	// Two candidates, two votes each in a four-node cluster: neither reaches
-	// the three-node majority.
 	if _, ok := c.leader(); ok {
 		t.Fatalf("a leader emerged from a split vote\n%s", c.dump())
 	}
 
-	// Once the partition heals, a fresh round must resolve. Redrawing the
-	// timeout on every state change is what breaks the symmetry.
 	c.heal()
 	leader := c.awaitLeader(defaultElectionTick * 10)
 
@@ -314,9 +257,6 @@ func TestLeaderIsElectedAfterSplitVote(t *testing.T) {
 }
 
 func TestTermAndVoteSurviveRestart(t *testing.T) {
-	// Phase 1's persistence requirement. A node that crashes after voting must
-	// not forget: on restart it could otherwise vote a second time in the same
-	// term and help elect a second leader.
 	c := newCluster(t, 3, clusterOpts{seed: 10})
 
 	voter := c.node(3)
@@ -345,8 +285,6 @@ func TestTermAndVoteSurviveRestart(t *testing.T) {
 		t.Fatalf("state after restart = %s, want Follower; leadership is not durable", got)
 	}
 
-	// The recovered vote must still bind. A second candidate in the same term
-	// has to be refused.
 	err = restarted.Step(Message{
 		Type: MsgVoteRequest,
 		From: 2,

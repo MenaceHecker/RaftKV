@@ -15,35 +15,12 @@ import (
 	"time"
 )
 
-// The process as an orchestrator sees it: started with flags, stopped with a
-// signal, started again on the same directory.
-//
-// run cannot be called in process more than once, because it registers its
-// flags on the default FlagSet, so the only honest way to exercise it is to
-// run the binary. That is also the only way to exercise the part that matters
-// most here, which is what happens on SIGTERM. Kubernetes sends one and then
-// waits: a process that exits non-zero is recorded as having failed, one that
-// ignores the signal is killed when the grace period runs out, and a killed
-// process is exactly the case the write-ahead log has to recover from rather
-// than the orderly stop it was given the chance to perform.
-//
-// Restarting on the same data directory is part of the same property. The
-// directory is held under a lock for as long as the process lives, so a
-// rolling restart only works if stopping really did release it.
-
 const (
-	// startupBudget is generous: this builds nothing, but a loaded machine
-	// still has to start a process, replay a log and win an election.
 	startupBudget = 30 * time.Second
 
-	// shutdownBudget is what an orchestrator would allow. The Kubernetes
-	// manifest asks for thirty seconds, and the server bounds its own
-	// graceful stop at five, so anything close to thirty means the bound is
-	// not working.
 	shutdownBudget = 15 * time.Second
 )
 
-// buildServer compiles the binary once for the tests in this file.
 func buildServer(t *testing.T) string {
 	t.Helper()
 
@@ -55,11 +32,6 @@ func buildServer(t *testing.T) string {
 	return bin
 }
 
-// freePort returns a port nothing is listening on.
-//
-// There is a race between closing this listener and the server binding it,
-// which is unavoidable without having the server report the port it chose.
-// It is narrow, and a collision fails loudly rather than silently.
 func freePort(t *testing.T) int {
 	t.Helper()
 
@@ -71,20 +43,15 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// server is one running raftkv-server process.
 type server struct {
 	cmd     *exec.Cmd
 	metrics string
 	log     *os.File
 }
 
-// startServer launches the binary as a single-node cluster.
 func startServer(t *testing.T, bin, dataDir string, raftPort, metricsPort int) *server {
 	t.Helper()
 
-	// Output goes to a file so that a failure can show what the process
-	// said. A server that will not start says so, and the test should not
-	// have to guess.
 	log, err := os.CreateTemp(t.TempDir(), "server-*.log")
 	if err != nil {
 		t.Fatalf("creating a log file: %v", err)
@@ -95,8 +62,6 @@ func startServer(t *testing.T, bin, dataDir string, raftPort, metricsPort int) *
 		"--peers", fmt.Sprintf("1=127.0.0.1:%d", raftPort),
 		"--data-dir", dataDir,
 		"--metrics-listen", fmt.Sprintf("127.0.0.1:%d", metricsPort),
-		// Power loss is not what this test is about, and an fsync per append
-		// makes it slow for no gain here.
 		"--fsync=false",
 	)
 	cmd.Stdout = log
@@ -109,7 +74,6 @@ func startServer(t *testing.T, bin, dataDir string, raftPort, metricsPort int) *
 	return &server{cmd: cmd, metrics: fmt.Sprintf("http://127.0.0.1:%d", metricsPort), log: log}
 }
 
-// output returns everything the process has written, for a failure message.
 func (s *server) output(t *testing.T) string {
 	t.Helper()
 
@@ -120,9 +84,6 @@ func (s *server) output(t *testing.T) string {
 	return string(b)
 }
 
-// awaitReady polls until the server reports that it can serve, which means
-// every stage of startup succeeded: flags, data directory, listener, node,
-// election and the metrics server this is asking through.
 func (s *server) awaitReady(t *testing.T) {
 	t.Helper()
 
@@ -140,7 +101,6 @@ func (s *server) awaitReady(t *testing.T) {
 	t.Fatalf("the server never became ready\n%s", s.output(t))
 }
 
-// terminate sends SIGTERM and returns how long the process took to exit.
 func (s *server) terminate(t *testing.T) (time.Duration, error) {
 	t.Helper()
 
@@ -178,9 +138,6 @@ func TestTheServerStartsServesAndStopsOnSIGTERM(t *testing.T) {
 }
 
 func TestTheServerCanBeRestartedOnItsOwnDataDirectory(t *testing.T) {
-	// A rolling restart is this, one pod at a time. The data directory is
-	// held under a lock for the life of the process, so coming back up at
-	// all is what proves the first process let go of it.
 	bin := buildServer(t)
 	dataDir := filepath.Join(t.TempDir(), "data")
 	raftPort, metricsPort := freePort(t), freePort(t)
@@ -199,9 +156,6 @@ func TestTheServerCanBeRestartedOnItsOwnDataDirectory(t *testing.T) {
 }
 
 func TestTheServerRefusesAnIncoherentPeerList(t *testing.T) {
-	// The check that an operator is most likely to need: an ID that is not in
-	// the peer list is a cluster that can never form, and it has to fail at
-	// startup rather than look healthy and never elect anybody.
 	bin := buildServer(t)
 
 	cmd := exec.Command(bin,

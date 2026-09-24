@@ -9,25 +9,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// The deployment document calls four things in the Kubernetes manifest load
-// bearing, and says so from measurement rather than reasoning: with ordered
-// startup the cluster deadlocked on its first pod and stayed there. Nothing
-// connects those sentences to the file they describe. Tidying the YAML, or
-// copying it as a starting point for a different cluster, drops a line and
-// leaves a document still promising the behaviour it bought.
-//
-// Three of them are constants and are checked as such. The fourth is not:
-// a disruption budget has to hold a majority of whatever the replica count
-// is, so five replicas need three and seven need four. Leaving it at three
-// while scaling up gives a drain permission to take four of seven pods, which
-// stops the cluster, and the only sign beforehand is a number that still
-// looks like the one in the document.
-
 const manifestPath = repoRoot + "/deploy/kubernetes/raftkv.yaml"
 
-// documents decodes every YAML document in a file. It is also what says the
-// manifest parses at all; kubectl would reject it otherwise, which is a
-// discovery best made before a deploy rather than during one.
 func documents(t *testing.T, path string) []map[string]any {
 	t.Helper()
 
@@ -58,8 +41,6 @@ func documents(t *testing.T, path string) []map[string]any {
 	return out
 }
 
-// byKind returns the single document of a kind, failing if there is not
-// exactly one.
 func byKind(t *testing.T, docs []map[string]any, kind string) map[string]any {
 	t.Helper()
 
@@ -75,7 +56,6 @@ func byKind(t *testing.T, docs []map[string]any, kind string) map[string]any {
 	return found[0]
 }
 
-// dig walks nested maps and lists, naming the step that failed.
 func dig(t *testing.T, v any, path ...any) any {
 	t.Helper()
 
@@ -102,9 +82,6 @@ func dig(t *testing.T, v any, path ...any) any {
 }
 
 func TestTheStatefulSetStartsItsPodsInParallel(t *testing.T) {
-	// OrderedReady starts pod N+1 only once pod N is ready, no pod is ready
-	// before a leader exists, and no leader exists before a majority is
-	// running. The first pod waits for a cluster that is waiting for it.
 	docs := documents(t, manifestPath)
 	sts := byKind(t, docs, "StatefulSet")
 
@@ -114,9 +91,6 @@ func TestTheStatefulSetStartsItsPodsInParallel(t *testing.T) {
 }
 
 func TestTheHeadlessServicePublishesNotReadyAddresses(t *testing.T) {
-	// The same deadlock approached from DNS. Peers have to resolve each other
-	// before any of them is ready, and without this the addresses they need
-	// in order to become ready are exactly the ones withheld.
 	docs := documents(t, manifestPath)
 
 	var headless map[string]any
@@ -139,9 +113,6 @@ func TestTheHeadlessServicePublishesNotReadyAddresses(t *testing.T) {
 }
 
 func TestTheProbesAskDifferentQuestions(t *testing.T) {
-	// Readiness may depend on a leader. Liveness may not: during an election
-	// no node has one, so a liveness probe that checked would fail on every
-	// node at once and Kubernetes would restart the whole cluster.
 	docs := documents(t, manifestPath)
 	sts := byKind(t, docs, "StatefulSet")
 
@@ -162,7 +133,6 @@ func TestTheProbesAskDifferentQuestions(t *testing.T) {
 }
 
 func TestTheDisruptionBudgetHoldsAQuorum(t *testing.T) {
-	// The one that is wrong the moment the replica count changes.
 	docs := documents(t, manifestPath)
 
 	replicas, ok := dig(t, byKind(t, docs, "StatefulSet"), "spec", "replicas").(int)
@@ -183,11 +153,6 @@ func TestTheDisruptionBudgetHoldsAQuorum(t *testing.T) {
 }
 
 func TestEveryAlertHasAnExpression(t *testing.T) {
-	// An alert rule file that Prometheus refuses loads no rules at all, and
-	// a cluster with no alerts looks exactly like a cluster with nothing
-	// wrong. This does not evaluate the PromQL, which would need Prometheus
-	// itself; it checks the structure the file must have to be loaded, and
-	// that every rule carries an expression and a name.
 	docs := documents(t, repoRoot+"/deploy/alerts.yml")
 	if len(docs) != 1 {
 		t.Fatalf("expected one document in alerts.yml, found %d", len(docs))
