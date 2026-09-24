@@ -35,7 +35,8 @@ var (
 	// deduplication makes that safe.
 	ErrLostLeadership = errors.New("node: leadership changed before the request committed")
 
-	// ErrStopped means the node is shutting down.
+	// ErrStopped means the node's consensus loop has exited, either because
+	// Stop was called or because it could no longer write.
 	ErrStopped = errors.New("node: stopped")
 
 	// ErrTimeout means a request did not complete before its context expired.

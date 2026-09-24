@@ -151,7 +151,18 @@ func (s *KVServer) translate(err error) error {
 			"leadership changed before the request committed; retry")
 
 	case errors.Is(err, node.ErrStopped):
-		return status.Error(codes.Unavailable, "node is shutting down")
+		// Not necessarily a shutdown somebody asked for: a node also stops
+		// itself when it can no longer write. Either way it is not serving
+		// and another node is the place to go.
+		return status.Error(codes.Unavailable, "node is not serving")
+
+	case errors.Is(err, raft.ErrStorage):
+		// The write did not land and this node is on its way down because of
+		// it. Somebody else can take the request, so the client should be
+		// sent looking rather than told this is a fault of its own: Internal
+		// would have it give up and report a failure to its caller, when a
+		// retry against the next leader is about to succeed.
+		return status.Error(codes.Unavailable, "node cannot persist writes")
 
 	case errors.Is(err, context.Canceled):
 		return status.Error(codes.Canceled, err.Error())

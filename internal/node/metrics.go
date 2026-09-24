@@ -67,7 +67,8 @@ const (
 	// ResultTimeout means the caller's context expired first.
 	ResultTimeout = "timeout"
 
-	// ResultStopped means the node was shutting down.
+	// ResultStopped means the node's consensus loop had exited, whether it
+	// was asked to stop or stopped because it could no longer write.
 	ResultStopped = "stopped"
 
 	// ResultError is any other failure.
