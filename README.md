@@ -73,7 +73,7 @@ Raft says an entry is committed once a majority stores it. That is not sufficien
 
 The entry only becomes safe once something from the leader's own term commits on top of it. That is why every new leader appends a no-op the moment it is elected: it gives the leader an in-term entry to commit immediately, which transitively secures everything inherited.
 
-I wrote a test for this, it passed, and it was worthless. It only checked that a leader commits its own-term entry and never built the dangerous case at all. A green test on the most important rule in the codebase, verifying nothing. I threw it out and wrote one that constructs the Figure 8 setup directly, then deleted the guard to confirm the test goes red. It does, and it is the only test that does.
+I wrote a test for this, it passed, but it was worthless. It only checked that a leader commits its own-term entry and never built the dangerous case at all. A green test on the most important rule in the codebase, verifying nothing. I threw it out and wrote one that constructs the Figure 8 setup directly, then deleted the guard to confirm the test goes red. It does, and it is the only test that does.
 
 That happened three more times over the project. It is the thing I would most want someone to take from this repo: a passing test is not evidence until you have watched it fail.
 
