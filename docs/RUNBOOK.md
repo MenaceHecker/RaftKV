@@ -1,14 +1,14 @@
 # RaftKV: Agent Runbook
 
-> Save as `docs/RUNBOOK.md`. Copy Appendix A to `CLAUDE.md` and `AGENTS.md` at the repo root.
+> Save as `docs/RUNBOOK.md`. Copy Appendix A to `CLAUDE.md` (Claude agents) and Appendix F-3 to `AGENTS.md` (ChatGPT/Codex reviewer) at the repo root.
 > Owner: Tushar (GitHub: MenaceHecker). Written 2026-10-21. Target finish: 2026-12-08.
-> Audience: Claude Code and Codex CLI working under human review.
+> Audience: Claude agents (planner, executor, runner) with a ChatGPT reviewer, all under human review.
 
 ---
 
 ## 0. How to use this runbook
 
-1. Start every agent session with: *"Read CLAUDE.md and docs/RUNBOOK.md. Work only on task `<ID>`. Stop and report when its acceptance criteria are met."*
+1. Start every agent session with its role prompt from Appendix B or F, naming the task ID. One role per session.
 2. One task = one branch = one PR. Task IDs (`T3.1`, `D4`, ...) are in §9 and §10.
 3. If this runbook conflicts with the README or the code, **stop and ask**. Do not silently pick one.
 4. Every task ends with a report in the format in §5.6.
@@ -68,30 +68,38 @@ The phase map below is an **assumption**. The README is authoritative.
 8. **Secrets never enter git.** No keys, tokens, `.tfvars`, `.tfstate`, `.env`. Use SSM Parameter Store and GitHub secrets.
 9. **AWS safety:** agents may run `terraform fmt`, `validate`, and `plan`. Agents may **not** run `terraform apply` or `destroy`, and may not create IAM users or keys. **[HUMAN]** applies after reading the plan.
 10. **Small commits.** One logical change each, under ~300 changed lines where possible.
-11. **Do not touch files outside your ownership area (§3)** without asking.
+11. **Do not touch files outside your task card's scope or your role's permissions (§3)** without asking.
 12. **If unsure about Raft semantics, cite the paper section** (Raft extended paper, Figure 2, §5.4.2, §6, §7, §8) in the code comment or PR. Do not guess.
 13. **Report honestly.** If a gate failed, a task is partial, or you skipped something, say so at the top of the report.
 
 ---
 
-## 3. Roles and ownership
+## 3. Agent roles (Claude: planner, executor, runner. ChatGPT: reviewer)
 
-| Area | Owner agent | Human review |
-|---|---|---|
-| `internal/raft/`, `internal/wal/`, `internal/snapshot/`, `internal/kv/`, `internal/transport/` | **Claude Code** | **Required, every PR** |
-| `internal/verify/`, `internal/chaos/`, `internal/sim/` | **Claude Code** | **Required, every PR** |
-| `cmd/gateway/`, `cmd/raftkvctl/` | Codex CLI | Required for auth and rate limiting |
-| `infra/` (Terraform), `scripts/`, `.github/` | Codex CLI | **Required for IAM, SG, budgets; plan read before apply** |
-| `web/` (dashboard) | Codex CLI | Light review |
-| `docs/`, README | Either | Human edits final prose |
+| Role | Model | Can do | Must not do | Produces |
+|---|---|---|---|---|
+| **Planner** | Claude (read-only session) | Read repo, paper notes, INVARIANTS; write task cards under `docs/tasks/` | Edit code, tests, infra | `docs/tasks/<ID>.md` (template in Appendix F) |
+| **Executor** | Claude Code (own git worktree) | Implement the task card: tests first, commits, push branch, open PR | Run `terraform apply/destroy`; merge; edit outside the card's scope; declare its own gates "green" as final | Commits and PR |
+| **Runner** | Claude Code (fresh clone or detached worktree of the **pushed** branch, edit tools disabled) | Run gates, `test-flaky`, `chaos-smoke`, mutation suite, `terraform validate/plan`; capture raw output and exit codes | Edit any file; "fix" failures; summarize away failures | `RUN_REPORT.md` (format in Appendix F) |
+| **Reviewer** | ChatGPT (separate account/session; read-only) | Review the review packet (§5.5); propose failing scenarios and missing tests | Rewrite code; approve without listing what it could not verify | Structured review (schema in §5.5) |
+| **Human** | You | Merge, apply infra, DNS, credentials, final read of raft-core, verifier, IAM/SG, gateway auth | | |
 
-**Cross-review:** every PR is reviewed by the *other* agent before the human looks (§5.5).
+**Rules for the setup**
+- **Separate sessions, fresh context per role.** The planner, executor, and runner never share a conversation. If they did, the runner would inherit the executor's assumptions and stop being an independent check.
+- **The runner's report, not the executor's summary, is the evidence.** CI is the final source of truth.
+- **Restrict the runner via Claude Code permission settings** (deny the edit and write tools for that session, allow only the Makefile targets and `terraform plan`).
+- **Honest limitation:** planner, executor, and runner are one model family, so they share blind spots. The reviewer is your only cross-vendor check, and the real independent oracles are the invariant monitor in the simulator, the mutation suite (§8.6), and your own reading of the raft core. Do not treat three Claude agreeing as three opinions.
+- **Parallelism:** the planner can write the next task card while the executor works on the current one. Each executor task gets its own worktree: `git worktree add ../raftkv-exec -b feat/p4-install-snapshot`.
 
-**Concurrency:** each agent works in its own git worktree so they never share a working directory:
-```bash
-git worktree add ../raftkv-claude -b feat/p4-snapshot-install
-git worktree add ../raftkv-codex  -b infra/d2-network
-```
+**Per-task pipeline**
+1. Planner writes the task card, human skims it and approves.
+2. Executor implements it (tests first; separate commits for tests and core), pushes the branch.
+3. Runner checks out the pushed branch and produces `RUN_REPORT.md`.
+4. `scripts/review-packet.sh` builds the packet; the reviewer returns findings.
+5. Executor fixes BLOCKER and MAJOR findings with new commits. Runner re-runs. Reviewer re-reviews the delta. Repeat until no blockers.
+6. Human reads raft-core, verifier, IAM/SG, and gateway-auth diffs, then merges.
+
+**Human review is required** for: `internal/raft`, `internal/wal`, `internal/snapshot`, `internal/verify`, all IAM and security groups, gateway auth and rate limiting, and any test modified (guard script).
 
 ---
 
@@ -100,7 +108,7 @@ git worktree add ../raftkv-codex  -b infra/d2-network
 ```
 raftkv/
 ├── CLAUDE.md                  # Appendix A
-├── AGENTS.md                  # same content
+├── AGENTS.md                  # reviewer rules (Appendix F-3), for ChatGPT/Codex
 ├── README.md
 ├── Makefile
 ├── go.mod
@@ -166,11 +174,40 @@ Squash-merge per PR; the PR title is a conventional commit message. Branch prote
 ### 5.4 Pre-commit hooks (`.githooks/pre-commit`, enable with `git config core.hooksPath .githooks`)
 1. `gofmt -l` must output nothing. 2. `go vet ./...` 3. `go test -race -short ./...` 4. `gitleaks protect --staged` 5. `scripts/guard-tests.sh`
 
-### 5.5 Cross-agent review before the human
-After pushing, the other agent runs on `git diff main...HEAD`:
-> "Review this diff as a skeptical distributed-systems reviewer. Check against docs/INVARIANTS.md. List: (a) invariant violations, (b) missing persistence/fsync, (c) tests that were weakened or are vacuous, (d) data races, (e) anything you cannot verify. Do not edit files."
+### 5.5 Independent review by ChatGPT (the reviewer)
+Build the packet with `scripts/review-packet.sh` and paste it (or attach it) into a fresh ChatGPT session using the reviewer prompt in Appendix F-2. If you use Codex CLI as the reviewer so it can read the repo and run tests, run it in its read-only mode.
 
-If a script named `xreview` exists in the repo, use it; otherwise run the prompt above. Paste the result into the PR.
+**Packet contents:** the task card, `git diff main...HEAD`, `docs/INVARIANTS.md`, `RUN_REPORT.md`, the guard-tests output, and the full text of every changed file under `internal/raft`, `internal/wal`, `internal/snapshot` (the diff alone hides context).
+
+**Required output schema:**
+```
+VERDICT: approve | changes-requested
+FINDINGS:
+- [BLOCKER|MAJOR|MINOR|NIT] file:line | invariant (§7 ref) | evidence | failing scenario or test to add
+TEST REVIEW: vacuous or weakened tests, missing negative cases, nondeterminism
+NOT VERIFIED: everything the reviewer could not check (it cannot run code unless using Codex)
+```
+For any suspected safety bug, the reviewer must supply a concrete interleaving (a short sequence of events across nodes) that would violate an invariant. "Looks suspicious" is not a finding.
+
+`scripts/review-packet.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+task="$1"; base="${2:-origin/main}"
+out="review-packet-$task.md"
+{
+  echo "# Review packet: $task"; echo; echo "## Task card"; cat "docs/tasks/$task.md"
+  echo; echo "## Invariants"; cat docs/INVARIANTS.md
+  echo; echo "## Run report"; cat RUN_REPORT.md
+  echo; echo "## guard-tests"; scripts/guard-tests.sh "$base" 2>&1 || true
+  echo; echo "## Diff"; echo '```diff'; git diff "$base"...HEAD; echo '```'
+  echo; echo "## Full text of changed core files"
+  for f in $(git diff --name-only "$base"...HEAD | grep -E '^internal/(raft|wal|snapshot)/.*\.go$' | grep -v _test.go); do
+    echo "### $f"; echo '```go'; cat "$f"; echo '```'
+  done
+} > "$out"
+echo "$out"
+```
 
 ### 5.6 Agent task report (end of every task)
 ```
@@ -341,44 +378,44 @@ Each task: **agent / branch / acceptance**. Acceptance always includes all gates
 ### Phase 3 (finish): persistence
 | ID | Task | Agent | Acceptance |
 |---|---|---|---|
-| T3.0 | Audit current persistence against §7.2-7.3, write `docs/audit-p3.md` (read-only) | Claude Code | Every checklist item marked OK / GAP with file:line evidence |
-| T3.1 | Atomic metadata persistence | Claude Code | Crash between any two syscalls never loses or corrupts `currentTerm`/`votedFor` (fault-fs test) |
-| T3.2 | Segmented WAL with CRC, torn-tail handling, truncate-suffix/prefix | Claude Code | Codec fuzz test (`go test -fuzz`) 60s clean; torn-tail and mid-log corruption tests |
-| T3.3 | fsync policy and group commit (batch appends, one fsync) | Claude Code | No ack before fsync verified by fault-fs "lose unsynced data" test |
-| T3.4 | Crash-recovery simulation at every write boundary | Claude Code | Invariant monitor green over 500 seeds |
-| T3.5 | Close remaining README Phase 3 items | Claude Code | README Phase 3 checklist fully checked |
+| T3.0 | Audit current persistence against §7.2-7.3, write `docs/audit-p3.md` (read-only) | Claude (executor) | Every checklist item marked OK / GAP with file:line evidence |
+| T3.1 | Atomic metadata persistence | Claude (executor) | Crash between any two syscalls never loses or corrupts `currentTerm`/`votedFor` (fault-fs test) |
+| T3.2 | Segmented WAL with CRC, torn-tail handling, truncate-suffix/prefix | Claude (executor) | Codec fuzz test (`go test -fuzz`) 60s clean; torn-tail and mid-log corruption tests |
+| T3.3 | fsync policy and group commit (batch appends, one fsync) | Claude (executor) | No ack before fsync verified by fault-fs "lose unsynced data" test |
+| T3.4 | Crash-recovery simulation at every write boundary | Claude (executor) | Invariant monitor green over 500 seeds |
+| T3.5 | Close remaining README Phase 3 items | Claude (executor) | README Phase 3 checklist fully checked |
 
 ### Phase 4: state machine, client semantics, snapshots
 | ID | Task | Agent | Acceptance |
 |---|---|---|---|
-| T4.1 | KV state machine: protobuf command encoding; `Put/Get/Delete/CAS`; deterministic apply | Claude Code | Same log yields byte-identical state on all nodes (test) |
-| T4.2 | Client sessions and dedupe `(clientID, seq)` | Claude Code | Retried CAS applies once; session table has bounded size with expiry policy documented |
-| T4.3 | Read path: log reads first, then ReadIndex behind `read_mode` | Claude Code | Deposed-leader read test; ReadIndex only becomes default after passing the verifier (T5.x) |
-| T4.4 | Snapshot create/restore, size or index trigger, WAL prefix truncation | Claude Code | Restart from snapshot + WAL equals full replay (property test) |
-| T4.5 | InstallSnapshot RPC, chunked, both follower branches | Claude Code | Lagging follower and fresh follower both catch up in sim; crash mid-install recovers |
-| T4.6 | Client library (leader hints, backoff, same-seq retry) and `raftkvctl` | Claude Code | Integration test: kill leader mid-workload, client completes |
-| T4.7 | **Admin service, metrics, event stream** (needed by the demo): `Status`, `Crash(restartDelay)`, `Pause(d)`, `SetPartition(blockedPeers)`, `SetNetem(dropPct, delayMs)`, `Events` (server stream: role changes, term, commit/applied index, snapshot events, elections). Faults are applied in a wrapper around `Transport`. | Claude Code | Admin RPCs callable only on `:9000`; fault wrapper unit-tested; events monotonic and complete |
-| T4.8 | Stretch: PreVote and CheckQuorum | Claude Code | Rejoining partitioned node does not disrupt a healthy leader (sim test) |
+| T4.1 | KV state machine: protobuf command encoding; `Put/Get/Delete/CAS`; deterministic apply | Claude (executor) | Same log yields byte-identical state on all nodes (test) |
+| T4.2 | Client sessions and dedupe `(clientID, seq)` | Claude (executor) | Retried CAS applies once; session table has bounded size with expiry policy documented |
+| T4.3 | Read path: log reads first, then ReadIndex behind `read_mode` | Claude (executor) | Deposed-leader read test; ReadIndex only becomes default after passing the verifier (T5.x) |
+| T4.4 | Snapshot create/restore, size or index trigger, WAL prefix truncation | Claude (executor) | Restart from snapshot + WAL equals full replay (property test) |
+| T4.5 | InstallSnapshot RPC, chunked, both follower branches | Claude (executor) | Lagging follower and fresh follower both catch up in sim; crash mid-install recovers |
+| T4.6 | Client library (leader hints, backoff, same-seq retry) and `raftkvctl` | Claude (executor) | Integration test: kill leader mid-workload, client completes |
+| T4.7 | **Admin service, metrics, event stream** (needed by the demo): `Status`, `Crash(restartDelay)`, `Pause(d)`, `SetPartition(blockedPeers)`, `SetNetem(dropPct, delayMs)`, `Events` (server stream: role changes, term, commit/applied index, snapshot events, elections). Faults are applied in a wrapper around `Transport`. | Claude (executor) | Admin RPCs callable only on `:9000`; fault wrapper unit-tested; events monotonic and complete |
+| T4.8 | Stretch: PreVote and CheckQuorum | Claude (executor) | Rejoining partitioned node does not disrupt a healthy leader (sim test) |
 
 ### Phase 5: chaos and linearizability
 | ID | Task | Agent | Acceptance |
 |---|---|---|---|
-| T5.1 | Simulator completeness (virtual clock, net faults, disk faults) if not already present | Claude Code | Same seed gives identical event trace (test) |
-| T5.2 | History recorder with `info` semantics | Claude Code | Format per §8.2; round-trip test |
-| T5.3 | Linearizability checker (from scratch) with key partitioning and shrinker | Claude Code | Passes hand-written good/bad corpus (30+ histories) |
-| T5.4 | Porcupine cross-check (test-only) | Claude Code | Both checkers agree on corpus plus 1000 random histories |
-| T5.5 | Nemesis library | Claude Code | Each fault has a test proving it takes effect |
-| T5.6 | Workload generator and `chaosrun` CLI | Claude Code | `chaosrun -sim -seeds 1-200` passes |
-| T5.7 | Mutation suite (§8.6) | Claude Code | All 9 bugs detected; CI enforces |
-| T5.8 | Report generator (Markdown + HTML: ops, faults, availability timeline, verdict, counterexample) | Codex | Report renders for pass and fail runs |
-| T5.9 | Nightly CI with failing-seed artifacts | Codex | Nightly green for 7 consecutive days before launch |
+| T5.1 | Simulator completeness (virtual clock, net faults, disk faults) if not already present | Claude (executor) | Same seed gives identical event trace (test) |
+| T5.2 | History recorder with `info` semantics | Claude (executor) | Format per §8.2; round-trip test |
+| T5.3 | Linearizability checker (from scratch) with key partitioning and shrinker | Claude (executor) | Passes hand-written good/bad corpus (30+ histories) |
+| T5.4 | Porcupine cross-check (test-only) | Claude (executor) | Both checkers agree on corpus plus 1000 random histories |
+| T5.5 | Nemesis library | Claude (executor) | Each fault has a test proving it takes effect |
+| T5.6 | Workload generator and `chaosrun` CLI | Claude (executor) | `chaosrun -sim -seeds 1-200` passes |
+| T5.7 | Mutation suite (§8.6) | Claude (executor) | All 9 bugs detected; CI enforces |
+| T5.8 | Report generator (Markdown + HTML: ops, faults, availability timeline, verdict, counterexample) | Claude (executor) | Report renders for pass and fail runs |
+| T5.9 | Nightly CI with failing-seed artifacts | Claude (executor) | Nightly green for 7 consecutive days before launch |
 
 ### Phase 6: polish
 | ID | Task | Agent | Acceptance |
 |---|---|---|---|
 | T6.1 | `ARCHITECTURE.md` with diagrams (Mermaid): node internals, RPC flows, snapshot flow | Either | Human approves |
 | T6.2 | `CHAOS_RESULTS.md` real numbers: seeds run, ops checked, mutation table | Either | Numbers reproducible via one documented command |
-| T6.3 | README: what it is, how to run locally in 3 commands, demo link, results, honest limitations, "built with Claude Code and Codex under my design and review" | Human | |
+| T6.3 | README: what it is, how to run locally in 3 commands, demo link, results, honest limitations, "built with Claude agents and reviewed with ChatGPT, under my design and review" | Human | |
 | T6.4 | Demo script and video | **[HUMAN]** | 2-3 min, §10.10 |
 
 ### Interview-readiness gate (human, after each phase)
@@ -421,15 +458,15 @@ Set `credit_specification { cpu_credits = "standard" }` on every t4g instance. T
 | ID | Task | Who |
 |---|---|---|
 | **D0** | Account hygiene: root MFA, SSO/IAM Identity Center profile for daily use, no long-lived keys, set region `us-east-1`, check **credit balance and expiry date** under Billing, create AWS Budgets (see D1) | **[HUMAN]** |
-| **D1** | `infra/bootstrap`: S3 state bucket (versioning, encryption, public access blocked), backend with native locking (`use_lockfile`, Terraform >= 1.10). Budgets: monthly cost budget with credits **excluded** (so you see gross burn) alerting at $20/$30/$40 actual and 100% forecast to your email; Cost Anomaly Detection. | Codex writes, **[HUMAN]** applies |
-| **D2** | Network module: VPC `10.20.0.0/16`; public subnet `10.20.0.0/24` (AZ-a, IGW route) for the gateway; three private subnets `10.20.1.0/24`, `10.20.2.0/24`, `10.20.3.0/24` in three distinct AZs (use `data.aws_availability_zones`), **no NAT, no IGW route**; S3 gateway endpoint on private route tables; EC2 Instance Connect Endpoint in one private subnet. | Codex, **[HUMAN]** reviews SGs |
-| **D3** | `make release`: cross-compile `GOOS=linux GOARCH=arm64 CGO_ENABLED=0`, embed version via `-ldflags`, upload `raftkvd` and `gateway` to a versioned S3 artifacts bucket with sha256 files. | Codex |
-| **D4** | Node compute: one instance per AZ with **fixed private IPs** (`.10` in each subnet), AL2023 arm64, instance profile limited to `s3:GetObject` on the artifacts prefix, encrypted gp3, IMDSv2 required, user-data that fetches binary, verifies sha256, installs config and systemd unit, starts service. | Codex, **[HUMAN]** applies |
-| **D5** | Gateway: Go service in `cmd/gateway`, spec in §10.5; instance profile can read its own SSM parameter and the artifacts prefix only. | Codex |
-| **D6** | DNS and TLS: Elastic IP to `api.raftkv.tushar25.com` (A record at your DNS provider **[HUMAN]**); TLS via `golang.org/x/crypto/acme/autocert` in the gateway (80 for redirect, 443 for TLS-ALPN). | Codex + **[HUMAN]** |
-| **D7** | Dashboard in `web/` (§10.6), deployed to Vercel at `raftkv.tushar25.com` **[HUMAN]** links the project. | Codex |
+| **D1** | `infra/bootstrap`: S3 state bucket (versioning, encryption, public access blocked), backend with native locking (`use_lockfile`, Terraform >= 1.10). Budgets: monthly cost budget with credits **excluded** (so you see gross burn) alerting at $20/$30/$40 actual and 100% forecast to your email; Cost Anomaly Detection. | Claude (executor) writes, **[HUMAN]** applies |
+| **D2** | Network module: VPC `10.20.0.0/16`; public subnet `10.20.0.0/24` (AZ-a, IGW route) for the gateway; three private subnets `10.20.1.0/24`, `10.20.2.0/24`, `10.20.3.0/24` in three distinct AZs (use `data.aws_availability_zones`), **no NAT, no IGW route**; S3 gateway endpoint on private route tables; EC2 Instance Connect Endpoint in one private subnet. | Claude (executor), **[HUMAN]** reviews SGs |
+| **D3** | `make release`: cross-compile `GOOS=linux GOARCH=arm64 CGO_ENABLED=0`, embed version via `-ldflags`, upload `raftkvd` and `gateway` to a versioned S3 artifacts bucket with sha256 files. | Claude (executor) |
+| **D4** | Node compute: one instance per AZ with **fixed private IPs** (`.10` in each subnet), AL2023 arm64, instance profile limited to `s3:GetObject` on the artifacts prefix, encrypted gp3, IMDSv2 required, user-data that fetches binary, verifies sha256, installs config and systemd unit, starts service. | Claude (executor), **[HUMAN]** applies |
+| **D5** | Gateway: Go service in `cmd/gateway`, spec in §10.5; instance profile can read its own SSM parameter and the artifacts prefix only. | Claude (executor) |
+| **D6** | DNS and TLS: Elastic IP to `api.raftkv.tushar25.com` (A record at your DNS provider **[HUMAN]**); TLS via `golang.org/x/crypto/acme/autocert` in the gateway (80 for redirect, 443 for TLS-ALPN). | Claude (executor) + **[HUMAN]** |
+| **D7** | Dashboard in `web/` (§10.6), deployed to Vercel at `raftkv.tushar25.com` **[HUMAN]** links the project. | Claude (executor) |
 | **D8** | Verification run on the live cluster, record video, capture the report into the README. | **[HUMAN]** + agents |
-| **D9** | Ops: `scripts/rolling-update.sh`, `demo-down.sh` (terraform destroy), `demo-pause.sh` (stop instances), incident notes in `docs/OPS.md`. | Codex |
+| **D9** | Ops: `scripts/rolling-update.sh`, `demo-down.sh` (terraform destroy), `demo-pause.sh` (stop instances), incident notes in `docs/OPS.md`. | Claude (executor) |
 
 ### 10.4 Security groups and IAM (human must read these before apply)
 - `sg_nodes` ingress: 7000/tcp from `sg_nodes` and `sg_gateway`; 7001 and 9000 only from `sg_gateway`; 22 only from `sg_eice`; 2112 only from `sg_gateway`. Egress: VPC CIDR and S3 prefix list.
@@ -533,7 +570,7 @@ Slip rule: if behind, cut T4.8 and ReadIndex first. Never cut the mutation suite
 
 ---
 
-## Appendix A: `CLAUDE.md` / `AGENTS.md` (repo root)
+## Appendix A: `CLAUDE.md` (repo root, read by all Claude roles)
 
 ```markdown
 # RaftKV: agent instructions
@@ -544,8 +581,9 @@ Read docs/RUNBOOK.md. Hard rules (RUNBOOK §2):
 - Raft logic must use injected Clock/Rand/Transport (no time.Now/rand/net).
 - Persist (fsync) before replying to any state-changing RPC.
 - No terraform apply/destroy, no secrets in git, no IAM user/key creation.
-- Stay inside your ownership area (RUNBOOK §3). Ask when unsure.
+- Stay inside your task card and role permissions (RUNBOOK §3). Ask when unsure.
 - Finish every task with the report format in RUNBOOK §5.6.
+- Know your role (RUNBOOK §3): planner writes cards only; executor implements; runner runs gates and never edits.
 Commit format: `type(scope): summary` plus trailers `Task:`, `Agent:`, `Gates:`.
 ```
 
@@ -554,20 +592,19 @@ Commit format: `type(scope): summary` plus trailers `Task:`, `Agent:`, `Gates:`.
 **Task 0**
 > Read CLAUDE.md and docs/RUNBOOK.md. Do Task 0 (§1.1): read-only. Produce docs/STATUS.md and list phase-map corrections in the PR description. No code changes. Branch `docs/status-audit`.
 
-**T3.x (Claude Code)**
+**T3.x (Claude executor)**
 > Read CLAUDE.md, docs/RUNBOOK.md §7.2, §7.3, and docs/STATUS.md. Work only on task T3.<n>. Write tests first using the fault-injecting filesystem in internal/sim, show them failing, then implement. Cite paper sections in comments. Separate commits for tests and core code. Run `make fmt vet lint test` and `go test -race -count=20` on touched packages. Finish with the §5.6 report.
 
-**T4.x / T5.x (Claude Code)**
+**T4.x / T5.x (Claude executor)**
 > Read CLAUDE.md and docs/RUNBOOK.md (§7, §8, and the row for T<id> in §9). Implement only T<id> on branch `feat/<slug>`. Acceptance criteria are in the table; list how each is demonstrated. Do not modify existing tests except to add new ones. Finish with the §5.6 report.
 
-**D2-D5 (Codex)**
-> Read AGENTS.md and docs/RUNBOOK.md §10. Implement task D<n> in infra/ only. Run `terraform fmt`, `init -backend=false`, `validate`, and `tflint`. You may run `terraform plan` but **never apply or destroy**. Output the SG and IAM resources in a table in the PR description for human review. No wildcard IAM actions or resources.
+**D2-D5 (Claude executor)**
+> Read CLAUDE.md and docs/RUNBOOK.md §10. Implement task D<n> in infra/ only. Run `terraform fmt`, `init -backend=false`, `validate`, and `tflint`. You may run `terraform plan` but **never apply or destroy**. Output the SG and IAM resources in a table in the PR description for human review. No wildcard IAM actions or resources.
 
-**Gateway and dashboard (Codex)**
-> Read AGENTS.md and docs/RUNBOOK.md §10.6 and §10.7. Implement D5 (or D7). Every abuse control in §10.6 needs a test. Mock the cluster behind an interface so the gateway is testable without AWS. Finish with the §5.6 report.
+**Gateway and dashboard (Claude executor)**
+> Read CLAUDE.md and docs/RUNBOOK.md §10.6 and §10.7. Implement D5 (or D7). Every abuse control in §10.6 needs a test. Mock the cluster behind an interface so the gateway is testable without AWS. Finish with the §5.6 report.
 
-**Cross-review (the other agent)**
-> Use the prompt in RUNBOOK §5.5 against `git diff main...HEAD`. Do not edit files.
+**Planner, runner, reviewer:** see Appendix F.
 
 ## Appendix C: PR template (`.github/pull_request_template.md`)
 ```markdown
@@ -634,3 +671,65 @@ resource "aws_instance" "node" {
 - [ ] GitHub: branch protection, CODEOWNERS (`/internal/raft/ /internal/wal/ /internal/verify/ @MenaceHecker`), enable secret scanning
 - [ ] Merge PRs yourself after reading raft-core and verifier diffs
 - [ ] Record the video, publish the write-up, add to resume only what you can fully explain
+
+---
+
+## Appendix F: Role prompts, templates, and reviewer rules
+
+### F-1. Planner (Claude, read-only session)
+> You are the PLANNER for RaftKV. Read CLAUDE.md, docs/RUNBOOK.md, docs/STATUS.md, docs/INVARIANTS.md, and the code relevant to task <ID>. You may write exactly one file: `docs/tasks/<ID>.md`, using the task card template. Do not edit code, tests, or infra. Be specific: name files, functions, invariants (§7 refs), the failing tests to write first, edge cases and crash points, and what is out of scope. If the runbook and the code disagree, list the conflict under OPEN QUESTIONS instead of choosing. Keep the card under 150 lines.
+
+**Task card template (`docs/tasks/<ID>.md`)**
+```markdown
+# <ID>: <title>
+## Goal (2-3 sentences)
+## Invariants touched (RUNBOOK §7 refs)
+## Files to create or change (paths, with what changes)
+## Tests to write FIRST (names, what each asserts, seeds or crash points)
+## Implementation notes (paper sections, pitfalls from §7.2)
+## Acceptance criteria (copied from RUNBOOK §9/§10 plus any added)
+## Out of scope
+## Commit plan (ordered; tests and core in separate commits)
+## OPEN QUESTIONS for the human
+```
+
+### F-2. Runner (Claude Code, edit tools disabled, fresh checkout of the pushed branch)
+> You are the RUNNER for RaftKV. You never edit files and never fix failures. Check out branch `<branch>` at its pushed head (`git fetch && git worktree add --detach ../raftkv-run origin/<branch>`). Run, in order, from a clean state: `make fmt vet lint`, `make test`, `make test-flaky`, `scripts/guard-tests.sh origin/main`, `make chaos-smoke`, and, if infra changed, `terraform fmt -check`, `init -backend=false`, `validate`, `tflint`, and `plan` (plan only, never apply). Write `RUN_REPORT.md` with the exact commands, exit codes, and the raw failing output (not paraphrased) for anything that failed. If a flaky test fails once, report the seed and the command to reproduce. Do not interpret failures beyond one line. Do not retry to get green; report each failure.
+
+**`RUN_REPORT.md` format**
+```
+BRANCH @ COMMIT:
+ENV: go version, OS, date
+| Command | Exit | Duration | Notes |
+FAILURES (raw output, trimmed to the failing test and 40 lines of context):
+FLAKE CHECK: count=20 results per package
+GUARD-TESTS: output
+TERRAFORM PLAN SUMMARY (if applicable): adds/changes/destroys, plus every IAM and SG resource listed verbatim
+NOT RUN / SKIPPED (and why):
+```
+
+### F-3. Reviewer (ChatGPT; also paste into `AGENTS.md` if you use Codex CLI as reviewer in read-only mode)
+> You are an adversarial distributed-systems REVIEWER for RaftKV, an implementation of Raft in Go. You are independent of the authors; do not assume good intent or correctness. You will receive a review packet: task card, diff, invariants, run report, guard output, and full core files. Review only; never rewrite code.
+>
+> Check, in this order:
+> 1. **Safety invariants** (§7.1) and the checklist in §7.2-7.5. For each suspected violation give a concrete interleaving across nodes (events in order) that breaks an invariant. No interleaving, no BLOCKER.
+> 2. **Persistence:** is anything acknowledged, voted on, or counted toward commit before it is fsynced (including directory fsync after create/rename)?
+> 3. **Classic Raft bugs:** truncating on a stale AppendEntries, committing previous-term entries by counting, resetting the election timer on a rejected or stale RPC, granting votes without the up-to-date check, applying beyond commitIndex, reading from a deposed leader, stale RPC responses from an old term, missing no-op on election, snapshot/log-compaction off-by-ones around `lastIncludedIndex`.
+> 4. **Concurrency:** data races, lock ordering, goroutine leaks, blocking while holding the main lock.
+> 5. **Determinism:** direct use of `time`, `rand`, or the network inside `internal/raft` (must be injected).
+> 6. **Tests:** vacuous tests (assert nothing meaningful), weakened or deleted assertions, missing negative cases, tests that cannot fail, nondeterminism, tests that pass because of the mock. Also check that the failing test was written before the fix, if the commit history shows it.
+> 7. **Security (infra and gateway only):** wildcard IAM, open security groups, missing rate limits, token comparison, unbounded inputs.
+>
+> Output exactly this schema: `VERDICT`, `FINDINGS` (`[BLOCKER|MAJOR|MINOR|NIT] file:line | invariant | evidence | failing scenario or test to add`), `TEST REVIEW`, `NOT VERIFIED`. List everything you could not verify because you cannot execute code. Do not praise. Do not approve if any BLOCKER or MAJOR is open.
+
+### F-4. Re-review loop
+After fixes, give the reviewer only: the previous findings, the new diff since the last review (`git diff <reviewed-sha>...HEAD`), and a new `RUN_REPORT.md`. Ask: *"For each prior finding, state resolved, unresolved, or wrong-finding (with justification). Then review the new delta using the same schema."*
+
+### F-5. Where each role gets which model (summary)
+| Step | Model | Session |
+|---|---|---|
+| Plan | Claude | read-only, fresh |
+| Execute | Claude Code | own worktree, fresh per task |
+| Run gates | Claude Code | edit tools off, clean checkout |
+| Review | ChatGPT | fresh, packet only |
+| Merge, apply, secrets | Human | |
