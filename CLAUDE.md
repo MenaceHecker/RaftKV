@@ -37,7 +37,7 @@ If no role is given, ask which one.
 cmd/{raftkv-server,raftkv-bench}  chaos/  internal/{raft,storage,statemachine,node,transport,metrics,determinism}
 deploy/ (kubernetes, compose, grafana, prometheus)  docs/  Dockerfile  docker-compose.yml  buf.yaml  buf.gen.yaml
 Protobuf source and generated code: internal/transport/raftkv/v1. The server takes one `--listen` gRPC address plus `--metrics-listen`.
-There is no Makefile, scripts/, .golangci.yml or .githooks/ yet (task T-1 creates them). Until then `make ...` commands
+There is no Makefile, scripts/, .golangci.yml or .githooks/ yet (task T0.1 creates them). Until then `make ...` commands
 above fail; run the underlying `go build|vet|test` and `gofmt -l .` directly.
 
 ## Project-specific gotchas (update as you learn)
