@@ -49,7 +49,8 @@ dir=$(mktemp -d)
   printf 'package x\n\nfunc TestF(t *testing.T) {\n}\n' > a_test.go
   git add . && git commit -q -m change
 )
-if (cd "$dir" && "$guard" main 2>&1) | grep -q WARN; then echo "ok   WARN printed"; else echo "FAIL WARN not printed"; fails=$((fails+1)); fi
+warn_out=$(cd "$dir" && "$guard" main 2>&1 || true)
+if echo "$warn_out" | grep -q WARN; then echo "ok   WARN printed"; else echo "FAIL WARN not printed"; fails=$((fails+1)); fi
 rm -rf "$dir"
 
 [ "$fails" -eq 0 ] || { echo "$fails failure(s)"; exit 1; }
