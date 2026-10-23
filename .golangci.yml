@@ -1,0 +1,25 @@
+# Linters from RUNBOOK 6.2. Every //nolint needs a reason comment.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gocritic
+    - gosec
+    - bodyclose
+    - misspell
+    - revive
+    - copyloopvar
+  exclusions:
+    # Generated code (*.pb.go) is skipped.
+    generated: strict
+
+issues:
+  # Existing code predates this config and is not fixed here (T0.1): only code
+  # changed since main is gated. Remove once the baseline is clean.
+  new-from-rev: origin/main
