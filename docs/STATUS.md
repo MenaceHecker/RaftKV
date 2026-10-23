@@ -1,7 +1,7 @@
 # RaftKV: current status (Task 0 audit)
 
-Audited at commit `ddff529` by reading code only. **No build, test, or lint was run**, so every pass/fail
-claim in the README is unverified here. Line references are to that commit.
+Audited at commit `ddff529` by reading code only; line references are to that commit. The audit itself ran no
+build, test, or lint. The baseline was then run and verified (section 2a).
 
 Summary: the repo is far ahead of the RUNBOOK's assumptions. The README claims all six phases are complete.
 What is missing is the RUNBOOK's tooling (Makefile, lint, scripts, INVARIANTS.md) and its AWS/demo track,
@@ -17,13 +17,37 @@ not the Raft core.
 | P5 | Chaos testing, linearizability checking, observability | Partial against RUNBOOK P5: `chaos/` and `internal/metrics` exist; see section 6 | P5 |
 | P6 | Deploy, writeup, benchmarks | Done as Docker, compose, k8s and `docs/benchmarks.md`; AWS, gateway and web demo absent | P6, D0-D9 |
 
-## 2. Build and run (from README and `ci.yml`; not executed)
+## 2. Build and run (from README and `ci.yml`)
 - `go.mod` says Go 1.25.0 (local toolchain 1.25.6). Direct deps: grpc, protobuf, prometheus client, yaml.v3.
 - `go build ./...`, `go vet ./...`, `go test ./...`, `go test -race ./...`, `GOMAXPROCS=1 go test -count=1 ./...`. CI also checks `gofmt -l` (excluding `.pb.go`).
 - Fuzz, 60s each in CI: `FuzzDecodeCommand`, `FuzzRestore` (statemachine); `FuzzReadRecord`, `FuzzDecodeEntry`, `FuzzDecodeHardState`, `FuzzDecodeSnapshotMeta` (storage); `FuzzDecodeConfChange` (raft); `FuzzMessageFromWire` (transport).
 - Node: `go build -o bin/raftkv-server ./cmd/raftkv-server`. Flags: `--id --peers --listen --data-dir --tick --election-ticks --heartbeat-ticks --fsync --snapshot-threshold --log-level --metrics-listen` (`cmd/raftkv-server/main.go:53-72`). One gRPC `--listen` address plus a separate metrics HTTP address.
 - Load generator: `cmd/raftkv-bench`. Containers: `docker compose up --build`. Kubernetes: `deploy/kubernetes/raftkv.yaml`. Protobuf: `buf generate` (generated code is committed).
 - **There is no Makefile, `scripts/`, `.golangci.yml` or `.githooks/`.** Every `make ...` command in `CLAUDE.md`, RUNBOOK §6.1 and `.claude/runner-settings.json` fails today.
+
+## 2a. Verified baseline (run 2026-10-23, Go 1.25.6 darwin/arm64)
+Last commit touching `*.go`, `go.mod` or `go.sum`: `a2a948b` (2026-09-24). Only documentation and agent-config files
+(`README.md`, `CLAUDE.md`, `AGENTS.md`, `docs/`, `.claude/`) changed after it, so these results hold for current `main`.
+Run at `e7e07eb`, whose Go code is identical to `a2a948b`. Commands, run from the repo root:
+
+| Command | Result |
+|---|---|
+| `go version` | go1.25.6 darwin/arm64 |
+| `go build ./...` | exit 0, no output |
+| `go vet ./...` | exit 0, no output |
+| `gofmt -l .` (excluding `*.pb.go`) | no files listed |
+| `go test -race -count=1 ./...` | exit 0, 10 packages ok, none failed |
+| `GOMAXPROCS=1 go test -count=1 ./...` | exit 0, 10 packages ok, none failed |
+
+Per-package duration, `-race` / `GOMAXPROCS=1`: chaos 11.5s / 1.9s; cmd/raftkv-bench 1.3s / 0.3s; cmd/raftkv-server 16.0s / 14.3s;
+internal/determinism 1.5s / 0.2s; internal/metrics 2.2s / 0.7s; internal/node 7.7s / 4.9s; internal/raft 2.1s / 0.2s;
+internal/statemachine 5.7s / 0.7s; internal/storage 6.8s / 2.6s; internal/transport 18.9s / 8.9s.
+`internal/transport/raftkv/v1` has no test files (generated code).
+
+- Warning, `-race` run only: macOS linker `ld: warning: ... malformed LC_DYSYMTAB, expected 98 undefined symbols ... found 95` for
+  `internal/metrics.test` and `cmd/raftkv-server.test`. Tests still passed; classified as environment, not investigated.
+- Skips: none in the verbose non-race run (548 `--- PASS` lines, tests plus subtests, 0 FAIL, 0 SKIP). Skips were not checked in the `-race` run.
+- Not run: `-count=20`, fuzz, lint, chaos-smoke, guard-tests (the make targets and scripts do not exist yet; see below).
 
 ## 3. Test counts (static grep of 60 `_test.go` files)
 538 `func Test*`, 8 `func Fuzz*`, 2 `func Example*`, 0 benchmarks. This matches README:11, which `internal/determinism/readme_test.go` enforces.
@@ -41,7 +65,7 @@ not the Raft core.
 | internal/determinism | 13 | 0 | 0 |
 | cmd/raftkv-bench | 10 | 0 | 0 |
 
-About 8,816 non-test lines (excluding `.pb.go`) and 16,955 test lines. Pass/fail: **UNKNOWN**.
+About 8,816 non-test lines (excluding `.pb.go`) and 16,955 test lines. Pass/fail: all passing, see section 2a.
 Chaos: 23 named scenarios (`chaos/scenarios_test.go:87-1135`), run in memory and again on disk (`TestChaosOnDisk`, :1202).
 
 ## 4. RUNBOOK §7.2 checklist
