@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Enable with: git config core.hooksPath .githooks   (RUNBOOK 5.4)
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+unformatted=$(gofmt -l . | grep -v '\.pb\.go$' || true)
+if [ -n "$unformatted" ]; then
+  echo "pre-commit: these files are not gofmt'd:"; echo "$unformatted"; exit 1
+fi
+
+go vet ./...
+go test -race -short ./...
+
+# gitguardian runs on PRs; gitleaks is an optional local extra.
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged
+else
+  echo "pre-commit: gitleaks not installed, skipping secret scan"
+fi
+
+if [ -x scripts/guard-tests.sh ]; then
+  # Skipped when there is no origin/main to compare against (fresh clone, offline).
+  if git rev-parse --verify -q origin/main >/dev/null; then
+    scripts/guard-tests.sh origin/main
+  else
+    echo "pre-commit: origin/main not found, skipping guard-tests"
+  fi
+fi

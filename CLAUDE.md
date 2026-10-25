@@ -33,10 +33,12 @@ If no role is given, ask which one.
 - One task, one branch, one PR. Small commits (about 300 lines or less).
 - Finish with the report format in RUNBOOK §5.6 (executor) or the RUN_REPORT format in Appendix F-2 (runner). State failures and skipped work first.
 
-## Layout
-cmd/{raftkvd,raftkvctl,gateway,chaosrun}  internal/{raft,wal,snapshot,kv,transport,sim,chaos,verify,admin}
-api/ (protobuf)  infra/ (Terraform)  web/ (dashboard)  scripts/  docs/
-Ports: raft 7000, client 7001, admin 9000, metrics 2112.
+## Layout (real tree; see docs/STATUS.md)
+cmd/{raftkv-server,raftkv-bench}  chaos/  internal/{raft,storage,statemachine,node,transport,metrics,determinism}
+deploy/ (kubernetes, compose, grafana, prometheus)  docs/  Dockerfile  docker-compose.yml  buf.yaml  buf.gen.yaml
+Protobuf source and generated code: internal/transport/raftkv/v1. The server takes one `--listen` gRPC address plus `--metrics-listen`.
+There is no Makefile, scripts/, .golangci.yml or .githooks/ yet (task T0.1 creates them). Until then `make ...` commands
+above fail; run the underlying `go build|vet|test` and `gofmt -l .` directly.
 
 ## Project-specific gotchas (update as you learn)
 - TODO after Task 0: the real phase status, any deviations from the layout above.

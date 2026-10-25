@@ -2,7 +2,7 @@
   "permissions": {
     "deny": ["Edit", "Write", "Bash(git add*)", "Bash(git commit*)", "Bash(git push*)",
              "Bash(terraform apply*)", "Bash(terraform destroy*)", "Bash(rm *)", "Bash(sed -i*)"],
-    "allow": ["Read", "Bash(make *)", "Bash(go test*)", "Bash(go vet*)",
+    "allow": ["Read", "Bash(make *)", "Bash(go build*)", "Bash(go test*)", "Bash(go vet*)", "Bash(gofmt -l*)",
               "Bash(scripts/guard-tests.sh*)", "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)",
               "Bash(terraform fmt*)", "Bash(terraform validate*)", "Bash(tflint*)"]
   }
