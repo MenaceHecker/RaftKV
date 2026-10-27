@@ -26,6 +26,10 @@ type FS interface {
 	SyncDir(dir string) error
 
 	Stat(name string) (os.FileInfo, error)
+
+	// Lock takes an exclusive lock on dir, creating it if needed, and fails
+	// with an "already in use" error while another holder has it.
+	Lock(dir string) (*dirLock, error)
 }
 
 // File is an open file as the storage layer uses it: write, fsync, close.
