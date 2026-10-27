@@ -19,6 +19,11 @@ func TestStorageCallArgumentsAreUnchanged(t *testing.T) {
 		return OpenDiskStorage(DiskConfig{Dir: dir, Sync: SyncAlways, SegmentSize: 64, FS: fsys})
 	})
 
+	// Literals, not dirMode and fileMode: the point is to catch those changing.
+	const (
+		wantDirPerm  = 0o755
+		wantFilePerm = 0o644
+	)
 	const (
 		openActive = os.O_WRONLY | os.O_APPEND
 		rollNew    = os.O_CREATE | os.O_EXCL | os.O_WRONLY | os.O_APPEND
@@ -30,12 +35,12 @@ func TestStorageCallArgumentsAreUnchanged(t *testing.T) {
 		d = strings.ReplaceAll(d, dir, "$DIR")
 		switch {
 		case strings.HasPrefix(d, "MkdirAll "):
-			if !strings.HasSuffix(d, fmt.Sprintf(" perm=%#o", dirMode)) {
+			if !strings.HasSuffix(d, fmt.Sprintf(" perm=%#o", wantDirPerm)) {
 				t.Errorf("MkdirAll with the wrong permission: %s", d)
 			}
 		case strings.HasPrefix(d, "OpenFile "):
 			name := strings.Fields(d)[1]
-			args := fmt.Sprintf("flag=%#x perm=%#o", saveTemp, fileMode)
+			args := fmt.Sprintf("flag=%#x perm=%#o", saveTemp, wantFilePerm)
 			if strings.HasSuffix(name, snapshotSuffix+tempSuffix) {
 				if !strings.HasSuffix(d, args) {
 					t.Errorf("snapshot temp opened with the wrong flags or permission: %s", d)
@@ -64,8 +69,8 @@ func TestStorageCallArgumentsAreUnchanged(t *testing.T) {
 		if i == len(segmentOpens)-1 {
 			want = openActive
 		}
-		if !strings.HasSuffix(d, fmt.Sprintf("flag=%#x perm=%#o", want, fileMode)) {
-			t.Errorf("segment open %d has the wrong flags or permission: %s (want flag=%#x perm=%#o)", i, d, want, fileMode)
+		if !strings.HasSuffix(d, fmt.Sprintf("flag=%#x perm=%#o", want, wantFilePerm)) {
+			t.Errorf("segment open %d has the wrong flags or permission: %s (want flag=%#x perm=%#o)", i, d, want, wantFilePerm)
 		}
 	}
 	for _, want := range []string{"snapshot", "rename"} {
@@ -111,13 +116,24 @@ func TestTornTailTruncatesToTheLastGoodRecord(t *testing.T) {
 		t.Fatal("a torn tail was not reported as repaired")
 	}
 
-	want := fmt.Sprintf("Truncate %s size=%d", seg, good)
+	// Exactly one truncation, to the end of the last good record, and the
+	// file really ends there.
+	var truncates []string
 	for _, d := range fsys.details() {
-		if d == want {
-			return
+		if strings.HasPrefix(d, "Truncate ") {
+			truncates = append(truncates, d)
 		}
 	}
-	t.Fatalf("no %q among %v", want, fsys.details())
+	if want := fmt.Sprintf("Truncate %s size=%d", seg, good); len(truncates) != 1 || truncates[0] != want {
+		t.Fatalf("truncate calls = %v, want exactly [%q]", truncates, want)
+	}
+	info, err = os.Stat(seg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != good {
+		t.Fatalf("segment is %d bytes after repair, want %d", info.Size(), good)
+	}
 }
 
 func onlySegment(t *testing.T, dir string) string {
