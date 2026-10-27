@@ -31,18 +31,23 @@ type Snapshot struct {
 }
 
 type Snapshotter struct {
+	fs  FS
 	dir string
 }
 
 func NewSnapshotter(dir string) (*Snapshotter, error) {
+	return newSnapshotterFS(osFS{}, dir)
+}
+
+func newSnapshotterFS(fsys FS, dir string) (*Snapshotter, error) {
 	if dir == "" {
 		return nil, errors.New("storage: snapshot directory must not be empty")
 	}
-	if err := os.MkdirAll(dir, dirMode); err != nil {
+	if err := fsys.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("storage: creating snapshot directory: %w", err)
 	}
 
-	s := &Snapshotter{dir: dir}
+	s := &Snapshotter{fs: fsys, dir: dir}
 	if err := s.sweepTemporaries(); err != nil {
 		return nil, err
 	}
@@ -50,20 +55,28 @@ func NewSnapshotter(dir string) (*Snapshotter, error) {
 }
 
 func (s *Snapshotter) sweepTemporaries() error {
-	matches, err := filepath.Glob(filepath.Join(s.dir, "*"+snapshotSuffix+tempSuffix))
+	entries, err := s.fs.ReadDir(s.dir)
 	if err != nil {
 		return fmt.Errorf("storage: scanning for partial snapshots: %w", err)
+	}
+
+	// No IsDir check: filepath.Glob matched a directory with this suffix too.
+	var matches []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), snapshotSuffix+tempSuffix) {
+			matches = append(matches, filepath.Join(s.dir, e.Name()))
+		}
 	}
 	if len(matches) == 0 {
 		return nil
 	}
 
 	for _, path := range matches {
-		if err := os.Remove(path); err != nil {
+		if err := s.fs.Remove(path); err != nil {
 			return fmt.Errorf("storage: removing partial snapshot %s: %w", filepath.Base(path), err)
 		}
 	}
-	return syncDir(s.dir)
+	return s.fs.SyncDir(s.dir)
 }
 
 func snapshotName(meta SnapshotMeta) string {
@@ -104,37 +117,37 @@ func (s *Snapshotter) Save(snap Snapshot) error {
 	final := filepath.Join(s.dir, snapshotName(snap.Meta))
 	temp := final + tempSuffix
 
-	f, err := os.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fileMode)
+	f, err := s.fs.OpenFile(temp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, fileMode)
 	if err != nil {
 		return fmt.Errorf("storage: creating snapshot %s: %w", filepath.Base(temp), err)
 	}
 
 	if _, err := f.Write(buf); err != nil {
-		f.Close()
-		os.Remove(temp)
+		_ = f.Close()
+		_ = s.fs.Remove(temp)
 		return fmt.Errorf("storage: writing snapshot: %w", err)
 	}
 
 	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(temp)
+		_ = f.Close()
+		_ = s.fs.Remove(temp)
 		return fmt.Errorf("storage: syncing snapshot: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(temp)
+		_ = s.fs.Remove(temp)
 		return fmt.Errorf("storage: closing snapshot: %w", err)
 	}
 
-	if err := os.Rename(temp, final); err != nil {
-		os.Remove(temp)
+	if err := s.fs.Rename(temp, final); err != nil {
+		_ = s.fs.Remove(temp)
 		return fmt.Errorf("storage: publishing snapshot: %w", err)
 	}
 
-	return syncDir(s.dir)
+	return s.fs.SyncDir(s.dir)
 }
 
 func (s *Snapshotter) List() ([]SnapshotMeta, error) {
-	entries, err := os.ReadDir(s.dir)
+	entries, err := s.fs.ReadDir(s.dir)
 	if err != nil {
 		return nil, fmt.Errorf("storage: reading snapshot directory: %w", err)
 	}
@@ -192,7 +205,7 @@ func (s *Snapshotter) LoadAt(meta SnapshotMeta) (Snapshot, error) {
 func (s *Snapshotter) load(meta SnapshotMeta) (Snapshot, error) {
 	name := snapshotName(meta)
 
-	data, err := os.ReadFile(filepath.Join(s.dir, name))
+	data, err := s.fs.ReadFile(filepath.Join(s.dir, name))
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("storage: reading snapshot %s: %w", name, err)
 	}
@@ -341,9 +354,9 @@ func (s *Snapshotter) Purge(keep int) error {
 
 	for _, meta := range metas[keep:] {
 		path := filepath.Join(s.dir, snapshotName(meta))
-		if err := os.Remove(path); err != nil {
+		if err := s.fs.Remove(path); err != nil {
 			return fmt.Errorf("storage: removing old snapshot %s: %w", snapshotName(meta), err)
 		}
 	}
-	return syncDir(s.dir)
+	return s.fs.SyncDir(s.dir)
 }
