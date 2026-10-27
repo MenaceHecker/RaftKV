@@ -190,6 +190,9 @@ func Start(cfg Config) (*Node, error) {
 	store, snap, err := storage.OpenDiskStorage(storage.DiskConfig{
 		Dir:  cfg.DataDir,
 		Sync: cfg.Sync,
+		OnRepair: func(info storage.RepairInfo) {
+			cfg.Metrics.WALRepaired(info.Bytes)
+		},
 	})
 	if err != nil {
 		return nil, err

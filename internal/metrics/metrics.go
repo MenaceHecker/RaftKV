@@ -30,6 +30,9 @@ type Metrics struct {
 	snapshotIndex     prometheus.Gauge
 	snapshotsReceived prometheus.Counter
 
+	walRepairs       prometheus.Counter
+	walRepairDropped prometheus.Counter
+
 	leaderChanges prometheus.Counter
 	term          prometheus.Gauge
 	isLeader      prometheus.Gauge
@@ -115,6 +118,18 @@ func New(reg prometheus.Registerer) *Metrics {
 			Help:      "State machine images installed from a leader, meaning this node had fallen behind that leader's compaction point.",
 		}),
 
+		walRepairs: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "wal_repairs_total",
+			Help:      "Times startup cut a bad record off the tail of the last WAL segment. Any increase means the node crashed mid-write or the disk damaged its newest record.",
+		}),
+
+		walRepairDropped: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "wal_repair_dropped_bytes_total",
+			Help:      "Bytes removed from the WAL tail by startup repairs.",
+		}),
+
 		leaderChanges: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "leader_changes_total",
@@ -146,6 +161,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		m.appliedEntries, m.applyDuration,
 		m.persistedEntries, m.persistDuration,
 		m.snapshotsCreated, m.snapshotDuration, m.snapshotIndex, m.snapshotsReceived,
+		m.walRepairs, m.walRepairDropped,
 		m.leaderChanges, m.term, m.isLeader, m.leaderID,
 	)
 
@@ -184,6 +200,12 @@ func (m *Metrics) SnapshotCreated(index uint64, d time.Duration) {
 }
 
 func (m *Metrics) SnapshotReceived() { m.snapshotsReceived.Inc() }
+
+// WALRepaired counts one startup repair of the WAL tail and the bytes it dropped.
+func (m *Metrics) WALRepaired(bytes int64) {
+	m.walRepairs.Inc()
+	m.walRepairDropped.Add(float64(bytes))
+}
 
 func (m *Metrics) LeaderChanged(term, leader uint64, isLeader bool) {
 	m.leaderChanges.Inc()
