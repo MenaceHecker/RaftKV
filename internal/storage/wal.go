@@ -51,6 +51,19 @@ type Options struct {
 
 	// FS is the filesystem the log lives on. Nil means the real OS.
 	FS FS
+
+	// OnRepair, if set, is called once for every tail repair Open performs.
+	OnRepair func(RepairInfo)
+}
+
+// RepairInfo describes one repair of a bad record at the tail of the last
+// segment: Segment is the file name, Offset the first dropped byte, Bytes how
+// many bytes were dropped and Cause the error that made the record unreadable.
+type RepairInfo struct {
+	Segment string
+	Offset  int64
+	Bytes   int64
+	Cause   error
 }
 
 type Replay struct {
