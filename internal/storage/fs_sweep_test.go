@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// The one deliberate behavior change in the FS seam: the partial-snapshot
-// sweep used filepath.Glob, which silently swallowed directory-read errors.
+// A deliberate behavior change in the FS seam: the partial-snapshot sweep used
+// filepath.Glob, which silently swallowed directory-read errors.
 func TestSweepSurfacesReadDirError(t *testing.T) {
 	dir := t.TempDir()
 	cause := errors.New("injected readdir failure")
@@ -53,6 +53,42 @@ func TestSweepTreatsDirectoryNamesLiterally(t *testing.T) {
 			}
 			if _, err := os.Stat(partial); !os.IsNotExist(err) {
 				t.Fatalf("partial snapshot in %q was not swept: stat err = %v", dir, err)
+			}
+		})
+	}
+}
+
+// With Glob, "snap*" in the configured directory's name would have matched
+// sibling directories and swept their partial snapshots. The sweep must touch
+// only the directory it was given.
+func TestSweepDoesNotReachSiblingDirectories(t *testing.T) {
+	for _, c := range []struct{ name, sibling string }{
+		{"snap*", "snap1"},
+		{"what?", "whatX"},
+		{"data[ab]", "dataa"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			parent := t.TempDir()
+			dir := filepath.Join(parent, c.name)
+			sibling := filepath.Join(parent, c.sibling)
+
+			var sentinel string
+			for _, d := range []string{dir, sibling} {
+				if err := os.MkdirAll(d, dirMode); err != nil {
+					t.Fatal(err)
+				}
+				p := filepath.Join(d, "x"+snapshotSuffix+tempSuffix)
+				if err := os.WriteFile(p, []byte("partial"), fileMode); err != nil {
+					t.Fatal(err)
+				}
+				sentinel = p
+			}
+
+			if _, err := NewSnapshotter(dir); err != nil {
+				t.Fatalf("NewSnapshotter(%q): %v", dir, err)
+			}
+			if _, err := os.Stat(sentinel); err != nil {
+				t.Fatalf("the sibling directory's file was swept: %v", err)
 			}
 		})
 	}
