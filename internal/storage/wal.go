@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -241,8 +242,16 @@ func (w *WAL) replay() (Replay, error) {
 		// after the bad record is a valid record, the damage is mid-log and
 		// truncating would silently drop data that was acknowledged
 		// (RUNBOOK 7.2 item 1, 7.3 #2): refuse and leave the file alone.
-		if validRecordFollows(data, good+1) {
+		found, exhausted := validRecordFollows(data, good+1)
+		if found {
 			return Replay{}, fmt.Errorf("%w: segment %s is damaged at offset %d with valid records after it: %w",
+				ErrCorruptWAL, seg.name, good, framing)
+		}
+		if exhausted {
+			// Could not show that nothing valid follows within the checksum
+			// budget. Refusing is the safe direction; truncating when unsure
+			// could drop acknowledged records.
+			return Replay{}, fmt.Errorf("%w: segment %s is damaged at offset %d and the tail is too large to prove it holds no valid record: %w",
 				ErrCorruptWAL, seg.name, good, framing)
 		}
 
@@ -294,19 +303,64 @@ func (w *WAL) repairTail(name string, good, size int64, cause error) error {
 	return nil
 }
 
+// maxScanChecksumBytes bounds the total bytes the tail scan may checksum. Each
+// candidate offset can claim a body of up to maxRecordSize that overlaps the
+// next candidate's, so without a bound the scan is quadratic: a tail of
+// 0x01 bytes makes every offset checksum about 16 MiB. A real torn or rotted
+// tail trips only a handful of candidates. When the bound is hit the scan
+// reports exhausted and the caller refuses to start, never truncates.
+const maxScanChecksumBytes = 64 << 20
+
+// Smallest legal body (type byte plus payload) per record type, and the
+// exact body size of the fixed-size types, from the decoders in record.go.
+const (
+	minEntryBody   = typeSize + 4*8 // term, index, type, data length
+	fixedStateBody = typeSize + 2*8 // HardState and SnapshotMeta
+)
+
 // validRecordFollows reports whether any offset at or after from holds a
-// record that frames correctly, has a known type and decodes.
-func validRecordFollows(data []byte, from int) bool {
+// record that frames correctly, has a known type and decodes. Candidates are
+// first filtered on their header (known type, length that fits the file and
+// is possible for the type) without touching the body, and each remaining
+// candidate's checksum is charged against maxScanChecksumBytes. If the budget
+// runs out before the scan finishes, exhausted is true and found is false.
+func validRecordFollows(data []byte, from int) (found, exhausted bool) {
+	budget := maxScanChecksumBytes
 	for p := from; p < len(data); p++ {
+		if len(data)-p < headerSize+typeSize {
+			break
+		}
+		bodyLen := int(binary.LittleEndian.Uint32(data[p : p+lenSize]))
+		if bodyLen < typeSize || bodyLen > maxRecordSize || bodyLen > len(data)-p-headerSize {
+			continue
+		}
+		switch recordType(data[p+headerSize]) {
+		case recordEntry:
+			if bodyLen < minEntryBody {
+				continue
+			}
+		case recordHardState, recordSnapshotMeta:
+			if bodyLen != fixedStateBody {
+				continue
+			}
+		default:
+			continue
+		}
+
+		if bodyLen > budget {
+			return false, true
+		}
+		budget -= bodyLen
+
 		typ, payload, _, err := readRecord(data[p:])
 		if err != nil {
 			continue
 		}
 		if validatePayload(typ, payload) == nil {
-			return true
+			return true, false
 		}
 	}
-	return false
+	return false, false
 }
 
 // validatePayload reports whether payload decodes as record type typ. It is
