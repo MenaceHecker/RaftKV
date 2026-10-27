@@ -48,6 +48,9 @@ type Options struct {
 	Sync SyncPolicy
 
 	SegmentSize int64
+
+	// FS is the filesystem the log lives on. Nil means the real OS.
+	FS FS
 }
 
 type Replay struct {
@@ -71,13 +74,14 @@ type segment struct {
 type WAL struct {
 	mu sync.Mutex
 
+	fs          FS
 	dir         string
 	policy      SyncPolicy
 	segmentSize int64
 
 	segments []segment
 
-	active     *os.File
+	active     File
 	activeSize int64
 
 	hardState raft.HardState
@@ -98,17 +102,23 @@ func Open(opts Options) (*WAL, Replay, error) {
 		return nil, Replay{}, fmt.Errorf("storage: segment size must be positive, got %d", opts.SegmentSize)
 	}
 
-	if err := os.MkdirAll(opts.Dir, dirMode); err != nil {
+	fsys := opts.FS
+	if fsys == nil {
+		fsys = osFS{}
+	}
+
+	if err := fsys.MkdirAll(opts.Dir, dirMode); err != nil {
 		return nil, Replay{}, fmt.Errorf("storage: creating WAL directory: %w", err)
 	}
 
 	w := &WAL{
+		fs:          fsys,
 		dir:         opts.Dir,
 		policy:      opts.Sync,
 		segmentSize: opts.SegmentSize,
 	}
 
-	segments, err := listSegments(opts.Dir)
+	segments, err := listSegments(fsys, opts.Dir)
 	if err != nil {
 		return nil, Replay{}, err
 	}
@@ -133,8 +143,8 @@ func Open(opts Options) (*WAL, Replay, error) {
 	return w, replay, nil
 }
 
-func listSegments(dir string) ([]segment, error) {
-	entries, err := os.ReadDir(dir)
+func listSegments(fsys FS, dir string) ([]segment, error) {
+	entries, err := fsys.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("storage: reading WAL directory: %w", err)
 	}
@@ -183,7 +193,7 @@ func (w *WAL) replay() (Replay, error) {
 	for i, seg := range w.segments {
 		isLast := i == len(w.segments)-1
 
-		data, err := os.ReadFile(filepath.Join(w.dir, seg.name))
+		data, err := w.fs.ReadFile(filepath.Join(w.dir, seg.name))
 		if err != nil {
 			return Replay{}, fmt.Errorf("storage: reading segment %s: %w", seg.name, err)
 		}
@@ -203,10 +213,10 @@ func (w *WAL) replay() (Replay, error) {
 		}
 
 		path := filepath.Join(w.dir, seg.name)
-		if err := os.Truncate(path, int64(good)); err != nil {
+		if err := w.fs.Truncate(path, int64(good)); err != nil {
 			return Replay{}, fmt.Errorf("storage: truncating torn segment %s: %w", seg.name, err)
 		}
-		if err := syncDir(w.dir); err != nil {
+		if err := w.fs.SyncDir(w.dir); err != nil {
 			return Replay{}, err
 		}
 		rep.Repaired = true
@@ -272,14 +282,14 @@ func (w *WAL) openActive() error {
 	seg := w.segments[len(w.segments)-1]
 	path := filepath.Join(w.dir, seg.name)
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, fileMode)
+	f, err := w.fs.OpenFile(path, os.O_WRONLY|os.O_APPEND, fileMode)
 	if err != nil {
 		return fmt.Errorf("storage: opening active segment %s: %w", seg.name, err)
 	}
 
 	info, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("storage: stat active segment %s: %w", seg.name, err)
 	}
 
@@ -292,19 +302,19 @@ func (w *WAL) roll(seq uint64, firstIndex raft.Index) error {
 	name := segmentName(seq, firstIndex)
 	path := filepath.Join(w.dir, name)
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, fileMode)
+	f, err := w.fs.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, fileMode)
 	if err != nil {
 		return fmt.Errorf("storage: creating segment %s: %w", name, err)
 	}
 
-	if err := syncDir(w.dir); err != nil {
-		f.Close()
+	if err := w.fs.SyncDir(w.dir); err != nil {
+		_ = f.Close()
 		return err
 	}
 
 	if w.active != nil {
 		if err := w.active.Close(); err != nil {
-			f.Close()
+			_ = f.Close()
 			return fmt.Errorf("storage: closing previous segment: %w", err)
 		}
 	}
@@ -312,19 +322,6 @@ func (w *WAL) roll(seq uint64, firstIndex raft.Index) error {
 	w.active = f
 	w.activeSize = 0
 	w.segments = append(w.segments, segment{seq: seq, firstIndex: firstIndex, name: name})
-	return nil
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("storage: opening directory for sync: %w", err)
-	}
-	defer d.Close()
-
-	if err := d.Sync(); err != nil {
-		return fmt.Errorf("storage: syncing directory: %w", err)
-	}
 	return nil
 }
 
@@ -456,11 +453,11 @@ func (w *WAL) TruncateBefore(index raft.Index) error {
 	}
 
 	for _, seg := range w.segments[:keepFrom] {
-		if err := os.Remove(filepath.Join(w.dir, seg.name)); err != nil {
+		if err := w.fs.Remove(filepath.Join(w.dir, seg.name)); err != nil {
 			return fmt.Errorf("storage: removing superseded segment %s: %w", seg.name, err)
 		}
 	}
-	if err := syncDir(w.dir); err != nil {
+	if err := w.fs.SyncDir(w.dir); err != nil {
 		return err
 	}
 
@@ -481,7 +478,7 @@ func (w *WAL) Close() error {
 		return nil
 	}
 	if err := w.active.Sync(); err != nil {
-		w.active.Close()
+		_ = w.active.Close()
 		return fmt.Errorf("storage: syncing WAL on close: %w", err)
 	}
 	if err := w.active.Close(); err != nil {
