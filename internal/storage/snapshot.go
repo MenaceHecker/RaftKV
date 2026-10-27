@@ -61,6 +61,8 @@ func (s *Snapshotter) sweepTemporaries() error {
 	}
 
 	// No IsDir check: filepath.Glob matched a directory with this suffix too.
+	// Unlike Glob, the directory name is not a pattern, so s.dir may contain
+	// "[", "*" or "?".
 	var matches []string
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), snapshotSuffix+tempSuffix) {
