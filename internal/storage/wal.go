@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -94,6 +95,8 @@ type WAL struct {
 
 	segments []segment
 
+	onRepair func(RepairInfo)
+
 	active     File
 	activeSize int64
 
@@ -129,6 +132,7 @@ func Open(opts Options) (*WAL, Replay, error) {
 		dir:         opts.Dir,
 		policy:      opts.Sync,
 		segmentSize: opts.SegmentSize,
+		onRepair:    opts.OnRepair,
 	}
 
 	segments, err := listSegments(fsys, opts.Dir)
@@ -220,22 +224,106 @@ func (w *WAL) replay() (Replay, error) {
 			return Replay{}, fmt.Errorf("%w: segment %s is damaged at offset %d: %w",
 				ErrCorruptWAL, seg.name, good, err)
 		}
-		if !errors.Is(err, ErrTornRecord) {
-			return Replay{}, fmt.Errorf("%w: segment %s is damaged at offset %d: %w",
+
+		// Only the last segment can hold a torn write, and only a framing
+		// failure (incomplete, bad checksum, oversize length) at the record
+		// boundary can be one. Key on what readRecord says about the bytes at
+		// good, not on errors.Is of the replay error: the payload decoders
+		// also wrap ErrCorruptRecord, and a record whose checksum is valid but
+		// whose type or payload is bad is corruption, not a tear (RUNBOOK 7.3).
+		_, _, _, framing := readRecord(data[good:])
+		if framing == nil {
+			return Replay{}, fmt.Errorf("%w: segment %s holds an undecodable record at offset %d: %w",
 				ErrCorruptWAL, seg.name, good, err)
 		}
 
-		path := filepath.Join(w.dir, seg.name)
-		if err := w.fs.Truncate(path, int64(good)); err != nil {
-			return Replay{}, fmt.Errorf("storage: truncating torn segment %s: %w", seg.name, err)
+		// A crash can leave garbage only at the end of the file. If anything
+		// after the bad record is a valid record, the damage is mid-log and
+		// truncating would silently drop data that was acknowledged
+		// (RUNBOOK 7.2 item 1, 7.3 #2): refuse and leave the file alone.
+		if validRecordFollows(data, good+1) {
+			return Replay{}, fmt.Errorf("%w: segment %s is damaged at offset %d with valid records after it: %w",
+				ErrCorruptWAL, seg.name, good, framing)
 		}
-		if err := w.fs.SyncDir(w.dir); err != nil {
+
+		// Residual risk: a record that was fsynced and later rotted on the
+		// media, with nothing valid after it, looks exactly like a tear and is
+		// dropped here. Requiring valid data to follow keeps that to the final
+		// record(s) of the log.
+		if err := w.repairTail(seg.name, int64(good), int64(len(data)), framing); err != nil {
 			return Replay{}, err
 		}
 		rep.Repaired = true
 	}
 
 	return rep, nil
+}
+
+// repairTail cuts the segment back to good and makes the new size durable
+// before Open returns (RUNBOOK 7.3 #2): truncate, fsync the file, fsync the
+// directory.
+func (w *WAL) repairTail(name string, good, size int64, cause error) error {
+	path := filepath.Join(w.dir, name)
+
+	if err := w.fs.Truncate(path, good); err != nil {
+		return fmt.Errorf("storage: truncating damaged segment %s: %w", name, err)
+	}
+
+	f, err := w.fs.OpenFile(path, os.O_WRONLY, fileMode)
+	if err != nil {
+		return fmt.Errorf("storage: opening repaired segment %s to sync it: %w", name, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("storage: syncing repaired segment %s: %w", name, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("storage: closing repaired segment %s: %w", name, err)
+	}
+
+	if err := w.fs.SyncDir(w.dir); err != nil {
+		return err
+	}
+
+	info := RepairInfo{Segment: name, Offset: good, Bytes: size - good, Cause: cause}
+	slog.Warn("repaired the tail of the last WAL segment",
+		"segment", info.Segment, "offset", info.Offset, "dropped_bytes", info.Bytes, "cause", info.Cause)
+	if w.onRepair != nil {
+		w.onRepair(info)
+	}
+	return nil
+}
+
+// validRecordFollows reports whether any offset at or after from holds a
+// record that frames correctly, has a known type and decodes.
+func validRecordFollows(data []byte, from int) bool {
+	for p := from; p < len(data); p++ {
+		typ, payload, _, err := readRecord(data[p:])
+		if err != nil {
+			continue
+		}
+		if validatePayload(typ, payload) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// validatePayload reports whether payload decodes as record type typ. It is
+// the one place that knows which record types exist besides replaySegment.
+func validatePayload(typ recordType, payload []byte) error {
+	var err error
+	switch typ {
+	case recordEntry:
+		_, err = decodeEntry(payload)
+	case recordHardState:
+		_, err = decodeHardState(payload)
+	case recordSnapshotMeta:
+		_, err = decodeSnapshotMeta(payload)
+	default:
+		err = fmt.Errorf("%w: unknown record type %s", ErrCorruptWAL, typ)
+	}
+	return err
 }
 
 func (w *WAL) replaySegment(data []byte, rep *Replay) (int, error) {
