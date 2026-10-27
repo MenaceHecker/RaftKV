@@ -22,6 +22,10 @@ type Recorder interface {
 	SnapshotReceived()
 
 	LeaderChanged(term, leader uint64, isLeader bool)
+
+	// WALRepaired is called once per startup repair of the WAL tail, with the
+	// number of bytes dropped.
+	WALRepaired(bytes int64)
 }
 
 const (
@@ -66,6 +70,7 @@ func (nopRecorder) ObservePersist(int, time.Duration)     {}
 func (nopRecorder) SnapshotCreated(uint64, time.Duration) {}
 func (nopRecorder) SnapshotReceived()                     {}
 func (nopRecorder) LeaderChanged(uint64, uint64, bool)    {}
+func (nopRecorder) WALRepaired(int64)                     {}
 
 type meteredStorage struct {
 	raft.Storage

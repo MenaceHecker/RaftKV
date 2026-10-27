@@ -35,6 +35,9 @@ type DiskConfig struct {
 
 	// FS is the filesystem for the lock, WAL and snapshots. Nil means the real OS.
 	FS FS
+
+	// OnRepair is passed to the WAL; see Options.OnRepair.
+	OnRepair func(RepairInfo)
 }
 
 const DefaultSnapshotsKept = 3
@@ -85,6 +88,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 		Sync:        cfg.Sync,
 		SegmentSize: cfg.SegmentSize,
 		FS:          fsys,
+		OnRepair:    cfg.OnRepair,
 	})
 	if err != nil {
 		lock.release()

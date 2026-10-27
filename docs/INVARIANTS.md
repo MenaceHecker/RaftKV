@@ -37,7 +37,7 @@ RUNBOOK. UNKNOWN = not determined. "Test" cells name an existing test or say non
 | # | Item | Verdict | Test |
 |---|---|---|---|
 | 1 | WAL record format, ~64 MB segments | GAP (partial): framing matches, segments are 16 MiB (`internal/storage/wal.go:36`) | `internal/storage/record_test.go` |
-| 2 | Torn tail truncated; mid-log corruption refuses start | GAP (partial): a bad CRC at the tail also refuses start (`internal/storage/wal.go:200`) | `internal/storage/wal_test.go:199` `TestTornTailIsRepaired`, `:293` `TestCorruptionInsideSegmentIsRejected`, `:320` `TestCorruptionInOlderSegmentIsRejected` |
+| 2 | Torn tail truncated; mid-log corruption refuses start | OK (T3.7); durability of the repair under power loss is T3.8 | `internal/storage/wal_tail_test.go` `TestBadCRCAtTailIsRepaired`, `TestBadTailIsRepairedAtEveryByte`, `TestDamagedLengthBeforeValidRecordIsRefused`, `TestBadRecordFollowedByValidRecordIsRefused`, `TestCRCValidUndecodableRecordIsRefused`; `wal_tail_fuzz_test.go` `FuzzWALReplayTail`; `internal/storage/wal_test.go:199` `TestTornTailIsRepaired`, `:293` `TestCorruptionInsideSegmentIsRejected`, `:320` `TestCorruptionInOlderSegmentIsRejected` |
 | 3 | Truncate-suffix and prefix crash-safe | OK (code), tests UNKNOWN | `internal/storage/disk_test.go:243` `TestCompactionSurvivesCrash` reopens the store; it is not a crash at each syscall |
 | 4 | Crash at any write boundary, with a fault-injecting FS | GAP: no filesystem seam | torn tail at every cut point: `internal/storage/wal_test.go:223` `TestTornTailIsRepairedAtEveryCutPoint`; on-disk chaos `chaos/scenarios_test.go:1202` `TestChaosOnDisk` |
 

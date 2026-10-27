@@ -26,6 +26,7 @@ func (r *batchRecorder) ObserveApply(int, time.Duration)       {}
 func (r *batchRecorder) SnapshotCreated(uint64, time.Duration) {}
 func (r *batchRecorder) SnapshotReceived()                     {}
 func (r *batchRecorder) LeaderChanged(uint64, uint64, bool)    {}
+func (r *batchRecorder) WALRepaired(int64)                     {}
 
 func (r *batchRecorder) stats() (max, total, calls int) {
 	r.mu.Lock()
