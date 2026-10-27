@@ -302,3 +302,22 @@ func TestOutcomeCountersStartAtZero(t *testing.T) {
 		}
 	}
 }
+
+func TestWALRepairedMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+
+	if got := gatherValue(t, reg, "raftkv_wal_repairs_total"); got != 0 {
+		t.Fatalf("wal_repairs_total = %v before any repair, want 0", got)
+	}
+
+	m.WALRepaired(46)
+	m.WALRepaired(10)
+
+	if got := gatherValue(t, reg, "raftkv_wal_repairs_total"); got != 2 {
+		t.Errorf("wal_repairs_total = %v, want 2", got)
+	}
+	if got := gatherValue(t, reg, "raftkv_wal_repair_dropped_bytes_total"); got != 56 {
+		t.Errorf("wal_repair_dropped_bytes_total = %v, want 56", got)
+	}
+}
