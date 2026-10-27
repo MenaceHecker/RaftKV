@@ -8,7 +8,7 @@ A distributed key-value store built on the Raft consensus algorithm, written fro
 go test ./...
 ```
 
-564 tests and eight fuzz targets, all green and clean under `-race`, run on every push by CI.
+564 tests and nine fuzz targets, all green and clean under `-race`, run on every push by CI.
 
 The reasoning behind the code lives in [DESIGN.md](DESIGN.md): goals, requirements, every design decision and the claims this project makes about itself. The source files carry no prose, so that document is where the "why" is.
 
