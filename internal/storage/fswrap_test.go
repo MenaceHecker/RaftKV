@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"os"
 	"sync"
 )
@@ -15,6 +16,10 @@ type wrapFS struct {
 
 	mu    sync.Mutex
 	calls []string
+
+	// detail records the arguments the golden call order leaves out, as
+	// "op name args", so they are pinned without changing that golden.
+	detail []string
 }
 
 func newWrapFS(fail func(op, name string) error) *wrapFS {
@@ -31,6 +36,18 @@ func (w *wrapFS) record(op, name string) error {
 	return w.fail(op, name)
 }
 
+func (w *wrapFS) note(op, name, format string, args ...any) {
+	w.mu.Lock()
+	w.detail = append(w.detail, op+" "+name+" "+fmt.Sprintf(format, args...))
+	w.mu.Unlock()
+}
+
+func (w *wrapFS) details() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.detail...)
+}
+
 func (w *wrapFS) log() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -41,6 +58,7 @@ func (w *wrapFS) MkdirAll(dir string, perm os.FileMode) error {
 	if err := w.record("MkdirAll", dir); err != nil {
 		return err
 	}
+	w.note("MkdirAll", dir, "perm=%#o", perm)
 	return w.FS.MkdirAll(dir, perm)
 }
 
@@ -48,6 +66,7 @@ func (w *wrapFS) OpenFile(name string, flag int, perm os.FileMode) (File, error)
 	if err := w.record("OpenFile", name); err != nil {
 		return nil, err
 	}
+	w.note("OpenFile", name, "flag=%#x perm=%#o", flag, perm)
 	f, err := w.FS.OpenFile(name, flag, perm)
 	if err != nil {
 		return nil, err
@@ -80,6 +99,7 @@ func (w *wrapFS) Rename(oldpath, newpath string) error {
 	if err := w.record("Rename", oldpath); err != nil {
 		return err
 	}
+	w.note("Rename", oldpath, "to=%s", newpath)
 	return w.FS.Rename(oldpath, newpath)
 }
 
@@ -87,6 +107,7 @@ func (w *wrapFS) Truncate(name string, size int64) error {
 	if err := w.record("Truncate", name); err != nil {
 		return err
 	}
+	w.note("Truncate", name, "size=%d", size)
 	return w.FS.Truncate(name, size)
 }
 
