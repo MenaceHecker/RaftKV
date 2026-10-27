@@ -33,8 +33,7 @@ type DiskConfig struct {
 
 	SnapshotsKept int
 
-	// FS is the filesystem for the WAL and snapshots. Nil means the real OS.
-	// The directory lock always uses the real OS until it moves behind FS.
+	// FS is the filesystem for the lock, WAL and snapshots. Nil means the real OS.
 	FS FS
 }
 
@@ -64,7 +63,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 		fsys = osFS{}
 	}
 
-	lock, err := lockDir(cfg.Dir)
+	lock, err := fsys.Lock(cfg.Dir)
 	if err != nil {
 		return nil, Snapshot{}, err
 	}
