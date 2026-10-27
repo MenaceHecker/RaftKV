@@ -124,6 +124,13 @@ func (f *wrapFile) Write(p []byte) (int, error) {
 	return f.File.Write(p)
 }
 
+func (f *wrapFile) Stat() (os.FileInfo, error) {
+	if err := f.fs.record("Stat", f.name); err != nil {
+		return nil, err
+	}
+	return f.File.Stat()
+}
+
 func (f *wrapFile) Sync() error {
 	if err := f.fs.record("Sync", f.name); err != nil {
 		return err
