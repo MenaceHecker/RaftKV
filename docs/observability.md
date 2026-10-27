@@ -68,11 +68,15 @@ latency rises. On a local three-node cluster it sits around 4ms, against a
 7ms end-to-end write, so most of what a client waits for is the disk.
 
 **Did a restart cut anything off the log?** `raftkv_wal_repairs_total` counts
-startups that removed a bad record from the tail of the last WAL segment, and
-`raftkv_wal_repair_dropped_bytes_total` the bytes removed. A crash mid-write
-does this and is normal, since the dropped record was never acknowledged. A
-count that keeps rising across restarts points at the disk. Damage anywhere
-else in the log is not repaired: the node refuses to start.
+repairs performed on the tail of the last WAL segment, and
+`raftkv_wal_repair_dropped_bytes_total` the bytes removed. A repair is counted
+when it is made, even if startup then fails for another reason. A crash
+mid-write does this and is usually harmless, but the log cannot always tell an
+interrupted write from an acknowledged record that the storage later damaged:
+the two look the same when nothing valid follows, and more than one final
+record can be dropped. A count that keeps rising across restarts points at the
+disk. Damage anywhere else in the log, or a tail too large to prove empty of
+valid records, is not repaired: the node refuses to start.
 
 ## Counted, not sampled
 

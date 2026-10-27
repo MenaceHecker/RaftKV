@@ -54,7 +54,10 @@ type Options struct {
 	// FS is the filesystem the log lives on. Nil means the real OS.
 	FS FS
 
-	// OnRepair, if set, is called once for every tail repair Open performs.
+	// OnRepair, if set, is called once for every tail repair Open performs,
+	// after the repair is durable. It means "a repair was performed": the
+	// caller may still fail to start afterwards (for example on a snapshot
+	// check in OpenDiskStorage), and the repair is not undone.
 	OnRepair func(RepairInfo)
 }
 
