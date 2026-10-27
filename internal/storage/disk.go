@@ -32,6 +32,10 @@ type DiskConfig struct {
 	SegmentSize int64
 
 	SnapshotsKept int
+
+	// FS is the filesystem for the WAL and snapshots. Nil means the real OS.
+	// The directory lock always uses the real OS until it moves behind FS.
+	FS FS
 }
 
 const DefaultSnapshotsKept = 3
@@ -55,12 +59,17 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 			cfg.SnapshotsKept)
 	}
 
+	fsys := cfg.FS
+	if fsys == nil {
+		fsys = osFS{}
+	}
+
 	lock, err := lockDir(cfg.Dir)
 	if err != nil {
 		return nil, Snapshot{}, err
 	}
 
-	snapshots, err := NewSnapshotter(filepath.Join(cfg.Dir, snapshotSubdir))
+	snapshots, err := newSnapshotterFS(fsys, filepath.Join(cfg.Dir, snapshotSubdir))
 	if err != nil {
 		lock.release()
 		return nil, Snapshot{}, err
@@ -76,6 +85,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 		Dir:         filepath.Join(cfg.Dir, walSubdir),
 		Sync:        cfg.Sync,
 		SegmentSize: cfg.SegmentSize,
+		FS:          fsys,
 	})
 	if err != nil {
 		lock.release()
