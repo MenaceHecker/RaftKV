@@ -6,6 +6,8 @@ import (
 	"os"
 )
 
+// FS is the set of filesystem operations the WAL, snapshotter and disk store
+// perform. osFS is the real implementation; tests substitute wrappers.
 type FS interface {
 	MkdirAll(dir string, perm os.FileMode) error
 
@@ -26,6 +28,7 @@ type FS interface {
 	Stat(name string) (os.FileInfo, error)
 }
 
+// File is an open file as the storage layer uses it: write, fsync, close.
 type File interface {
 	io.Writer
 
@@ -39,14 +42,14 @@ type osFS struct{}
 func (osFS) MkdirAll(dir string, perm os.FileMode) error { return os.MkdirAll(dir, perm) }
 
 func (osFS) OpenFile(name string, flag int, perm os.FileMode) (File, error) {
-	f, err := os.OpenFile(name, flag, perm)
+	f, err := os.OpenFile(name, flag, perm) //nolint:gosec // paths are built by the storage layer from its configured directory
 	if err != nil {
 		return nil, err
 	}
 	return f, nil
 }
 
-func (osFS) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) }
+func (osFS) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) } //nolint:gosec // paths are built by the storage layer from its configured directory
 
 func (osFS) ReadDir(dir string) ([]os.DirEntry, error) { return os.ReadDir(dir) }
 
@@ -59,11 +62,11 @@ func (osFS) Truncate(name string, size int64) error { return os.Truncate(name, s
 func (osFS) Stat(name string) (os.FileInfo, error) { return os.Stat(name) }
 
 func (osFS) SyncDir(dir string) error {
-	d, err := os.Open(dir)
+	d, err := os.Open(dir) //nolint:gosec // dir is the storage layer's configured directory
 	if err != nil {
 		return fmt.Errorf("storage: opening directory for sync: %w", err)
 	}
-	defer d.Close()
+	defer func() { _ = d.Close() }() // read-only handle; the fsync result is what matters
 
 	if err := d.Sync(); err != nil {
 		return fmt.Errorf("storage: syncing directory: %w", err)
