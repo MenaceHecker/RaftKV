@@ -32,9 +32,12 @@ type FS interface {
 	Lock(dir string) (*dirLock, error)
 }
 
-// File is an open file as the storage layer uses it: write, fsync, close.
+// File is an open file as the storage layer uses it: write, fsync, stat, close.
 type File interface {
 	io.Writer
+
+	// Stat describes the open file itself, not whatever its path names now.
+	Stat() (os.FileInfo, error)
 
 	Sync() error
 
