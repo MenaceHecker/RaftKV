@@ -32,6 +32,7 @@ func (r *applyRecorder) ObservePersist(int, time.Duration)     {}
 func (r *applyRecorder) SnapshotCreated(uint64, time.Duration) {}
 func (r *applyRecorder) SnapshotReceived()                     {}
 func (r *applyRecorder) LeaderChanged(uint64, uint64, bool)    {}
+func (r *applyRecorder) WALRepaired(int64)                     {}
 
 func (r *applyRecorder) read() (maxCount int, maxDur time.Duration, batches int) {
 	r.mu.Lock()
