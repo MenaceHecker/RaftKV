@@ -287,7 +287,7 @@ func (w *WAL) openActive() error {
 		return fmt.Errorf("storage: opening active segment %s: %w", seg.name, err)
 	}
 
-	info, err := w.fs.Stat(path)
+	info, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
 		return fmt.Errorf("storage: stat active segment %s: %w", seg.name, err)
