@@ -881,6 +881,17 @@ func TestCrashAtAndAfter(t *testing.T) {
 		wantMissing(t, f, "/d/a") // live state kept the remove
 	})
 
+	t.Run("Log names each counted operation", func(t *testing.T) {
+		f := newFS(1)
+		_ = f.MkdirAll("/d", 0o755)
+		h, _ := f.OpenFile("/d/a", appendFlag, 0o644)
+		_ = h.Sync()
+		want := []string{"1 MkdirAll /d", "2 OpenFile /d/a", "3 Sync /d/a"}
+		if got := f.Log(); strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("Log = %v, want %v", got, want)
+		}
+	})
+
 	t.Run("every FS and File method counts", func(t *testing.T) {
 		f := newFS(1)
 		before := f.Ops()

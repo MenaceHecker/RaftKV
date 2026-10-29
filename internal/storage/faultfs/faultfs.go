@@ -257,6 +257,7 @@ type FS struct {
 	nextID int
 
 	ops          int
+	log          []string
 	crashAt      int
 	crashAfter   int
 	pendingCrash bool
@@ -286,6 +287,14 @@ func (f *FS) Ops() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.ops
+}
+
+// Log returns the counted operations so far as "n Op path", to say which
+// operation a crash point n was.
+func (f *FS) Log() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.log...)
 }
 
 // CrashAt makes operation number n (as counted by Ops, starting at 1) fail
@@ -555,6 +564,7 @@ func (f *FS) gate(op Op, name string, h *handle) (inj, err error) {
 		return nil, ErrCrashed
 	}
 	f.ops++
+	f.log = append(f.log, fmt.Sprintf("%d %s %s", f.ops, op, name))
 	if f.crashAt != 0 && f.ops == f.crashAt {
 		f.crashed = true
 		return nil, ErrCrashed
