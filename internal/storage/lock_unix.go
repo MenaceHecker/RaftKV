@@ -47,4 +47,10 @@ func (l *dirLock) release() error {
 }
 
 // Lock takes the exclusive lock on dir; see lockDir.
-func (osFS) Lock(dir string) (*dirLock, error) { return lockDir(dir) }
+func (osFS) Lock(dir string) (func() error, error) {
+	l, err := lockDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	return l.release, nil
+}

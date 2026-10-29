@@ -29,7 +29,8 @@ type FS interface {
 
 	// Lock takes an exclusive lock on dir, creating it if needed, and fails
 	// with an "already in use" error while another holder has it.
-	Lock(dir string) (*dirLock, error)
+	// release gives the lock up; calling it again is a no-op.
+	Lock(dir string) (release func() error, err error)
 }
 
 // File is an open file as the storage layer uses it: write, fsync, stat, close.
