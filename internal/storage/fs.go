@@ -81,3 +81,7 @@ func (osFS) SyncDir(dir string) error {
 	}
 	return nil
 }
+
+// NewOSFS returns the FS backed by the real operating system, for tests and
+// tools outside this package that run the same contract against it.
+func NewOSFS() FS { return osFS{} }
