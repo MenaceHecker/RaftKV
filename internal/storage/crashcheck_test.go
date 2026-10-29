@@ -101,6 +101,24 @@ func newModel() *model {
 	return &model{hardStates: []raft.HardState{{}}, snaps: map[raft.Index]*snapRec{}}
 }
 
+// rebased returns a model in which the recovered state is the acknowledged
+// truth, for a second generation of work.
+func rebased(s *storage.DiskStorage, snap storage.Snapshot) *model {
+	m := newModel()
+	hs, _ := s.InitialState()
+	m.hardStates = []raft.HardState{hs}
+	if snap.Meta.Index > 0 {
+		m.snaps[snap.Meta.Index] = &snapRec{term: snap.Meta.Term, data: snap.Data, acked: true}
+		m.snapAcked = snap.Meta.Index
+	}
+	if first, last := s.FirstIndex(), s.LastIndex(); last >= first {
+		tail, _ := s.Entries(first, last+1)
+		m.appends = [][]raft.Entry{tail}
+		m.appendsAcked = 1
+	}
+	return m
+}
+
 // replayStates returns, for j = 0..len(flat), the log after replaying the
 // first j entries the way the WAL does: an entry at or below the current last
 // index first drops everything from its index on.
@@ -299,7 +317,14 @@ type rig struct {
 	s    *storage.DiskStorage
 	snap storage.Snapshot
 	m    *model
-	full []raft.Entry
+
+	// full is the caller's view of the log from fullBase+1 on, never
+	// compacted; baseData is the state machine snapshot at fullBase (nil when
+	// fullBase is 0).
+	full     []raft.Entry
+	fullBase raft.Index
+	baseData []byte
+
 	// repairs counts OnRepair callbacks, which fire once a repair is durable.
 	repairs int
 }
@@ -332,7 +357,8 @@ func (r *rig) append(es []raft.Entry) error {
 		return err
 	}
 	r.m.appendsAcked = len(r.m.appends)
-	r.full = append(r.full[:es[0].Index-1:es[0].Index-1], es...)
+	keep := es[0].Index - r.fullBase - 1
+	r.full = append(r.full[:keep:keep], es...)
 	return nil
 }
 
@@ -349,7 +375,12 @@ func (r *rig) setHardState(hs raft.HardState) error {
 func (r *rig) stateAt(idx raft.Index) []byte {
 	r.t.Helper()
 	kv := statemachine.New()
-	for _, e := range r.full[:idx] {
+	if r.baseData != nil {
+		if err := kv.Restore(r.baseData); err != nil {
+			r.t.Fatalf("restoring the base snapshot: %v", err)
+		}
+	}
+	for _, e := range r.full[:idx-r.fullBase] {
 		if err := kv.Apply(e); err != nil {
 			r.t.Fatalf("applying %d: %v", e.Index, err)
 		}
@@ -361,9 +392,29 @@ func (r *rig) stateAt(idx raft.Index) []byte {
 	return data
 }
 
+// lastIndex is the last index of the caller's view of the log.
+func (r *rig) lastIndex() raft.Index { return r.fullBase + raft.Index(len(r.full)) }
+
+// rebase makes the recovered store the starting point of the next generation.
+func (r *rig) rebase() {
+	r.t.Helper()
+	r.m = rebased(r.s, r.snap)
+	r.fullBase, r.baseData, r.full = r.snap.Meta.Index, nil, nil
+	if r.fullBase > 0 {
+		r.baseData = r.snap.Data
+	}
+	if first, last := r.s.FirstIndex(), r.s.LastIndex(); last >= first {
+		tail, err := r.s.Entries(first, last+1)
+		if err != nil {
+			r.t.Fatalf("reading the recovered log: %v", err)
+		}
+		r.full = tail
+	}
+}
+
 func (r *rig) createSnapshot(idx raft.Index) error {
 	data := r.stateAt(idx)
-	r.m.snaps[idx] = &snapRec{term: r.full[idx-1].Term, data: data}
+	r.m.snaps[idx] = &snapRec{term: r.full[idx-r.fullBase-1].Term, data: data}
 	if err := r.s.CreateSnapshot(idx, data, testConf); err != nil {
 		return err
 	}
@@ -391,11 +442,12 @@ func (r *rig) applySnapshot(leader []raft.Entry, idx raft.Index) error {
 	}
 	r.m.snaps[idx].acked = true
 	r.m.snapAcked = idx
+	r.fullBase, r.baseData, r.full = idx, data, nil
 	return nil
 }
 
-// powerLoss applies the crash and reopens the store on the same filesystem,
-// failing the test if Open returns an error.
+// reopen opens the store again on the same filesystem, after a crash, failing
+// the test if Open returns an error.
 func (r *rig) reopen(ctx string) {
 	r.t.Helper()
 	if err := r.open(); err != nil {
