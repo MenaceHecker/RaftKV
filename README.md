@@ -8,7 +8,7 @@ A distributed key-value store built on the Raft consensus algorithm, written fro
 go test ./...
 ```
 
-568 tests and nine fuzz targets, all green and clean under `-race`, run on every push by CI.
+587 tests and nine fuzz targets, all green and clean under `-race`, run on every push by CI.
 
 The reasoning behind the code lives in [DESIGN.md](DESIGN.md): goals, requirements, every design decision and the claims this project makes about itself. The source files carry no prose, so that document is where the "why" is.
 
@@ -176,7 +176,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 8,800 lines of implementation and 19,000 of tests, across 568 tests. The ratio is not an accident.
+Roughly 10,500 lines of implementation and 21,000 of tests, across 587 tests. The ratio is not an accident.
 
 ---
 
@@ -224,7 +224,9 @@ Sorted keys in snapshots. Go randomizes map iteration, so an unsorted encoding p
 
 Snapshots are still materialized in memory at both ends, though far less wastefully than they were. Sizing the buffer exactly took producing a 64 MB snapshot from 353 MB of allocation down to 65 MB, leaving one copy rather than six, and they travel over the wire in chunks so size no longer breaks transfer. But the sender holds the whole image and the receiver assembles the whole image before handing it over. Making the state machine serialize and restore through an `io.Reader` and `io.Writer` would remove that, and would ripple through the storage layer and the core's `Snapshot` type.
 
-Storage error paths are covered by reasoning rather than by tests. The core's behaviour when a write fails is tested thoroughly, using a storage implementation that fails on demand. What is not tested is the disk layer's own error returns, because reaching those needs fault injection at the filesystem level and the package has no seam for it.
+Storage failures are tested at the filesystem level, within limits. `internal/storage/faultfs` is an in-memory `storage.FS` that keeps file bytes, directory entries and directory creation durable separately, injects fsync, short-write, ENOSPC, rename and directory-fsync failures, and simulates power loss with dropped, torn, garbage or zeroed tails. The crash tests stop before and after every filesystem operation of an append, a conflicting suffix rewrite, a snapshot write, a compaction, an `ApplySnapshot` and a tail repair (including a second crash during the repair), and check that nothing acknowledged is lost and that the recovered log is contiguous and rebuilds the same state machine. The `SyncNever` loss contract and 200 seeds of random workloads with crashes are covered too.
+
+What this does not show. The model is deliberately conservative: everything it does is allowed by POSIX and it is stricter than ext4 in practice, but it has not been checked against a real kernel or a real power cut. It does not model reordering of unsynced writes across files, bit rot in the middle of the log, or a rename across directories. These cases are not covered by these tests and are planned as red-first task cards in `docs/tasks/` (T3.9 to T3.13): retrying after a failed write or fsync, losing the data directory on first start because its parent entry was never synced, an unsynced segment roll followed by `WAL.Sync`, `SyncNever` rolling back the hard state through compaction, and stale entries after `ApplySnapshot`.
 
 ---
 

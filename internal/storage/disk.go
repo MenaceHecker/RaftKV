@@ -15,7 +15,7 @@ type DiskStorage struct {
 	wal       *WAL
 	snapshots *Snapshotter
 
-	lock *dirLock
+	unlock func() error
 
 	hardState raft.HardState
 
@@ -66,20 +66,20 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 		fsys = osFS{}
 	}
 
-	lock, err := fsys.Lock(cfg.Dir)
+	unlock, err := fsys.Lock(cfg.Dir)
 	if err != nil {
 		return nil, Snapshot{}, err
 	}
 
 	snapshots, err := newSnapshotterFS(fsys, filepath.Join(cfg.Dir, snapshotSubdir))
 	if err != nil {
-		lock.release()
+		_ = unlock() // the open error is the one worth reporting
 		return nil, Snapshot{}, err
 	}
 
 	snap, err := snapshots.Load()
 	if err != nil && !errors.Is(err, ErrNoSnapshot) {
-		lock.release()
+		_ = unlock() // the open error is the one worth reporting
 		return nil, Snapshot{}, err
 	}
 
@@ -91,13 +91,13 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 		OnRepair:    cfg.OnRepair,
 	})
 	if err != nil {
-		lock.release()
+		_ = unlock() // the open error is the one worth reporting
 		return nil, Snapshot{}, err
 	}
 
 	if replay.Snapshot.Index > snap.Meta.Index {
 		wal.Close()
-		lock.release()
+		_ = unlock() // the open error is the one worth reporting
 		return nil, Snapshot{}, fmt.Errorf(
 			"%w: the log records a snapshot at index %d but the newest readable snapshot is at %d",
 			ErrCorruptWAL, replay.Snapshot.Index, snap.Meta.Index)
@@ -105,7 +105,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 
 	s := &DiskStorage{
 		wal:       wal,
-		lock:      lock,
+		unlock:    unlock,
 		snapshots: snapshots,
 		hardState: replay.HardState,
 		entries:   []raft.Entry{{Index: snap.Meta.Index, Term: snap.Meta.Term}},
@@ -120,7 +120,7 @@ func OpenDiskStorage(cfg DiskConfig) (*DiskStorage, Snapshot, error) {
 
 	if err := s.validateContiguous(); err != nil {
 		wal.Close()
-		lock.release()
+		_ = unlock() // the open error is the one worth reporting
 		return nil, Snapshot{}, err
 	}
 
@@ -359,7 +359,7 @@ func (s *DiskStorage) Close() error {
 	s.closed = true
 
 	err := s.wal.Close()
-	if lerr := s.lock.release(); err == nil {
+	if lerr := s.unlock(); err == nil {
 		err = lerr
 	}
 	return err

@@ -16,7 +16,7 @@ var testConf = raft.ConfState{Voters: []raft.NodeID{1, 2, 3}}
 
 func crash(t *testing.T, s *DiskStorage) {
 	t.Helper()
-	if err := s.lock.release(); err != nil {
+	if err := s.unlock(); err != nil {
 		t.Fatalf("releasing the directory lock: %v", err)
 	}
 }

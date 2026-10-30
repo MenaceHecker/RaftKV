@@ -16,11 +16,11 @@ func TestOSFSLockContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first Lock: %v", err)
 		}
-		defer func() { _ = first.release() }()
+		defer func() { _ = first() }()
 
 		second, err := osFS{}.Lock(dir)
 		if err == nil {
-			_ = second.release()
+			_ = second()
 			t.Fatal("a second Lock on a held directory succeeded")
 		}
 		if !strings.Contains(err.Error(), "already in use") {
@@ -34,7 +34,7 @@ func TestOSFSLockContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first Lock: %v", err)
 		}
-		if err := first.release(); err != nil {
+		if err := first(); err != nil {
 			t.Fatalf("release: %v", err)
 		}
 
@@ -42,7 +42,7 @@ func TestOSFSLockContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Lock after release: %v", err)
 		}
-		if err := second.release(); err != nil {
+		if err := second(); err != nil {
 			t.Fatalf("second release: %v", err)
 		}
 	})

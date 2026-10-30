@@ -125,7 +125,7 @@ func (w *wrapFS) Stat(name string) (os.FileInfo, error) {
 	return w.FS.Stat(name)
 }
 
-func (w *wrapFS) Lock(dir string) (*dirLock, error) {
+func (w *wrapFS) Lock(dir string) (func() error, error) {
 	if err := w.record("Lock", dir); err != nil {
 		return nil, err
 	}
