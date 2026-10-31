@@ -10,6 +10,7 @@ import (
 func FuzzReadRecord(f *testing.F) {
 	f.Add(appendRecord(nil, recordEntry, []byte("payload")))
 	f.Add(appendRecord(nil, recordHardState, nil))
+	f.Add(appendRecord(nil, recordDiscardSuffix, encodeDiscardSuffix(nil, 6)))
 	f.Add([]byte{})
 	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0})
 	full := appendRecord(nil, recordEntry, []byte("cut short"))
@@ -85,6 +86,30 @@ func FuzzDecodeSnapshotMeta(f *testing.F) {
 	})
 }
 
+func FuzzDecodeDiscardSuffix(f *testing.F) {
+	f.Add(encodeDiscardSuffix(nil, 6))
+	f.Add(encodeDiscardSuffix(nil, 1))
+	f.Add(encodeDiscardSuffix(nil, raft.Index(^uint64(0))))
+	f.Add(make([]byte, 8)) // from index 0: undecodable
+	f.Add(make([]byte, 7))
+	f.Add(make([]byte, 9))
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		from, err := decodeDiscardSuffix(data)
+		if err != nil {
+			return
+		}
+		if from == 0 {
+			t.Fatal("a discard from index 0 decoded")
+		}
+		again := encodeDiscardSuffix(nil, from)
+		if !bytes.Equal(again, data) {
+			t.Fatalf("discard suffix round-tripped to different bytes:\n in: %x\nout: %x", data, again)
+		}
+	})
+}
+
 func TestRecordDecodersRejectTrailingBytes(t *testing.T) {
 	entry := encodeEntry(nil, raft.Entry{Term: 1, Index: 2, Type: raft.EntryNormal, Data: []byte("x")})
 	if _, err := decodeEntry(append(entry, 0)); err == nil {
@@ -99,6 +124,11 @@ func TestRecordDecodersRejectTrailingBytes(t *testing.T) {
 	meta := encodeSnapshotMeta(nil, SnapshotMeta{Index: 9, Term: 2})
 	if _, err := decodeSnapshotMeta(append(meta, 0)); err == nil {
 		t.Error("snapshot metadata with a trailing byte was accepted")
+	}
+
+	discard := encodeDiscardSuffix(nil, 6)
+	if _, err := decodeDiscardSuffix(append(discard, 0)); err == nil {
+		t.Error("a discard suffix with a trailing byte was accepted")
 	}
 }
 
