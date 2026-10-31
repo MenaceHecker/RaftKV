@@ -1,9 +1,9 @@
 package storage_test
 
-// T3.11 tests 1 and 2: what a DiskStorage recovers after ApplySnapshot. They
-// state today's behavior (characterisation), not the behavior RAFT requires:
-// ApplySnapshot drops every in-memory entry (disk.go), the WAL keeps the entries
-// above the snapshot, and Open puts them back.
+// T3.11 tests 1 and 2: what a DiskStorage recovers after ApplySnapshot. A
+// mismatching snapshot writes a durable DiscardSuffix, so a restart never brings
+// the stale tail back; a matching one keeps its suffix on disk while memory drops
+// it (disk.go), which is expected and benign.
 
 import (
 	"fmt"
@@ -123,7 +123,9 @@ func TestApplySnapshotThenRestartRecoveredLog(t *testing.T) {
 // at term 1 installs the mismatching snapshot (5,2) with a crash at every
 // filesystem operation. The recovered store is the pre-call log, or the
 // snapshot with the stale tail, or the snapshot with an empty tail; never a hole
-// (Open runs validateContiguous). SyncAlways only.
+// (Open runs validateContiguous). A crash point is inside a call, so none of these
+// is an acknowledged install: TestAcknowledgedInstallSurvivesCrash covers that.
+// SyncAlways only.
 func TestApplySnapshotCrashPointsRecoveredLog(t *testing.T) {
 	leader := logEntries(2, 1, 12)
 	stale := logEntries(1, 6, 5)
@@ -167,4 +169,128 @@ func TestApplySnapshotCrashPointsRecoveredLog(t *testing.T) {
 		{"torn/seed2", 2, faultfs.CrashOptions{Tail: faultfs.TornTail}},
 	})
 	t.Logf("recovered states over all crash points: %v", counts)
+}
+
+// TestAcknowledgedInstallSurvivesCrash (T3.11 guarantee): once ApplySnapshot has
+// returned success for a mismatching snapshot, no crash and no restart brings the
+// discarded suffix back, and entries appended afterwards survive every restart.
+// Every crash mode, SyncAlways.
+func TestAcknowledgedInstallSurvivesCrash(t *testing.T) {
+	quietLogs(t)
+	leader := logEntries(2, 1, 12)
+	for _, mode := range append([]crashMode{{"drop", 1, faultfs.CrashOptions{}}}, torn(1, 2, 3, 4, 5)...) {
+		t.Run(mode.name, func(t *testing.T) {
+			f := newFS(t, mode.seed, faultfs.Options{})
+			r := newRig(t, f, storage.SyncAlways, 0)
+			requireOK(t, "open", r.open())
+			requireOK(t, "append", r.append(logEntries(1, 1, 10)))
+			requireOK(t, "ApplySnapshot", r.applySnapshot(leader, 5))
+
+			f.Crash(mode.opts)
+			r.reopen(mode.name)
+			r.check(mode.name)
+			requireDiscardedAcrossRestarts(t, r, mode.name)
+			r.check(mode.name + " (after the restarts)")
+		})
+	}
+}
+
+func torn(seeds ...int64) []crashMode {
+	var out []crashMode
+	for _, seed := range seeds {
+		out = append(out, crashMode{fmt.Sprintf("torn/seed%d", seed), seed, faultfs.CrashOptions{Tail: faultfs.TornTail}})
+	}
+	return out
+}
+
+// requireDiscardedAcrossRestarts holds an acknowledged mismatching install to its
+// guarantee: the log is the snapshot with an empty tail, a second restart with
+// no writes in between changes nothing, and entries appended after the install
+// (made durable first: SyncAlways) survive every further restart.
+func requireDiscardedAcrossRestarts(t *testing.T, r *rig, ctx string) {
+	t.Helper()
+	if v := viewOf(t, r.s); v.boundary != 5 || v.term != 2 || len(v.tail) != 0 {
+		t.Fatalf("%s: the install returned but the recovered log is %v, want snapshot (5,2) and an empty tail", ctx, v)
+	}
+
+	requireOK(t, ctx+": close", r.s.Close())
+	r.reopen(ctx + " (second restart)")
+	if v := viewOf(t, r.s); v.boundary != 5 || len(v.tail) != 0 {
+		t.Fatalf("%s: after a second restart the log is %v, want an empty tail", ctx, v)
+	}
+
+	requireOK(t, ctx+": append after the install", r.append(logEntries(2, 6, 2)))
+	for restart := 1; restart <= 2; restart++ {
+		requireOK(t, ctx+": close", r.s.Close())
+		r.reopen(fmt.Sprintf("%s (restart %d after appends)", ctx, restart))
+		v := viewOf(t, r.s)
+		if v.boundary != 5 || !sameEntries(v.tail, logEntries(2, 6, 2)) {
+			t.Fatalf("%s: restart %d after the appends gives %v, want snapshot (5,2) + 6/2 7/2", ctx, restart, v)
+		}
+	}
+}
+
+// TestApplySnapshotAtOrBelowTheBoundaryIsRejected (T3.11 condition C): a snapshot
+// whose index is at or below the existing snapshot, hence at or below the first
+// retained WAL index minus one, has no local term to compare with. It is refused
+// before anything is written (disk.go: "not newer than the local state"), never
+// counted as a mismatch, so it can never write a DiscardSuffix over entries the
+// node still needs.
+func TestApplySnapshotAtOrBelowTheBoundaryIsRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, s *storage.DiskStorage)
+	}{
+		{"boundary from a mismatching install", func(t *testing.T, s *storage.DiskStorage) {
+			requireOK(t, "append", s.Append(logEntries(1, 1, 10)))
+			requireOK(t, "ApplySnapshot", s.ApplySnapshot(raft.Snapshot{Index: 5, Term: 2, Conf: testConf, Data: []byte("state@5")}))
+		}},
+		{"boundary from a local CreateSnapshot", func(t *testing.T, s *storage.DiskStorage) {
+			requireOK(t, "append", s.Append(logEntries(1, 1, 10)))
+			requireOK(t, "CreateSnapshot", s.CreateSnapshot(5, []byte("state@5"), testConf))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			s, _ := openOnDisk(t, dir)
+			tc.setup(t, s)
+			boundary := s.SnapshotMeta()
+			if boundary.Index != 5 {
+				t.Fatalf("precondition: boundary is %+v, want index 5", boundary)
+			}
+
+			// Entries above the boundary that a wrongly written discard would destroy.
+			above := logEntries(boundary.Term, 6, 3)
+			if s.LastIndex() < 8 {
+				requireOK(t, "append above the boundary", s.Append(above))
+			}
+			before := viewOf(t, s)
+
+			for _, snap := range []raft.Snapshot{
+				{Index: 3, Term: 1, Conf: testConf, Data: []byte("older")},               // below, any term
+				{Index: 3, Term: boundary.Term, Conf: testConf, Data: []byte("older")},   // below, same term
+				{Index: 5, Term: boundary.Term, Conf: testConf, Data: []byte("same")},    // at the boundary
+				{Index: 5, Term: boundary.Term + 7, Conf: testConf, Data: []byte("odd")}, // at it, another term
+				{Index: 1, Term: 9, Conf: testConf, Data: []byte("oldest")},
+			} {
+				if err := s.ApplySnapshot(snap); err == nil {
+					t.Errorf("ApplySnapshot(%d,%d) succeeded, want it refused", snap.Index, snap.Term)
+				}
+			}
+
+			if after := viewOf(t, s); after.String() != before.String() {
+				t.Fatalf("a refused ApplySnapshot changed the log: %v -> %v", before, after)
+			}
+			requireOK(t, "close", s.Close())
+
+			s2, snap := openOnDisk(t, dir)
+			defer func() { _ = s2.Close() }()
+			if snap.Meta != boundary {
+				t.Errorf("snapshot after reopen is %+v, want %+v", snap.Meta, boundary)
+			}
+			if got := viewOf(t, s2); got.String() != before.String() {
+				t.Fatalf("after reopen the log is %v, want %v: a refused call must not leave a discard behind", got, before)
+			}
+		})
+	}
 }

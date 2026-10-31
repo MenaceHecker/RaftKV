@@ -72,6 +72,20 @@ func (m *tailModel) apply(typ byte, payload []byte) error {
 			return err
 		}
 		m.snap = sm
+	case recordDiscardSuffix:
+		from, err := decodeDiscardSuffix(payload)
+		if err != nil {
+			return err
+		}
+		// Drop every entry with Index >= from, by a scan rather than the
+		// production binary search.
+		kept := m.entries[:0:0]
+		for _, have := range m.entries {
+			if have.Index < from {
+				kept = append(kept, have)
+			}
+		}
+		m.entries = kept
 	default:
 		return errors.New("unknown record type")
 	}
@@ -155,6 +169,11 @@ func FuzzWALReplayTail(f *testing.F) {
 	// Several intact records, a conflicting one, and CRC-valid undecodable ones.
 	f.Add(append(bytes.Clone(rec), tailEntryRecord(1, 4)...))
 	f.Add(append(bytes.Clone(rec), tailEntryRecord(2, 2)...))
+	f.Add(appendRecord(nil, recordDiscardSuffix, encodeDiscardSuffix(nil, 2)))
+	f.Add(append(bytes.Clone(rec), appendRecord(nil, recordDiscardSuffix, encodeDiscardSuffix(nil, 3))...))
+	f.Add(appendRecord(nil, recordDiscardSuffix, make([]byte, 8)))
+	f.Add(appendRecord(nil, recordDiscardSuffix, make([]byte, 7)))
+	f.Add(append(appendRecord(nil, recordDiscardSuffix, encodeDiscardSuffix(nil, 2)), tailEntryRecord(2, 2)...))
 	f.Add(appendRecord(nil, recordType(99), []byte("x")))
 	f.Add(appendRecord(nil, recordEntry, []byte{1, 2, 3}))
 	f.Add(append(appendRecord(nil, recordEntry, []byte{1, 2, 3}), rec...))
