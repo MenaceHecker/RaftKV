@@ -95,18 +95,6 @@ type model struct {
 
 	snaps     map[raft.Index]*snapRec
 	snapAcked raft.Index
-
-	// discards are the mismatching ApplySnapshot calls: each drops, durably once
-	// acknowledged under SyncAlways, every entry attempted before it.
-	discards []discardRec
-}
-
-// discardRec is one mismatching ApplySnapshot at snapIdx, made after the first
-// entries entries of the flattened append history had been attempted.
-type discardRec struct {
-	snapIdx raft.Index
-	entries int
-	acked   bool
 }
 
 func newModel() *model {
@@ -156,35 +144,6 @@ func (m *model) replayStates() (states [][]raft.Entry, ackedCount int) {
 		states = append(states, cur)
 	}
 	return states, ackedCount
-}
-
-// replayStatesFrom is replayStates for a log that was emptied once the first
-// skip attempted entries had been written: the logs replay can end with, given
-// that the entries after that point were attempted in full or in part. Under
-// SyncAlways a state shorter than the acknowledged appends is still returned;
-// the caller owns that bound through checkRecovered's own prefix check.
-func (m *model) replayStatesFrom(skip int) [][]raft.Entry {
-	var flat []raft.Entry
-	for _, batch := range m.appends {
-		flat = append(flat, batch...)
-	}
-	if skip > len(flat) {
-		skip = len(flat)
-	}
-	var cur []raft.Entry
-	out := [][]raft.Entry{nil}
-	for _, e := range flat[skip:] {
-		if n := len(cur); n > 0 && e.Index <= cur[n-1].Index {
-			cut := 0
-			for cut < n && cur[cut].Index < e.Index {
-				cut++
-			}
-			cur = cur[:cut]
-		}
-		cur = append(append([]raft.Entry(nil), cur...), e)
-		out = append(out, cur)
-	}
-	return out
 }
 
 func sameEntries(a, b []raft.Entry) bool {
@@ -284,34 +243,9 @@ func checkRecovered(t *testing.T, ctx string, f *faultfs.FS, s *storage.DiskStor
 	if policy == storage.SyncAlways {
 		lo = ackedCount
 	}
-
-	// A mismatching ApplySnapshot at r also writes a DiscardSuffix, after which
-	// the log is what the appends attempted after the call replay to. Once the
-	// call has returned under SyncAlways the discard is durable and that is the
-	// only legal family; before that, the pre-install tail (states 3b and 3c of
-	// the card) is legal too.
-	primary := true
-	var fromDiscard [][]raft.Entry
-	for _, d := range m.discards {
-		if d.snapIdx != r {
-			continue
-		}
-		if d.acked && policy == storage.SyncAlways {
-			primary = false
-		}
-		for _, st := range m.replayStatesFrom(d.entries) {
-			fromDiscard = append(fromDiscard, above(st, r))
-		}
-	}
 	matched := false
-	for j := lo; primary && j < len(states); j++ {
+	for j := lo; j < len(states); j++ {
 		if sameEntries(above(states[j], r), tail) {
-			matched = true
-			break
-		}
-	}
-	for _, st := range fromDiscard {
-		if sameEntries(st, tail) {
 			matched = true
 			break
 		}
@@ -503,27 +437,11 @@ func (r *rig) applySnapshot(leader []raft.Entry, idx raft.Index) error {
 	}
 	term := leader[idx-1].Term
 	r.m.snaps[idx] = &snapRec{term: term, data: data}
-
-	// The entry at idx is r.full[idx-fullBase-1]; a mismatch with entries above
-	// it is the case that writes a DiscardSuffix.
-	disc := -1
-	if n := idx - r.fullBase; n >= 1 && n < raft.Index(len(r.full)) && r.full[n-1].Term != term {
-		flat := 0
-		for _, batch := range r.m.appends {
-			flat += len(batch)
-		}
-		r.m.discards = append(r.m.discards, discardRec{snapIdx: idx, entries: flat})
-		disc = len(r.m.discards) - 1
-	}
-
 	if err := r.s.ApplySnapshot(raft.Snapshot{Index: idx, Term: term, Conf: testConf, Data: data}); err != nil {
 		return err
 	}
 	r.m.snaps[idx].acked = true
 	r.m.snapAcked = idx
-	if disc >= 0 {
-		r.m.discards[disc].acked = true
-	}
 	r.fullBase, r.baseData, r.full = idx, data, nil
 	return nil
 }
