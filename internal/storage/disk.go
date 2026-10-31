@@ -327,11 +327,35 @@ func (s *DiskStorage) ApplySnapshot(snap raft.Snapshot) error {
 
 	meta := SnapshotMeta{Index: snap.Index, Term: snap.Term}
 
+	// Here snap.Index > s.offset(), so the term at snap.Index is known when the
+	// local log reaches it. A snapshot at or below the boundary was refused above
+	// and is never a mismatch: its term is unavailable, not different.
+	//
+	// Raft paper section 7 (InstallSnapshot rule 6): an entry at snap.Index with
+	// the snapshot's term keeps the entries after it; otherwise the whole log is
+	// discarded. Memory drops the tail either way (below), so only the mismatching
+	// case needs the WAL told, or a restart would bring the stale tail back and
+	// the node would vote and count a quorum from entries the cluster never
+	// committed. A matching snapshot writes no discard: the recovered tail is
+	// entries the cluster already agrees on.
+	mismatch := snap.Index < s.lastIndexLocked() &&
+		s.entries[snap.Index-s.offset()].Term != snap.Term
+
 	if err := s.snapshots.Save(Snapshot{Meta: meta, Data: snap.Data, Conf: snap.Conf}); err != nil {
 		return err
 	}
 
-	if err := s.wal.SaveSnapshotMeta(meta); err != nil {
+	// The discard follows the durable snapshot file, never precedes it: a crash
+	// between them must not lose entries without the snapshot that supersedes
+	// them. mismatch implies snap.Index < lastIndex, so snap.Index+1 cannot
+	// overflow.
+	var err error
+	if mismatch {
+		err = s.wal.SaveSnapshotMetaAndDiscardSuffix(meta, snap.Index+1)
+	} else {
+		err = s.wal.SaveSnapshotMeta(meta)
+	}
+	if err != nil {
 		return err
 	}
 

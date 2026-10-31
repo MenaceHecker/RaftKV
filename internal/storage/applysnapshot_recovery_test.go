@@ -56,9 +56,9 @@ func openOnDisk(t *testing.T, dir string) (*storage.DiskStorage, storage.Snapsho
 }
 
 // TestApplySnapshotThenRestartRecoveredLog (T3.11 test 1): log 1..10 at term 1,
-// then a snapshot at 5. A mismatching one (term 2) must discard 6..10 (paper
-// section 7); a matching one (term 1) keeps them. Today both come back after a
-// restart although the in-memory view held nothing above 5.
+// then a snapshot at 5. A mismatching one (term 2) discards 6..10 (paper
+// section 7) durably; a matching one (term 1) keeps them on disk although the
+// in-memory view holds nothing above 5.
 func TestApplySnapshotThenRestartRecoveredLog(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -99,10 +99,20 @@ func TestApplySnapshotThenRestartRecoveredLog(t *testing.T) {
 			if inMemory.lastIndex() != 5 || len(inMemory.tail) != 0 {
 				t.Fatalf("in-memory view after the install is %v, want nothing above 5", inMemory)
 			}
-			// Characterisation of today's behavior: the old tail is resurrected.
+			if tc.mismatch {
+				// Intended spec change (T3.11): a mismatching snapshot writes a durable
+				// DiscardSuffix, so the stale tail 6..10 is gone after a restart.
+				if len(reopened.tail) != 0 {
+					t.Fatalf("reopened tail is [%s], want it discarded", describe(reopened.tail))
+				}
+				return
+			}
+			// A matching snapshot keeps its suffix in the WAL (paper section 7) while the
+			// in-memory view drops it; the difference is expected and benign, see
+			// TestMatchingSnapshotMemoryDiskDifferenceIsBenign.
 			want := logEntries(1, 6, 5)
 			if !sameEntries(reopened.tail, want) {
-				t.Fatalf("reopened tail is [%s], today's code is expected to resurrect [%s]",
+				t.Fatalf("reopened tail is [%s], want the matching suffix [%s]",
 					describe(reopened.tail), describe(want))
 			}
 		})

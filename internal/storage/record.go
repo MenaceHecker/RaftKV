@@ -25,6 +25,39 @@ const (
 	recordEntry        recordType = 1
 	recordHardState    recordType = 2
 	recordSnapshotMeta recordType = 3
+
+	// recordDiscardSuffix says "discard every entry with Index >= fromIndex".
+	//
+	// Layout: the usual frame (len u32 | crc32c u32 | type u8 | payload, little
+	// endian) with a payload of exactly 8 bytes, fromIndex u64. fromIndex 0 and
+	// any other payload length are ErrCorruptRecord: a CRC-valid record that does
+	// not decode is corruption, never a tear (RUNBOOK 7.3). Replay applies it in
+	// log order, so entries appended after it re-extend the log; a fromIndex above
+	// the last entry is a no-op. It leaves the snapshot meta and hard state alone.
+	//
+	// Why it exists: ApplySnapshot with a snapshot whose boundary term differs
+	// from the local entry at that index must drop the whole local tail (Raft
+	// paper section 7, InstallSnapshot rule 6), but the WAL only ever deleted
+	// whole segments, so a restart brought the stale tail back. It is written
+	// only for that mismatching case, in the same write as the SnapshotMeta that
+	// precedes it.
+	//
+	// Old binaries: there is no deployed data, so no compatibility is promised. A
+	// binary that does not know type 4 stops at it with ErrCorruptWAL (unknown
+	// record type, and in the last segment "undecodable record", never a
+	// truncation) rather than skipping it and resurrecting the stale tail.
+	//
+	// Crash states of an ApplySnapshot that has not returned (so was never
+	// acknowledged), with the snapshot file saved first and the WAL write second:
+	//   (a) snapshot file absent: the pre-install log, exactly.
+	//   (b) snapshot file present, WAL meta and discard absent or torn off: boundary
+	//       (S,T) plus the pre-install tail.
+	//   (c) meta durable, discard torn or missing: the same as (b).
+	//   (d) both durable: the snapshot and an empty tail.
+	// (b) and (c) are safe because the node's lastIndex and last term are still
+	// the pre-install ones, so its votes are unchanged, and the boundary (S,T) it
+	// now claims is committed. After ApplySnapshot returns, only (d) is possible.
+	recordDiscardSuffix recordType = 4
 )
 
 func (t recordType) String() string {
@@ -35,6 +68,8 @@ func (t recordType) String() string {
 		return "HardState"
 	case recordSnapshotMeta:
 		return "SnapshotMeta"
+	case recordDiscardSuffix:
+		return "DiscardSuffix"
 	default:
 		return fmt.Sprintf("Unknown(%d)", uint8(t))
 	}
@@ -238,4 +273,25 @@ func decodeSnapshotMeta(payload []byte) (SnapshotMeta, error) {
 	}
 
 	return SnapshotMeta{Index: raft.Index(index), Term: raft.Term(term)}, nil
+}
+
+func encodeDiscardSuffix(dst []byte, fromIndex raft.Index) []byte {
+	return appendUint64(dst, uint64(fromIndex))
+}
+
+func decodeDiscardSuffix(payload []byte) (raft.Index, error) {
+	r := &reader{b: payload}
+
+	from, err := r.uint64()
+	if err != nil {
+		return 0, fmt.Errorf("decoding discard index: %w", err)
+	}
+	if err := r.atEnd("discard suffix"); err != nil {
+		return 0, err
+	}
+	if from == 0 {
+		return 0, fmt.Errorf("%w: discard from index 0", ErrCorruptRecord)
+	}
+
+	return raft.Index(from), nil
 }

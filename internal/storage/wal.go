@@ -319,6 +319,7 @@ const maxScanChecksumBytes = 64 << 20
 const (
 	minEntryBody   = typeSize + 4*8 // term, index, type, data length
 	fixedStateBody = typeSize + 2*8 // HardState and SnapshotMeta
+	discardBody    = typeSize + 8   // DiscardSuffix
 )
 
 // validRecordFollows reports whether any offset at or after from holds a
@@ -344,6 +345,10 @@ func validRecordFollows(data []byte, from int) (found, exhausted bool) {
 			}
 		case recordHardState, recordSnapshotMeta:
 			if bodyLen != fixedStateBody {
+				continue
+			}
+		case recordDiscardSuffix:
+			if bodyLen != discardBody {
 				continue
 			}
 		default:
@@ -377,6 +382,8 @@ func validatePayload(typ recordType, payload []byte) error {
 		_, err = decodeHardState(payload)
 	case recordSnapshotMeta:
 		_, err = decodeSnapshotMeta(payload)
+	case recordDiscardSuffix:
+		_, err = decodeDiscardSuffix(payload)
 	default:
 		err = fmt.Errorf("%w: unknown record type %s", ErrCorruptWAL, typ)
 	}
@@ -414,6 +421,13 @@ func (w *WAL) replaySegment(data []byte, rep *Replay) (int, error) {
 			}
 			rep.Snapshot = meta
 
+		case recordDiscardSuffix:
+			from, err := decodeDiscardSuffix(payload)
+			if err != nil {
+				return offset, err
+			}
+			rep.Entries = discardFrom(rep.Entries, from)
+
 		default:
 			return offset, fmt.Errorf("%w: unknown record type %s", ErrCorruptWAL, typ)
 		}
@@ -430,6 +444,13 @@ func appendResolvingConflict(entries []raft.Entry, e raft.Entry) []raft.Entry {
 		entries = entries[:cut]
 	}
 	return append(entries, e)
+}
+
+// discardFrom drops every entry with Index >= from. A from past the last entry
+// changes nothing.
+func discardFrom(entries []raft.Entry, from raft.Index) []raft.Entry {
+	cut := sort.Search(len(entries), func(i int) bool { return entries[i].Index >= from })
+	return entries[:cut]
 }
 
 func (w *WAL) openActive() error {
@@ -543,6 +564,39 @@ func (w *WAL) SaveSnapshotMeta(meta SnapshotMeta) error {
 	buf := appendRecord(nil, recordSnapshotMeta, encodeSnapshotMeta(nil, meta))
 	if err := w.write(buf); err != nil {
 		return err
+	}
+	return w.maybeRoll()
+}
+
+// SaveSnapshotMetaAndDiscardSuffix records a snapshot boundary and discards
+// every entry from fromIndex on, in one write, so a crash leaves both, the
+// snapshot meta alone (a torn discard is truncated at the next Open), or
+// neither. The caller has already made the snapshot file durable: the discard
+// must never reach the log before the snapshot that supersedes the entries it
+// drops. fromIndex is meta.Index+1.
+func (w *WAL) SaveSnapshotMetaAndDiscardSuffix(meta SnapshotMeta, fromIndex raft.Index) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return errors.New("storage: WAL is closed")
+	}
+	if fromIndex == 0 {
+		return errors.New("storage: cannot discard the log from index 0")
+	}
+
+	buf := appendRecord(nil, recordSnapshotMeta, encodeSnapshotMeta(nil, meta))
+	buf = appendRecord(buf, recordDiscardSuffix, encodeDiscardSuffix(nil, fromIndex))
+	if err := w.write(buf); err != nil {
+		return err
+	}
+
+	// The next segment is named after lastIndex+1, which now falls back to
+	// fromIndex. It can be lower than an older segment's first index, because
+	// that segment still holds the discarded entries; segments are ordered by
+	// sequence number, never by first index.
+	if w.lastIndex >= fromIndex {
+		w.lastIndex = fromIndex - 1
 	}
 	return w.maybeRoll()
 }
