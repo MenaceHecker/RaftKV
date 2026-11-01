@@ -163,23 +163,27 @@ func TestConfStateAtReplaysAboveTheSnapshot(t *testing.T) {
 	})
 }
 
-// failingSnapshots lets a test make Snapshot() fail, or lie about its index.
+// failingSnapshots lets a test make Snapshot() fail, or report an older
+// snapshot (and the first index that goes with it) than the one stored.
 type failingSnapshots struct {
 	*MemoryStorage
-	err      error
-	firstIdx Index
+	err   error
+	older *Snapshot
 }
 
 func (s *failingSnapshots) Snapshot() (Snapshot, error) {
 	if s.err != nil {
 		return Snapshot{}, s.err
 	}
+	if s.older != nil {
+		return *s.older, nil
+	}
 	return s.MemoryStorage.Snapshot()
 }
 
 func (s *failingSnapshots) FirstIndex() Index {
-	if s.firstIdx != 0 {
-		return s.firstIdx
+	if s.older != nil {
+		return s.older.Index + 1
 	}
 	return s.MemoryStorage.FirstIndex()
 }
@@ -243,12 +247,12 @@ func TestConfStateAtNeverMovesTheBaseBackwards(t *testing.T) {
 		t.Fatalf("ConfStateAt(7): %v", err)
 	}
 
-	// Storage now claims an older snapshot (first index 4, snapshot at 3).
-	st.firstIdx = 4
+	// Storage now reports an older snapshot (index 3) than the base held (6).
+	st.older = &Snapshot{Index: 3, Term: 1, Conf: ConfState{Voters: []NodeID{1, 2, 3}}}
 	if _, err := n.ConfStateAt(7); err == nil {
 		t.Fatal("ConfStateAt accepted a snapshot older than the base it already holds")
 	}
-	st.firstIdx = 0
+	st.older = nil
 	got, err := n.ConfStateAt(6)
 	wantState(t, "ConfStateAt(6) after the rejected move", got, err, ConfState{Voters: []NodeID{1, 2, 3, 4}})
 }
