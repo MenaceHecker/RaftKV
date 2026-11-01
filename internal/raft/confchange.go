@@ -62,20 +62,60 @@ func containsConfChange(entries []Entry) bool {
 	return false
 }
 
-func (n *Node) rebuildConfig() error {
-	conf := n.baseConf.clone()
-	jointAt := Index(0)
-
-	first := n.log.firstIndex()
-	last := n.log.lastIndex()
-	if last < first {
-		n.adoptConfig(conf)
+// refreshBase makes baseConf the configuration at the snapshot the stored log
+// sits on. The base only moves when storage's first index does (a local
+// compaction or a restored snapshot), so the common case costs nothing: a disk
+// Snapshot() loads the snapshot data and must not run on every rebuild.
+func (n *Node) refreshBase() error {
+	wanted := n.storage.FirstIndex() - 1
+	if n.baseLoaded && wanted == n.baseIndex {
 		return nil
 	}
 
-	entries, err := n.log.entries(first, last+1)
+	idx, conf := Index(0), n.initialConf
+	snap, err := n.storage.Snapshot()
+	switch {
+	case errors.Is(err, ErrSnapshotUnavailable):
+	case err != nil:
+		return fmt.Errorf("raft: reading the snapshot base: %w: %w", ErrStorage, err)
+	default:
+		idx = snap.Index
+		if !snap.Conf.IsEmpty() {
+			conf = configFromState(snap.Conf)
+		}
+	}
+
+	if n.baseLoaded && idx < n.baseIndex {
+		return fmt.Errorf("raft: storage snapshot at index %d is older than the configuration base at %d: %w",
+			idx, n.baseIndex, ErrStorage)
+	}
+	n.baseConf, n.baseIndex, n.baseLoaded = conf, idx, true
+	return nil
+}
+
+// replayConfig derives the configuration as of index upTo from the base plus
+// the configuration entries in (baseIndex, upTo]. jointAt is the index of the
+// entry that opened the joint phase it ends in, or 0 when it is not joint.
+func (n *Node) replayConfig(upTo Index) (conf config, jointAt Index, err error) {
+	conf = n.baseConf.clone()
+	if upTo <= n.baseIndex {
+		return conf, 0, nil
+	}
+
+	// Replay starts at the log's first index. With a stored snapshot as the base
+	// that must be baseIndex+1: if it is higher, configuration entries between
+	// the snapshot and the first stored entry are missing, and carrying on would
+	// adopt a possibly wrong configuration, so fail instead. The lenient start
+	// is only for baseIndex == 0, where storage may report a first index without
+	// holding a snapshot (the initial configuration is then all there is).
+	first := n.log.firstIndex()
+	if n.baseIndex > 0 && first > n.baseIndex+1 {
+		return config{}, 0, fmt.Errorf("raft: entries %d..%d between the snapshot and the log are missing: %w",
+			n.baseIndex+1, first-1, ErrStorage)
+	}
+	entries, err := n.log.entries(max(n.baseIndex+1, first), upTo+1)
 	if err != nil {
-		return fmt.Errorf("raft: rebuilding configuration: %w", err)
+		return config{}, 0, fmt.Errorf("raft: rebuilding configuration: %w", err)
 	}
 
 	for _, e := range entries {
@@ -84,7 +124,7 @@ func (n *Node) rebuildConfig() error {
 		}
 		cc, err := DecodeConfChange(e.Data)
 		if err != nil {
-			return fmt.Errorf("raft: configuration change at index %d is unreadable: %w", e.Index, err)
+			return config{}, 0, fmt.Errorf("raft: configuration change at index %d is unreadable: %w", e.Index, err)
 		}
 
 		next, err := applyConfChange(conf, cc)
@@ -99,10 +139,47 @@ func (n *Node) rebuildConfig() error {
 			jointAt = 0
 		}
 	}
+	return conf, jointAt, nil
+}
 
+func (n *Node) rebuildConfig() error {
+	if err := n.refreshBase(); err != nil {
+		return err
+	}
+	conf, jointAt, err := n.replayConfig(n.log.lastIndex())
+	if err != nil {
+		return err
+	}
 	n.jointEntryIndex = jointAt
 	n.adoptConfig(conf)
 	return nil
+}
+
+// ConfStateAt returns the configuration as of log index i: the snapshot's Conf
+// at the snapshot index, plus the configuration entries above it up to i. It is
+// what a snapshot at i must store, as opposed to ConfState, which also reflects
+// entries appended above i that may never commit (Raft §6: a server uses the
+// latest configuration in its log, but a snapshot covers only what it includes).
+//
+// Below the snapshot the entries are gone and the answer cannot be derived, so
+// it returns ErrCompacted rather than guess; above the last index it returns
+// ErrUnavailable. With no stored snapshot the base is the initial configuration
+// at index 0.
+func (n *Node) ConfStateAt(i Index) (ConfState, error) {
+	if err := n.refreshBase(); err != nil {
+		return ConfState{}, err
+	}
+	if i < n.baseIndex {
+		return ConfState{}, fmt.Errorf("raft: configuration at index %d: %w", i, ErrCompacted)
+	}
+	if last := n.log.lastIndex(); i > last {
+		return ConfState{}, fmt.Errorf("raft: configuration at index %d, the log ends at %d: %w", i, last, ErrUnavailable)
+	}
+	conf, _, err := n.replayConfig(i)
+	if err != nil {
+		return ConfState{}, err
+	}
+	return conf.toState(), nil
 }
 
 func (n *Node) maybeFinishConfChange() error {
@@ -164,13 +241,4 @@ func (c config) clone() config {
 		out.incoming = copySet(c.incoming)
 	}
 	return out
-}
-
-// ConfStateAt returns the configuration as of log index i: the snapshot base
-// plus the configuration entries above it up to i.
-//
-// Stub: the behaviour lands in the fix commit, so that the tests for it fail
-// by assertion rather than by compile error.
-func (n *Node) ConfStateAt(_ Index) (ConfState, error) {
-	return ConfState{}, errors.New("raft: ConfStateAt is not implemented")
 }

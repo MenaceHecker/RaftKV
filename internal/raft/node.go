@@ -124,7 +124,14 @@ type Node struct {
 
 	jointEntryIndex Index
 
-	baseConf config
+	// initialConf is the configuration at index 0: what the node was built
+	// with, immutable. baseConf is the configuration at baseIndex, the snapshot
+	// the stored log sits on (the initial configuration while there is none).
+	// Every derived configuration starts from baseConf (Raft §6, §7).
+	initialConf config
+	baseConf    config
+	baseIndex   Index
+	baseLoaded  bool
 
 	state  State
 	term   Term
@@ -196,7 +203,7 @@ func NewNode(cfg Config) (*Node, error) {
 	n := &Node{
 		id:                  cfg.ID,
 		conf:                base.clone(),
-		baseConf:            base,
+		initialConf:         base,
 		state:               Follower,
 		term:                hs.Term,
 		vote:                hs.VotedFor,
