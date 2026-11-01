@@ -1,6 +1,9 @@
 package raft
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 func (n *Node) ProposeConfChange(cc ConfChange) error {
 	if n.state != Leader {
@@ -161,4 +164,13 @@ func (c config) clone() config {
 		out.incoming = copySet(c.incoming)
 	}
 	return out
+}
+
+// ConfStateAt returns the configuration as of log index i: the snapshot base
+// plus the configuration entries above it up to i.
+//
+// Stub: the behaviour lands in the fix commit, so that the tests for it fail
+// by assertion rather than by compile error.
+func (n *Node) ConfStateAt(_ Index) (ConfState, error) {
+	return ConfState{}, errors.New("raft: ConfStateAt is not implemented")
 }
