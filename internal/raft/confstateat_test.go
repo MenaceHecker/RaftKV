@@ -551,3 +551,65 @@ func TestSnapshotConfTargetedSchedule(t *testing.T) {
 		s.opRestart(id)
 	}
 }
+
+// gappedStorage reports a first index above the snapshot's, i.e. the entries
+// between the snapshot and its first entry are missing.
+type gappedStorage struct {
+	*MemoryStorage
+	first Index
+}
+
+func (s *gappedStorage) FirstIndex() Index {
+	if s.first != 0 {
+		return s.first
+	}
+	return s.MemoryStorage.FirstIndex()
+}
+
+func (s *gappedStorage) Entries(lo, hi Index) ([]Entry, error) {
+	if s.first != 0 && lo < s.first && lo < hi {
+		return nil, ErrCompacted
+	}
+	return s.MemoryStorage.Entries(lo, hi)
+}
+
+// With a real stored snapshot as the base, configuration entries between it and
+// the log's first index would be silently missing; continuing could adopt a
+// wrong configuration, so both rebuilding and ConfStateAt must fail.
+func TestGapAboveTheSnapshotIsAnErrorNotAGuess(t *testing.T) {
+	newGapped := func(t *testing.T, first Index) *gappedStorage {
+		t.Helper()
+		mem := filledStorage(t, 12)
+		if err := mem.CreateSnapshot(4, nil, ConfState{Voters: []NodeID{1, 2, 3, 4}}); err != nil {
+			t.Fatalf("CreateSnapshot: %v", err)
+		}
+		return &gappedStorage{MemoryStorage: mem, first: first}
+	}
+
+	t.Run("starting a node", func(t *testing.T) {
+		_, err := NewNode(Config{
+			ID: 1, Peers: []NodeID{1, 2, 3}, ElectionTick: 10, HeartbeatTick: 1,
+			Storage: newGapped(t, 8), Rand: rand.New(rand.NewSource(1)), //nolint:gosec // deterministic test
+		})
+		if err == nil {
+			t.Fatal("NewNode accepted a log whose first index leaves a gap above the snapshot")
+		}
+		if !errors.Is(err, ErrStorage) {
+			t.Errorf("NewNode error = %v, want it to wrap ErrStorage", err)
+		}
+	})
+
+	t.Run("ConfStateAt", func(t *testing.T) {
+		st := newGapped(t, 0)
+		n := newOverStorage(t, st)
+		st.first = 8
+
+		got, err := n.ConfStateAt(10)
+		if err == nil {
+			t.Fatalf("ConfStateAt(10) = %s over a gap, want an error", got)
+		}
+		if !errors.Is(err, ErrStorage) {
+			t.Errorf("ConfStateAt(10) error = %v, want it to wrap ErrStorage", err)
+		}
+	})
+}
