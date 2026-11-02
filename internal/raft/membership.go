@@ -55,7 +55,23 @@ var (
 	ErrEmptyConfiguration = errors.New("raft: configuration change would leave no voters")
 
 	ErrNoChange = errors.New("raft: configuration change has no effect")
+
+	// ErrConfChangePending is returned by ProposeConfChange while a previous
+	// configuration entry is uncommitted, or before the leader has committed an
+	// entry in its own term. Use errors.Is; the message says which. It wraps
+	// ErrConfChangeInFlight, so callers that match that sentinel keep working.
+	ErrConfChangePending = errors.New("raft: configuration change is pending")
 )
+
+// pendingError carries a specific message while matching ErrConfChangePending
+// and, through it, ErrConfChangeInFlight.
+type pendingError struct{ msg string }
+
+func (e *pendingError) Error() string { return e.msg }
+
+func (e *pendingError) Is(target error) bool { return target == ErrConfChangePending }
+
+func (e *pendingError) Unwrap() error { return ErrConfChangeInFlight }
 
 func (c config) enterJoint(cc ConfChange) (config, error) {
 	if c.inJoint() {
