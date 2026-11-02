@@ -10,6 +10,21 @@ func (n *Node) ProposeConfChange(cc ConfChange) error {
 		return ErrNotLeader
 	}
 
+	// Raft §6 / dissertation §4.1: at most one configuration change may be
+	// pending. A configuration entry takes effect on append here, so the test is
+	// against the commit index (etcd checks applied because it applies on apply).
+	if n.confChangePending() {
+		return &pendingError{msg: fmt.Sprintf(
+			"configuration change at index %d is pending; wait for it to commit, then retry",
+			n.lastConfIndex)}
+	}
+	// Dissertation §4.1 / §6.4: a new leader does not know its predecessor's
+	// commit index until it commits an entry of its own term, so an entry above
+	// its commit index may in fact be committed, or one below may not be known.
+	if !n.hasCommittedInCurrentTerm() {
+		return &pendingError{msg: "this leader has not yet committed an entry in its term; retry shortly"}
+	}
+
 	if cc.Type == ConfChangeLeaveJoint {
 		if !n.conf.inJoint() {
 			return ErrNotInJoint
@@ -53,6 +68,12 @@ func (n *Node) ProposeConfChange(cc ConfChange) error {
 	return nil
 }
 
+// confChangePending reports whether a configuration entry sits above the commit
+// index: the previous change has not committed.
+func (n *Node) confChangePending() bool {
+	return n.lastConfIndex > n.log.committed
+}
+
 func containsConfChange(entries []Entry) bool {
 	for _, e := range entries {
 		if e.Type == EntryConfChange {
@@ -94,9 +115,10 @@ func (n *Node) refreshBase() error {
 }
 
 // replayConfig derives the configuration as of index upTo from the base plus
-// the configuration entries in (baseIndex, upTo]. jointAt is the index of the
-// entry that opened the joint phase it ends in, or 0 when it is not joint.
-func (n *Node) replayConfig(upTo Index) (conf config, jointAt Index, err error) {
+// the configuration entries in (baseIndex, upTo]. lastConf is the index of the
+// newest configuration entry in that range, 0 if there is none; it counts every
+// decodable entry, including one whose application is skipped.
+func (n *Node) replayConfig(upTo Index) (conf config, lastConf Index, err error) {
 	conf = n.baseConf.clone()
 	if upTo <= n.baseIndex {
 		return conf, 0, nil
@@ -127,30 +149,26 @@ func (n *Node) replayConfig(upTo Index) (conf config, jointAt Index, err error) 
 			return config{}, 0, fmt.Errorf("raft: configuration change at index %d is unreadable: %w", e.Index, err)
 		}
 
+		lastConf = e.Index
+
 		next, err := applyConfChange(conf, cc)
 		if err != nil {
 			continue
 		}
 		conf = next
-
-		if conf.inJoint() {
-			jointAt = e.Index
-		} else {
-			jointAt = 0
-		}
 	}
-	return conf, jointAt, nil
+	return conf, lastConf, nil
 }
 
 func (n *Node) rebuildConfig() error {
 	if err := n.refreshBase(); err != nil {
 		return err
 	}
-	conf, jointAt, err := n.replayConfig(n.log.lastIndex())
+	conf, lastConf, err := n.replayConfig(n.log.lastIndex())
 	if err != nil {
 		return err
 	}
-	n.jointEntryIndex = jointAt
+	n.lastConfIndex = lastConf
 	n.adoptConfig(conf)
 	return nil
 }
@@ -183,14 +201,13 @@ func (n *Node) ConfStateAt(i Index) (ConfState, error) {
 }
 
 func (n *Node) maybeFinishConfChange() error {
+	// Raft §6: the joint configuration is left once its entry has committed.
+	// Not proposed while the leave is itself uncommitted: appending it clears
+	// the joint flag, so a retry after a leadership change is the only repeat.
 	if n.state != Leader || !n.conf.inJoint() {
 		return nil
 	}
-	if n.jointEntryIndex == 0 || n.log.committed < n.jointEntryIndex {
-		return nil
-	}
-
-	if !n.hasCommittedInCurrentTerm() {
+	if n.lastConfIndex > n.log.committed || !n.hasCommittedInCurrentTerm() {
 		return nil
 	}
 
