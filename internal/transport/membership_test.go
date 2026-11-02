@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -149,9 +150,18 @@ func TestARemovedNodeLosesItsLink(t *testing.T) {
 		return false
 	})
 
-	if err := leader.RemoveNode(ctx, 4); err != nil {
-		t.Fatalf("RemoveNode: %v", err)
-	}
+	// The automatic leave after AddNode is a pending change until it commits
+	// (T3.16); retry only while the node says so.
+	c.eventually("the leave to commit and RemoveNode to be accepted", func() bool {
+		err := leader.RemoveNode(ctx, 4)
+		if errors.Is(err, raft.ErrConfChangePending) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("RemoveNode: %v", err)
+		}
+		return true
+	})
 
 	c.eventually("the leader to drop the link to the removed node", func() bool {
 		for _, st := range tr.Stats() {
