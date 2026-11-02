@@ -141,10 +141,16 @@ func TestCompletingATransitionLeavesTheNewConfiguration(t *testing.T) {
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4, Addr: "h:4"}); err != nil {
 		t.Fatalf("adding node 4: %v", err)
 	}
-	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); err != nil {
-		t.Fatalf("leaving joint: %v", err)
+	if !n.hasCommittedInCurrentTerm() {
+		t.Fatal("the leader has not committed an entry in its term; the fixture is wrong")
 	}
+	// The leave is no longer proposed by hand: the commit of the joint entry
+	// appends it (T3.16, one pending change at a time).
 	c.deliverAll()
+
+	if got := countLeaveEntries(c.logEntries(n.ID())); got != 1 {
+		t.Fatalf("the leader's log holds %d leave entries, want exactly one automatic leave", got)
+	}
 
 	for _, id := range c.ids {
 		f := c.node(id)
@@ -250,7 +256,7 @@ func TestOnlyOneChangeMayBeInFlight(t *testing.T) {
 }
 
 func TestLeaveJointRequiresATransitionToBeOpen(t *testing.T) {
-	_, n := leaderWithConfChange(t, 3, 806)
+	c, n := leaderWithConfChange(t, 3, 806)
 
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); !errors.Is(err, ErrNotInJoint) {
 		t.Fatalf("leaving with no transition open gave %v, want ErrNotInJoint", err)
@@ -259,8 +265,10 @@ func TestLeaveJointRequiresATransitionToBeOpen(t *testing.T) {
 	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeAddNode, NodeID: 4}); err != nil {
 		t.Fatalf("adding a node: %v", err)
 	}
-	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); err != nil {
-		t.Fatalf("leaving an open transition: %v", err)
+	// Committing the joint entry appends the leave; afterwards no transition is open.
+	c.deliverAll()
+	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); !errors.Is(err, ErrNotInJoint) {
+		t.Fatalf("leaving after the transition completed gave %v, want ErrNotInJoint", err)
 	}
 }
 
@@ -326,10 +334,10 @@ func TestRemovingANodeCompletesATransition(t *testing.T) {
 		t.Fatal("the departing node stopped being a voter before the transition completed")
 	}
 
-	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); err != nil {
-		t.Fatalf("leaving joint: %v", err)
-	}
 	c.deliverAll()
+	if got := countLeaveEntries(c.logEntries(n.ID())); got != 1 {
+		t.Fatalf("the leader's log holds %d leave entries, want exactly one automatic leave", got)
+	}
 
 	if n.conf.hasVoter(victim) {
 		t.Fatalf("node %d is still a voter after the removal completed; members = %v",
@@ -376,9 +384,9 @@ func TestLeaderDropsProgressForRemovedMembers(t *testing.T) {
 			"while it still counts toward the old majority")
 	}
 
-	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); err != nil {
-		t.Fatalf("leaving joint: %v", err)
-	}
+	// Delivery commits the joint entry, which appends the leave; appending it
+	// deletes the departed node's progress (adoptConfig).
+	c.deliverAll()
 
 	if n.progress[victim] != nil {
 		t.Fatalf("node %d still has replication state after leaving the cluster", victim)
@@ -489,4 +497,19 @@ func TestTransitionWaitsEvenWhenCommitAdvancesBelowIt(t *testing.T) {
 	if n.InJointConfiguration() {
 		t.Fatal("the leader did not finish the transition once its entry committed")
 	}
+}
+
+// countLeaveEntries counts the leave-joint configuration entries in a log.
+func countLeaveEntries(entries []Entry) int {
+	count := 0
+	for _, e := range entries {
+		if e.Type != EntryConfChange {
+			continue
+		}
+		cc, err := DecodeConfChange(e.Data)
+		if err == nil && cc.Type == ConfChangeLeaveJoint {
+			count++
+		}
+	}
+	return count
 }

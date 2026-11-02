@@ -385,9 +385,19 @@ func TestAddAndRemoveNodeThroughTheAPI(t *testing.T) {
 		t.Fatalf("node 4 is missing from the membership: %v", members.GetMembers())
 	}
 
-	if _, err := admin.RemoveNode(ctx, &raftkvv1.RemoveNodeRequest{NodeId: 4}); err != nil {
-		t.Fatalf("RemoveNode: %v", err)
-	}
+	// AddNode returns when the joint entry commits; the automatic leave that
+	// follows is itself a pending change (T3.16), so the next change is refused
+	// with FailedPrecondition until it commits. Retry only on that code.
+	c.eventually("the leave to commit and RemoveNode to be accepted", func() bool {
+		_, err := admin.RemoveNode(ctx, &raftkvv1.RemoveNodeRequest{NodeId: 4})
+		if status.Code(err) == codes.FailedPrecondition {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("RemoveNode: %v", err)
+		}
+		return true
+	})
 	c.eventually("the member to be removed", func() bool {
 		got, err := admin.ListMembers(ctx, &raftkvv1.ListMembersRequest{})
 		return err == nil && len(got.GetMembers()) == 3 && !got.GetJoint()

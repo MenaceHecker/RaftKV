@@ -109,6 +109,11 @@ func (s *KVServer) translate(err error) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		return status.Error(codes.DeadlineExceeded, err.Error())
 
+	case errors.Is(err, raft.ErrConfChangePending):
+		// The message says whether a change is uncommitted (wait for it) or the
+		// leader has not yet committed in its term (retry shortly).
+		return status.Error(codes.FailedPrecondition, err.Error())
+
 	case errors.Is(err, raft.ErrConfChangeInFlight):
 		return status.Error(codes.FailedPrecondition,
 			"a membership change is already in progress")

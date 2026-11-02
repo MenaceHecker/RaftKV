@@ -181,10 +181,11 @@ func TestStaleConfChangeTailMembershipAndQuorum(t *testing.T) {
 
 // TestStaleLeaveJointTailMembershipAndQuorum (T3.11 test 3f): the uncommitted tail
 // holds add-F at 6 and the entry that leaves the joint configuration at 7, so D
-// is plain A-F (4 acks). A leader can write that tail: the automatic leave
-// (confchange.go maybeFinishConfChange) waits for the joint entry to commit, but
-// ProposeConfChange only requires n.conf.inJoint() for a leave (confchange.go:10-13),
-// and internal/node passes a client's change straight to it (node.go:645).
+// is plain A-F (4 acks). Before T3.16 a leader could write that tail: the
+// automatic leave (confchange.go maybeFinishConfChange) waits for the joint entry
+// to commit, but ProposeConfChange accepted a leave whenever the configuration was
+// joint. It now refuses a change while one is uncommitted (ErrConfChangePending),
+// so this tail is only what a log can hold, which is what the test feeds in.
 func TestStaleLeaveJointTailMembershipAndQuorum(t *testing.T) {
 	staleConfTail(t, map[raft.Index]raft.ConfChange{
 		6: {Type: raft.ConfChangeAddNode, NodeID: 6},

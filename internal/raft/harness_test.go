@@ -16,6 +16,7 @@ type cluster struct {
 	t *testing.T
 
 	ids      []NodeID
+	voters   []NodeID
 	nodes    map[NodeID]*Node
 	storages map[NodeID]*MemoryStorage
 
@@ -39,6 +40,14 @@ type clusterOpts struct {
 	maxAppendBytes int
 	checkQuorum    bool
 	preVote        bool
+
+	// voters is the initial configuration of the cluster. Empty means every node
+	// is a voter. A node outside it is a real node (in c.ids and c.nodes) that
+	// is built with the voters plus itself, as an operator would start a node
+	// that is about to be added: NewNode requires Peers to contain its own ID.
+	// Its own view of the cluster is then not the leader's; only leaders
+	// matter to the tests that use this. Such a node must not campaign.
+	voters []NodeID
 }
 
 func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
@@ -56,9 +65,15 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 		ids[i] = NodeID(i + 1)
 	}
 
+	peers := ids
+	if len(opts.voters) > 0 {
+		peers = opts.voters
+	}
+
 	c := &cluster{
 		t:          t,
 		ids:        ids,
+		voters:     peers,
 		nodes:      make(map[NodeID]*Node, size),
 		storages:   make(map[NodeID]*MemoryStorage, size),
 		applied:    make(map[NodeID][]Entry, size),
@@ -72,7 +87,7 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 
 		node, err := NewNode(Config{
 			ID:             id,
-			Peers:          ids,
+			Peers:          c.peersFor(id, peers),
 			ElectionTick:   opts.electionTick,
 			HeartbeatTick:  opts.heartbeatTick,
 			PreVote:        opts.preVote,
@@ -90,6 +105,15 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 	}
 
 	return c
+}
+
+func (c *cluster) peersFor(id NodeID, voters []NodeID) []NodeID {
+	for _, v := range voters {
+		if v == id {
+			return voters
+		}
+	}
+	return append(append([]NodeID(nil), voters...), id)
 }
 
 func (c *cluster) node(id NodeID) *Node {
@@ -224,7 +248,7 @@ func (c *cluster) restart(id NodeID, opts clusterOpts) {
 
 	node, err := NewNode(Config{
 		ID:             id,
-		Peers:          c.ids,
+		Peers:          c.peersFor(id, c.voters),
 		ElectionTick:   opts.electionTick,
 		HeartbeatTick:  opts.heartbeatTick,
 		PreVote:        opts.preVote,
