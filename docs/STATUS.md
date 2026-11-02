@@ -147,3 +147,20 @@ OK = code does it. GAP = differs from the RUNBOOK. UNKNOWN = cannot tell by read
 - **What the tests do not cover:** tests 2 and 4b assert `ConfState` (and the acknowledgements it implies), not an election or commit
   carried out by the node; those are pinned at the raft level. 4b models the lagging follower as a node with an emptied data directory.
   3b uses a leader removing itself, because the joint phase of `Add 4` needs node 4. Test 3a (Leave already appended) passed before the fix.
+
+## 9. T3.16 findings (branch `fix/t3-16-single-pending-confchange`, stacked on `feat/t3-17-snapshot-conf`)
+- **Fixed here: a second configuration change while one is uncommitted.** `ProposeConfChange` refused only when the configuration was
+  joint, so a `Leave` before the joint entry committed, or an `Add`/`Remove` while the automatic leave was uncommitted, was accepted.
+  `lastConfIndex` (replacing `jointEntryIndex`) is now derived by `rebuildConfig` for every decodable configuration entry, and a change is
+  refused with `ErrConfChangePending` while it is above the commit index or before the leader has committed in its term. The automatic
+  leave no longer depends on `jointEntryIndex`, so a snapshot with a joint `Conf` and no config entry in the suffix also leaves.
+  `TestChainedUncommittedChangesCannotBuildDisjointQuorums` showed two nodes committing different entries at index 2 before the fix.
+- **Behaviour change visible to clients:** `AddNode` returns when the joint entry commits; an `AddNode`/`RemoveNode` immediately after is
+  refused with `FailedPrecondition` until the automatic leave commits. `ListMembers` reports `joint=false` as soon as the leave is
+  *appended*, which is before it commits. Two transport tests now retry on that refusal (human decision).
+- **Not fixed: a node outside its own configuration can campaign and win.** `becomeLeader` dereferences `n.progress[n.id]`
+  (`internal/raft/node.go`), which is nil for a node whose configuration lacks itself, so a removed node that times out can panic. Found by
+  the random schedule in `TestAtMostOnePendingConfEntry`, which therefore does not tick such nodes. Needs its own card.
+- **Not done from the card:** test 5b/5c (pending state across snapshot install, joint snapshot with no entry), the 4(a-c,e) variants of
+  test 4, and the additive chaos scenario. The core covers 5b/5c by construction (`lastConfIndex` is assigned unconditionally) but no test
+  pins it. T3.17 test 3 (card commit 10) is also not moved.

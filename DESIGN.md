@@ -229,6 +229,15 @@ configuration in which both the old and new majorities must agree, and a second
 entry leaves it once the first commits. A leader removed from the configuration
 stands down rather than continuing to issue orders to a cluster it has left.
 
+At most one configuration change is pending at a time (paper §6, dissertation
+§4.1). A change is pending while its entry is above the commit index, and the
+leader refuses another (`ErrConfChangePending`, mapped to `FailedPrecondition`)
+until it commits, and also until the leader has committed an entry of its own
+term. The check is against the commit index because a configuration takes effect
+on append here. `AddNode` returns when the joint entry commits; the automatic
+leave is appended in that same step, so a change issued right after `AddNode` is
+refused until the leave commits and the caller retries.
+
 New members' addresses travel in the configuration change, and the transport
 learns them from it. This has to happen when the entry is *appended*, not when
 it commits: growing a one node cluster produces a joint configuration needing a
