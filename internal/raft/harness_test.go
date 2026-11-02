@@ -16,6 +16,7 @@ type cluster struct {
 	t *testing.T
 
 	ids      []NodeID
+	voters   []NodeID
 	nodes    map[NodeID]*Node
 	storages map[NodeID]*MemoryStorage
 
@@ -64,19 +65,20 @@ func newCluster(t *testing.T, size int, opts clusterOpts) *cluster {
 		ids[i] = NodeID(i + 1)
 	}
 
+	peers := ids
+	if len(opts.voters) > 0 {
+		peers = opts.voters
+	}
+
 	c := &cluster{
 		t:          t,
 		ids:        ids,
+		voters:     peers,
 		nodes:      make(map[NodeID]*Node, size),
 		storages:   make(map[NodeID]*MemoryStorage, size),
 		applied:    make(map[NodeID][]Entry, size),
 		readStates: make(map[NodeID][]ReadState, size),
 		snapshots:  make(map[NodeID][]*Snapshot, size),
-	}
-
-	peers := ids
-	if len(opts.voters) > 0 {
-		peers = opts.voters
 	}
 
 	for _, id := range ids {
@@ -246,7 +248,7 @@ func (c *cluster) restart(id NodeID, opts clusterOpts) {
 
 	node, err := NewNode(Config{
 		ID:             id,
-		Peers:          c.ids,
+		Peers:          c.peersFor(id, c.voters),
 		ElectionTick:   opts.electionTick,
 		HeartbeatTick:  opts.heartbeatTick,
 		PreVote:        opts.preVote,
