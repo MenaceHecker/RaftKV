@@ -357,11 +357,20 @@ func TestAddAndRemoveNodeThroughTheAPI(t *testing.T) {
 
 	admin := c.cluster(leaderID)
 
-	if _, err := admin.AddNode(ctx, &raftkvv1.AddNodeRequest{
-		NodeId: 4, Address: "127.0.0.1:9004",
-	}); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	// A fresh leader refuses changes until it commits an entry in its term
+	// (T3.16); retry only on that code.
+	c.eventually("the leader to accept AddNode", func() bool {
+		_, err := admin.AddNode(ctx, &raftkvv1.AddNodeRequest{
+			NodeId: 4, Address: "127.0.0.1:9004",
+		})
+		if status.Code(err) == codes.FailedPrecondition {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		return true
+	})
 
 	c.eventually("the new member to appear in the membership", func() bool {
 		got, err := admin.ListMembers(ctx, &raftkvv1.ListMembersRequest{})

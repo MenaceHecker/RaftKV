@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -165,6 +166,25 @@ func (c *grpcCluster) eventually(what string, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	c.t.Fatalf("timed out waiting for %s\n%s", what, c.dump())
+}
+
+// addNode asks the leader to add a member. A fresh leader refuses configuration
+// changes until it has committed an entry in its own term (dissertation §4.1,
+// T3.16), so retry only while the refusal is ErrConfChangePending; any other
+// error fails the test.
+func (c *grpcCluster) addNode(ctx context.Context, leader *node.Node, id raft.NodeID) {
+	c.t.Helper()
+
+	c.eventually("the leader to accept AddNode", func() bool {
+		err := leader.AddNode(ctx, id, c.addrs[id])
+		if errors.Is(err, raft.ErrConfChangePending) {
+			return false
+		}
+		if err != nil {
+			c.t.Fatalf("AddNode: %v", err)
+		}
+		return true
+	})
 }
 
 func (c *grpcCluster) awaitLeader() *node.Node {

@@ -82,9 +82,7 @@ func TestANodeAddedAtRuntimeReceivesTheLog(t *testing.T) {
 	}
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 
 	c.eventually("the added node to catch up with the leader", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
@@ -113,9 +111,7 @@ func TestASingleNodeClusterCanGrow(t *testing.T) {
 	defer cancel()
 
 	joiner := c.joinNode(2)
-	if err := leader.AddNode(ctx, 2, c.addrs[2]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 2)
 
 	c.eventually("the second node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
@@ -136,9 +132,7 @@ func TestARemovedNodeLosesItsLink(t *testing.T) {
 	defer cancel()
 
 	c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 
 	tr := c.transports[leader.Status().ID]
 	c.eventually("the leader to hold a link to the added node", func() bool {
@@ -203,9 +197,7 @@ func TestAMemberAddedAfterCompactionCatchesUpBySnapshot(t *testing.T) {
 	}
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 
 	c.eventually("the added node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
@@ -291,9 +283,7 @@ func TestARestartedNodeRediscoversARuntimeMember(t *testing.T) {
 	defer cancel()
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 	c.eventually("the added node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})
@@ -339,9 +329,7 @@ func TestARestartedNodeRediscoversARuntimeMemberFromItsSnapshot(t *testing.T) {
 	defer cancel()
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 	c.eventually("the added node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})
