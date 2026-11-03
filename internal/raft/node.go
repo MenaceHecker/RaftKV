@@ -122,9 +122,20 @@ type Node struct {
 
 	confSeq uint64
 
-	jointEntryIndex Index
+	// lastConfIndex is the index of the newest configuration entry in the log
+	// above the snapshot, 0 if there is none. It is derived by rebuildConfig on
+	// every append, truncation, snapshot install and restart. A change is
+	// pending while it is above the commit index (Raft paper §6).
+	lastConfIndex Index
 
-	baseConf config
+	// initialConf is the configuration at index 0: what the node was built
+	// with, immutable. baseConf is the configuration at baseIndex, the snapshot
+	// the stored log sits on (the initial configuration while there is none).
+	// Every derived configuration starts from baseConf (Raft §6, §7).
+	initialConf config
+	baseConf    config
+	baseIndex   Index
+	baseLoaded  bool
 
 	state  State
 	term   Term
@@ -196,7 +207,7 @@ func NewNode(cfg Config) (*Node, error) {
 	n := &Node{
 		id:                  cfg.ID,
 		conf:                base.clone(),
-		baseConf:            base,
+		initialConf:         base,
 		state:               Follower,
 		term:                hs.Term,
 		vote:                hs.VotedFor,

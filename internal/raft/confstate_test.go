@@ -186,9 +186,6 @@ func TestConfStateReflectsLiveMembershipChanges(t *testing.T) {
 		t.Fatalf("the new member's address was not carried: %v", during.Addrs)
 	}
 
-	if err := n.ProposeConfChange(ConfChange{Type: ConfChangeLeaveJoint}); err != nil {
-		t.Fatalf("leaving joint: %v", err)
-	}
 	c.deliverAll()
 
 	after := n.ConfState()

@@ -80,9 +80,6 @@ func (n *Node) restore(snap Snapshot) error {
 	n.log.committed = snap.Index
 	n.log.applied = snap.Index
 
-	if !snap.Conf.IsEmpty() {
-		n.baseConf = configFromState(snap.Conf)
-	}
 	if err := n.rebuildConfig(); err != nil {
 		return err
 	}

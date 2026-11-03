@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -81,9 +82,7 @@ func TestANodeAddedAtRuntimeReceivesTheLog(t *testing.T) {
 	}
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 
 	c.eventually("the added node to catch up with the leader", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
@@ -112,9 +111,7 @@ func TestASingleNodeClusterCanGrow(t *testing.T) {
 	defer cancel()
 
 	joiner := c.joinNode(2)
-	if err := leader.AddNode(ctx, 2, c.addrs[2]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 2)
 
 	c.eventually("the second node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
@@ -135,9 +132,7 @@ func TestARemovedNodeLosesItsLink(t *testing.T) {
 	defer cancel()
 
 	c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 
 	tr := c.transports[leader.Status().ID]
 	c.eventually("the leader to hold a link to the added node", func() bool {
@@ -149,9 +144,18 @@ func TestARemovedNodeLosesItsLink(t *testing.T) {
 		return false
 	})
 
-	if err := leader.RemoveNode(ctx, 4); err != nil {
-		t.Fatalf("RemoveNode: %v", err)
-	}
+	// The automatic leave after AddNode is a pending change until it commits
+	// (T3.16); retry only while the node says so.
+	c.eventually("the leave to commit and RemoveNode to be accepted", func() bool {
+		err := leader.RemoveNode(ctx, 4)
+		if errors.Is(err, raft.ErrConfChangePending) {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("RemoveNode: %v", err)
+		}
+		return true
+	})
 
 	c.eventually("the leader to drop the link to the removed node", func() bool {
 		for _, st := range tr.Stats() {
@@ -193,9 +197,7 @@ func TestAMemberAddedAfterCompactionCatchesUpBySnapshot(t *testing.T) {
 	}
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 
 	c.eventually("the added node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
@@ -281,9 +283,7 @@ func TestARestartedNodeRediscoversARuntimeMember(t *testing.T) {
 	defer cancel()
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 	c.eventually("the added node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})
@@ -329,9 +329,7 @@ func TestARestartedNodeRediscoversARuntimeMemberFromItsSnapshot(t *testing.T) {
 	defer cancel()
 
 	joiner := c.joinNode(4)
-	if err := leader.AddNode(ctx, 4, c.addrs[4]); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	c.addNode(ctx, leader, 4)
 	c.eventually("the added node to catch up", func() bool {
 		return joiner.Status().Applied >= leader.Status().Applied
 	})

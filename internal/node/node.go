@@ -694,7 +694,11 @@ func (n *Node) compact() error {
 	if err != nil {
 		return fmt.Errorf("node: snapshotting the state machine: %w", err)
 	}
-	if err := n.storage.CreateSnapshot(applied, data, n.raft.ConfState()); err != nil {
+	conf, err := n.raft.ConfStateAt(applied)
+	if err != nil {
+		return fmt.Errorf("node: configuration at index %d: %w", applied, err)
+	}
+	if err := n.storage.CreateSnapshot(applied, data, conf); err != nil {
 		return fmt.Errorf("node: compacting: %w", err)
 	}
 	n.lastSnapshot = applied
@@ -713,7 +717,11 @@ func (n *Node) maybeSnapshot() {
 	if err != nil {
 		return
 	}
-	if err := n.storage.CreateSnapshot(applied, data, n.raft.ConfState()); err != nil {
+	conf, err := n.raft.ConfStateAt(applied)
+	if err != nil {
+		return
+	}
+	if err := n.storage.CreateSnapshot(applied, data, conf); err != nil {
 		return
 	}
 	n.lastSnapshot = applied

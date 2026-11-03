@@ -357,11 +357,20 @@ func TestAddAndRemoveNodeThroughTheAPI(t *testing.T) {
 
 	admin := c.cluster(leaderID)
 
-	if _, err := admin.AddNode(ctx, &raftkvv1.AddNodeRequest{
-		NodeId: 4, Address: "127.0.0.1:9004",
-	}); err != nil {
-		t.Fatalf("AddNode: %v", err)
-	}
+	// A fresh leader refuses changes until it commits an entry in its term
+	// (T3.16); retry only on that code.
+	c.eventually("the leader to accept AddNode", func() bool {
+		_, err := admin.AddNode(ctx, &raftkvv1.AddNodeRequest{
+			NodeId: 4, Address: "127.0.0.1:9004",
+		})
+		if status.Code(err) == codes.FailedPrecondition {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		return true
+	})
 
 	c.eventually("the new member to appear in the membership", func() bool {
 		got, err := admin.ListMembers(ctx, &raftkvv1.ListMembersRequest{})
@@ -385,9 +394,19 @@ func TestAddAndRemoveNodeThroughTheAPI(t *testing.T) {
 		t.Fatalf("node 4 is missing from the membership: %v", members.GetMembers())
 	}
 
-	if _, err := admin.RemoveNode(ctx, &raftkvv1.RemoveNodeRequest{NodeId: 4}); err != nil {
-		t.Fatalf("RemoveNode: %v", err)
-	}
+	// AddNode returns when the joint entry commits; the automatic leave that
+	// follows is itself a pending change (T3.16), so the next change is refused
+	// with FailedPrecondition until it commits. Retry only on that code.
+	c.eventually("the leave to commit and RemoveNode to be accepted", func() bool {
+		_, err := admin.RemoveNode(ctx, &raftkvv1.RemoveNodeRequest{NodeId: 4})
+		if status.Code(err) == codes.FailedPrecondition {
+			return false
+		}
+		if err != nil {
+			t.Fatalf("RemoveNode: %v", err)
+		}
+		return true
+	})
 	c.eventually("the member to be removed", func() bool {
 		got, err := admin.ListMembers(ctx, &raftkvv1.ListMembersRequest{})
 		return err == nil && len(got.GetMembers()) == 3 && !got.GetJoint()

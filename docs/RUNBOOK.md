@@ -34,7 +34,7 @@
 - Live demo URL up; the "kill leader" flow elects a new leader in under 3 seconds and the dashboard shows it.
 - Cost stays under the monthly ceiling in §10.9.
 
-**Non-goals:** dynamic membership change (stretch only), multi-Raft sharding, multi-region, Kubernetes, authentication for KV data beyond the demo guards.
+**Non-goals:** dynamic membership change (stretch only; note: the code has joint consensus with one pending change at a time, see docs/STATUS.md section 9), multi-Raft sharding, multi-region, Kubernetes, authentication for KV data beyond the demo guards.
 
 ### 1.1 Task 0: reconcile reality (do this first, read-only)
 
