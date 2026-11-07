@@ -811,7 +811,7 @@ func TestResetAndClearRaceWithExpiry(t *testing.T) {
 				f.Send([]raft.Message{msg(2, 1)})
 				expectTerms(t, "a new fault survives the old deadline", inner.terms(2), nil)
 
-				clock.Advance(238*time.Second + 999*time.Millisecond) // 239.999s
+				clock.Advance(118*time.Second + 999*time.Millisecond) // 121s -> 239.999s
 				f.Send([]raft.Message{msg(2, 2)})
 				expectTerms(t, "just before the new deadline at 240s", inner.terms(2), nil)
 
