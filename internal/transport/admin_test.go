@@ -328,7 +328,8 @@ func TestTokenOKWorks(t *testing.T) {
 		t.Errorf("Status node_id = %d, want 1", st.GetNodeId())
 	}
 
-	if _, err := r.admin.Pause(ctx, &raftkvv1.PauseRequest{DurationMs: 2500}); err != nil {
+	const pauseMs = 2500 // the wire unit; compared below as a duration, not waited on
+	if _, err := r.admin.Pause(ctx, &raftkvv1.PauseRequest{DurationMs: pauseMs}); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
 	if _, err := r.admin.SetPartition(ctx, &raftkvv1.SetPartitionRequest{Blocked: []uint64{2, 3}}); err != nil {
@@ -339,7 +340,7 @@ func TestTokenOKWorks(t *testing.T) {
 	}
 
 	pauses, _ := r.node.counts()
-	if len(pauses) != 1 || pauses[0] != 2500*time.Millisecond {
+	if len(pauses) != 1 || pauses[0] != time.Duration(pauseMs)*time.Millisecond {
 		t.Errorf("node saw pauses %v, want [2.5s]", pauses)
 	}
 	got := r.faults.got()
