@@ -76,12 +76,39 @@ func TestPauseWithCommittedEntriesAndPendingSnapshotAppliesOnce(t *testing.T) {
 	requirePaused(t, h.n, "after the backlog drained, with no resume and no clock movement")
 }
 
-// 19: ticks do nothing while paused, and after Resume the node is live with no
-// message ever arriving: it times out and starts a pre-vote on its own.
+// 19: the node stays live across a pause with no incoming traffic. A backlog of
+// committed entries drains by itself while paused (the apply wakeup must not be
+// lost), ticks do nothing while paused, and after Resume the node times out and
+// starts a pre-vote on its own. All messages arrive before the pause.
 func TestResumeWithNoIncomingTrafficIsLive(t *testing.T) {
-	h := newHarness(t, nil)
+	applying := make(chan struct{})
+	release := make(chan struct{})
+	var once, relOnce sync.Once
+	h := newHarness(t, func(cfg *Config, rec *recorder) {
+		cfg.MaxCommittedEntries = 1
+		rec.onApply = func() { once.Do(func() { close(applying); <-release }) }
+	})
+	releaseApply := func() { relOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseApply)
+
+	var entries []raft.Entry
+	for i := 1; i <= 5; i++ {
+		entries = append(entries, raft.Entry{Term: 1, Index: raft.Index(i), Type: raft.EntryNormal,
+			Data: putCmd(uint64(i), "k"+string(rune('0'+i)), byte(i))})
+	}
+	h.n.Step(raft.Message{Type: raft.MsgAppendRequest, From: 2, To: 1, Term: 1, CommitIndex: 5, Entries: entries})
+	select {
+	case <-applying:
+	case <-time.After(waitLimit):
+		t.Fatal("the node never started applying")
+	}
+
 	h.n.Pause(time.Minute)
 	requirePaused(t, h.n, "after Pause")
+	releaseApply()
+
+	h.await("the backlog to drain while paused, with no traffic", func(s Status) bool { return s.Applied == 5 })
+	requirePaused(t, h.n, "after the backlog drained")
 
 	for i := 0; i < 100; i++ {
 		h.tick()
@@ -124,6 +151,19 @@ func TestRequestsPendingAtPauseDoNotHangOrApplyTwice(t *testing.T) {
 	case <-done:
 	case <-time.After(waitLimit):
 		t.Fatal("Status hung while paused")
+	}
+	// Ticks while paused must do nothing. If they ran, the leader would send
+	// heartbeats and, with no acknowledgements for two election timeouts,
+	// CheckQuorum would depose it and fail the proposal.
+	sent := h.sink.len()
+	for i := 0; i < 40; i++ {
+		h.tick()
+	}
+	if got := h.sink.len(); got != sent {
+		t.Fatalf("a paused leader sent %d messages on ticks, want none", got-sent)
+	}
+	if st := h.n.Status(); st.State != raft.Leader || st.Term != term {
+		t.Fatalf("a paused leader changed to %s at term %d (was Leader at %d)", st.State, st.Term, term)
 	}
 	select {
 	case err := <-result:

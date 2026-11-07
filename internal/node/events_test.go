@@ -233,3 +233,52 @@ drain:
 		t.Fatalf("slow subscriber ended with %v, want ErrSubscriberOverflow", err)
 	}
 }
+
+// A subscriber ended for being slow gives its slot back: the count falls, and
+// the full set of MaxSubscribers can subscribe again.
+func TestDroppedSubscriberReleasesItsSlot(t *testing.T) {
+	h := newHarness(t, nil)
+
+	var subs []*Subscription
+	for i := 0; i < MaxSubscribers; i++ {
+		sub, err := h.n.Subscribe()
+		if err != nil {
+			t.Fatalf("subscriber %d refused: %v", i+1, err)
+		}
+		subs = append(subs, sub)
+	}
+	if _, err := h.n.Subscribe(); !errors.Is(err, ErrTooManySubscribers) {
+		t.Fatalf("at the cap: err = %v, want ErrTooManySubscribers", err)
+	}
+
+	// Nobody reads, so every buffer overflows and every subscriber is dropped.
+	for term := raft.Term(1); term <= SubscriberBuffer+1; term++ {
+		h.n.Step(raft.Message{Type: raft.MsgHeartbeat, From: 2, To: 1, Term: term})
+		h.await("the heartbeat to be handled", func(s Status) bool { return s.Term >= term })
+	}
+	for i, s := range subs {
+		select {
+		case _, ok := <-s.C:
+			for ok { // drain what was buffered, then see the close
+				_, ok = <-s.C
+			}
+		case <-time.After(waitLimit):
+			t.Fatalf("subscriber %d was never dropped", i)
+		}
+		if !errors.Is(s.Err(), ErrSubscriberOverflow) {
+			t.Fatalf("subscriber %d ended with %v, want ErrSubscriberOverflow", i, s.Err())
+		}
+	}
+
+	var again []*Subscription
+	for i := 0; i < MaxSubscribers; i++ {
+		sub, err := h.n.Subscribe()
+		if err != nil {
+			t.Fatalf("after the drops, subscriber %d of %d refused: %v (the slots were not released)", i+1, MaxSubscribers, err)
+		}
+		again = append(again, sub)
+	}
+	for _, s := range again {
+		s.Close()
+	}
+}
