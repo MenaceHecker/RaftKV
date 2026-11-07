@@ -34,9 +34,29 @@ big_timeout()   { printf 'package x\n\nimport "time"\n\nvar d = 5000 * time.Mill
 add_good_test() { printf 'package x\n\nimport "testing"\n\nfunc TestG(t *testing.T) {\n\trequire.Equal(t, 1, F())\n}\n' > good_test.go; }
 touch_code()    { printf 'package x\n\nfunc F() int { return 2 }\n' > code.go; }
 
+sleep_big()     { printf 'package x\n\nimport "time"\n\nfunc g() { time.Sleep(100*time.Second) }\n' > sleep_test.go; }
+ctx_big()       { printf 'package x\n\nimport (\n\t"context"\n\t"time"\n)\n\nfunc g() { context.WithTimeout(context.Background(), 300*time.Second) }\n' > ctx_test.go; }
+advance_big()   { printf 'package x
+
+import "time"
+
+func g(c *C) {
+	c.Advance(1); timeout := 100*time.Second
+}
+' > adv_test.go; }
+marker_ok()     { printf 'package x\n\nimport "time"\n\nvar d = 100 * time.Second // guard:fakeclock\n' > marker_test.go; }
+marker_sleep()  { printf 'package x\n\nimport "time"\n\nfunc g() { time.Sleep(100*time.Second) } // guard:fakeclock\n' > ms_test.go; }
+mult_before()   { printf 'package x\n\nimport "time"\n\nfunc g(c *C) { time.Sleep(100*time.Second); c.Advance(1) }\n' > mb_test.go; }
+
 run_case "t.Skip added exits 1"            1 add_skip
 run_case "assertions removed exits 1"      1 drop_asserts
 run_case "large timeout added exits 1"     1 big_timeout
+run_case "time.Sleep(100*time.Second) exits 1"   1 sleep_big
+run_case "raised context deadline exits 1"        1 ctx_big
+run_case "unmarked Advance + big duration exits 1" 1 advance_big
+run_case "guard:fakeclock marker exits 0"         0 marker_ok
+run_case "marker on a real Sleep still exits 1"   1 marker_sleep
+run_case "Sleep + Advance on one line exits 1"    1 mult_before
 run_case "new test with assertion exits 0" 0 add_good_test
 run_case "non-test change exits 0"         0 touch_code
 
