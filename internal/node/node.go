@@ -57,6 +57,9 @@ type Config struct {
 	MaxCommittedEntries int
 
 	MaxProposalBatch int
+
+	// Clock drives ticks and timers. Nil means the real clock.
+	Clock Clock
 }
 
 const (
@@ -86,6 +89,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.MaxProposalBatch == 0 {
 		c.MaxProposalBatch = DefaultMaxProposalBatch
+	}
+	if c.Clock == nil {
+		c.Clock = realClock{}
 	}
 }
 
@@ -359,7 +365,7 @@ func (n *Node) Get(ctx context.Context, key string) ([]byte, bool, error) {
 func (n *Node) run() {
 	defer close(n.donec)
 
-	ticker := time.NewTicker(n.cfg.TickInterval)
+	ticker := n.cfg.Clock.NewTicker(n.cfg.TickInterval)
 	defer ticker.Stop()
 
 	for {
@@ -368,7 +374,7 @@ func (n *Node) run() {
 			n.failAllPending(ErrStopped)
 			return
 
-		case <-ticker.C:
+		case <-ticker.C():
 			if err := n.raft.Tick(); err != nil {
 				n.failAllPending(fmt.Errorf("node: %w", err))
 				return
