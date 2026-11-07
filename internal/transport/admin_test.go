@@ -22,6 +22,7 @@ import (
 
 	"github.com/MenaceHecker/raftkv/internal/node"
 	"github.com/MenaceHecker/raftkv/internal/raft"
+	"github.com/MenaceHecker/raftkv/internal/statemachine"
 	"github.com/MenaceHecker/raftkv/internal/storage"
 	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
@@ -183,9 +184,12 @@ type adminRig struct {
 	sharedConn            *grpc.ClientConn
 }
 
-func newAdminRig(t *testing.T, chaos bool) *adminRig {
+func newAdminRig(t *testing.T, chaos bool) *adminRig { return newTunedAdminRig(t, chaos, nil) }
+
+// newTunedAdminRig is newAdminRig with a hook to adjust the node's config.
+func newTunedAdminRig(t *testing.T, chaos bool, tune func(*node.Config)) *adminRig {
 	t.Helper()
-	n, err := node.Start(node.Config{
+	cfg := node.Config{
 		ID:            1,
 		Peers:         []raft.NodeID{1, 2, 3},
 		DataDir:       t.TempDir(),
@@ -194,7 +198,11 @@ func newAdminRig(t *testing.T, chaos bool) *adminRig {
 		ElectionTick:  100000, // no spontaneous elections: tests trigger the transitions they need
 		HeartbeatTick: 1,
 		Sync:          storage.SyncNever,
-	})
+	}
+	if tune != nil {
+		tune(&cfg)
+	}
+	n, err := node.Start(cfg)
 	if err != nil {
 		t.Fatalf("starting node: %v", err)
 	}
@@ -1145,4 +1153,64 @@ func TestSlowEventsClientIsDroppedAndItsSlotReleasedOverGRPC(t *testing.T) {
 		}
 	}
 	t.Fatal("after 6000 events no slow subscriber was dropped, so no slot was released")
+}
+
+// The index fields come from a live node, not a canned one: after a snapshot
+// and a further append, first, last and snapshot index are all non-zero and
+// distinct, and the admin API reports exactly what the node's own Status does.
+func TestAdminStatusIndexesMatchALiveNodeAfterASnapshot(t *testing.T) {
+	r := newTunedAdminRig(t, false, func(cfg *node.Config) { cfg.SnapshotThreshold = 5 })
+
+	entries := func(from, to raft.Index) []raft.Entry {
+		var out []raft.Entry
+		for i := from; i <= to; i++ {
+			cmd := statemachine.Command{ClientID: 1, Seq: uint64(i), Op: statemachine.OpPut,
+				Key: fmt.Sprintf("k%d", i), Value: []byte("v")}
+			out = append(out, raft.Entry{Term: 1, Index: i, Type: raft.EntryNormal, Data: cmd.Encode()})
+		}
+		return out
+	}
+	await := func(what string, cond func(node.Status) bool) {
+		t.Helper()
+		for deadline := time.Now().Add(adminWait); ; {
+			if cond(r.node.Status()) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s; node status %+v", what, r.node.Status())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Twelve entries apply in one batch: past the threshold of 5, so a snapshot at 12.
+	r.node.Step(raft.Message{Type: raft.MsgAppendRequest, From: 2, To: 1, Term: 1, CommitIndex: 12, Entries: entries(1, 12)})
+	await("a snapshot at index 12", func(s node.Status) bool { return s.SnapshotIndex == 12 && s.Applied == 12 })
+
+	// Two more entries, below the threshold for another snapshot.
+	r.node.Step(raft.Message{Type: raft.MsgAppendRequest, From: 2, To: 1, Term: 1,
+		PrevLogIndex: 12, PrevLogTerm: 1, CommitIndex: 14, Entries: entries(13, 14)})
+	await("entries 13 and 14 applied", func(s node.Status) bool { return s.Applied == 14 })
+
+	ctx, cancel := adminCtx(t)
+	defer cancel()
+	got, err := r.admin.Status(withToken(ctx, adminToken), &raftkvv1.AdminStatusRequest{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	own := r.node.Status() // nothing is in flight, so the two views must agree
+
+	if got.GetFirstIndex() != uint64(own.FirstIndex) ||
+		got.GetLastIndex() != uint64(own.LastIndex) ||
+		got.GetSnapshotIndex() != uint64(own.SnapshotIndex) {
+		t.Errorf("admin first %d last %d snapshot %d; node's own Status says first %d last %d snapshot %d",
+			got.GetFirstIndex(), got.GetLastIndex(), got.GetSnapshotIndex(),
+			own.FirstIndex, own.LastIndex, own.SnapshotIndex)
+	}
+	// Guard against both sides being zero, or equal, which would prove nothing.
+	if got.GetSnapshotIndex() != 12 || got.GetLastIndex() != 14 ||
+		got.GetFirstIndex() == 0 || got.GetFirstIndex() > 14 || got.GetFirstIndex() <= got.GetSnapshotIndex() {
+		t.Errorf("expected a snapshot at 12, last index 14 and a first index past the snapshot; got first %d last %d snapshot %d",
+			got.GetFirstIndex(), got.GetLastIndex(), got.GetSnapshotIndex())
+	}
 }
