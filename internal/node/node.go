@@ -119,6 +119,13 @@ type Status struct {
 	Members raft.ConfState
 
 	SnapshotsReceived uint64
+
+	// FirstIndex and LastIndex bound the log entries present, and are both zero
+	// when it holds none. SnapshotIndex is the index of the latest snapshot, or
+	// zero. Whether the configuration is joint is Members.Joint.
+	FirstIndex    raft.Index
+	LastIndex     raft.Index
+	SnapshotIndex raft.Index
 }
 
 type proposal struct {
@@ -437,7 +444,18 @@ func (n *Node) run() {
 }
 
 func (n *Node) status() Status {
+	// The log holds entries first..last. After a snapshot the log can be empty,
+	// with last below first; report that as no entries, as the admin API says.
+	first, last := n.storage.FirstIndex(), n.raft.LastIndex()
+	if last < first {
+		first, last = 0, 0
+	}
+
 	return Status{
+		FirstIndex:    first,
+		LastIndex:     last,
+		SnapshotIndex: n.lastSnapshot,
+
 		ID:      n.raft.ID(),
 		Leader:  n.raft.Leader(),
 		Term:    n.raft.Term(),
