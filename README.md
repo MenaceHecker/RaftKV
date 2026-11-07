@@ -176,7 +176,7 @@ deploy/
 docs/               chaos report, observability, benchmarks, deployment
 ```
 
-Roughly 10,500 lines of implementation and 27,000 of tests, across 665 tests. The ratio is not an accident.
+Roughly 11,800 lines of implementation and 27,000 of tests, across 665 tests. The ratio is not an accident.
 
 ---
 
