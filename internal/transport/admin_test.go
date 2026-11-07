@@ -2,12 +2,14 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,9 +71,10 @@ func (discardSender) Send([]raft.Message) {}
 type spyAdminNode struct {
 	*node.Node
 
-	mu     sync.Mutex
-	pauses []time.Duration
-	subs   int
+	mu      sync.Mutex
+	pauses  []time.Duration
+	subs    int // Subscribe attempts
+	refused int // attempts that failed
 }
 
 func (s *spyAdminNode) Pause(d time.Duration) time.Duration {
@@ -85,7 +88,19 @@ func (s *spyAdminNode) Subscribe() (*node.Subscription, error) {
 	s.mu.Lock()
 	s.subs++
 	s.mu.Unlock()
-	return s.Node.Subscribe()
+	sub, err := s.Node.Subscribe()
+	if err != nil {
+		s.mu.Lock()
+		s.refused++
+		s.mu.Unlock()
+	}
+	return sub, err
+}
+
+func (s *spyAdminNode) subCounts() (attempts, refused int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.subs, s.refused
 }
 
 func (s *spyAdminNode) counts() (pauses []time.Duration, subs int) {
@@ -164,6 +179,7 @@ type adminRig struct {
 
 	adminAddr, sharedAddr string
 	admin                 raftkvv1.AdminServiceClient
+	pokes                 atomic.Uint64
 	sharedConn            *grpc.ClientConn
 }
 
@@ -175,7 +191,7 @@ func newAdminRig(t *testing.T, chaos bool) *adminRig {
 		DataDir:       t.TempDir(),
 		Transport:     discardSender{},
 		TickInterval:  10 * time.Millisecond,
-		ElectionTick:  10,
+		ElectionTick:  100000, // no spontaneous elections: tests trigger the transitions they need
 		HeartbeatTick: 1,
 		Sync:          storage.SyncNever,
 	})
@@ -222,6 +238,44 @@ func newAdminRig(t *testing.T, chaos bool) *adminRig {
 	r.admin = raftkvv1.NewAdminServiceClient(dial(t, r.adminAddr))
 	r.sharedConn = dial(t, r.sharedAddr)
 	return r
+}
+
+// poke makes the node observe one new (term, role, leader), so a subscriber gets
+// an event. The terms rise on every call.
+func (r *adminRig) poke() {
+	r.t.Helper()
+	term := raft.Term(5000 + r.pokes.Add(1))
+	r.node.Step(raft.Message{Type: raft.MsgHeartbeat, From: 2, To: 1, Term: term})
+}
+
+// waitSubscribed waits until the node has seen n Subscribe attempts. The Events
+// handler subscribes after the RPC call returns, so a test that triggers a
+// transition must wait, or the event could precede the subscription and be missed.
+func (r *adminRig) waitSubscribed(n int) {
+	r.t.Helper()
+	for deadline := time.Now().Add(adminWait); ; {
+		if attempts, _ := r.node.subCounts(); attempts >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("the Events handler never subscribed (wanted %d attempts)", n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// firstEvent opens an Events stream, waits for the subscription, triggers a
+// transition, and returns the first event.
+func (r *adminRig) firstEvent(ctx context.Context) (*raftkvv1.Event, error) {
+	r.t.Helper()
+	attempts, _ := r.node.subCounts()
+	stream, err := r.admin.Events(ctx, &raftkvv1.EventsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	r.waitSubscribed(attempts + 1)
+	r.poke()
+	return stream.Recv()
 }
 
 type adminCall struct {
@@ -349,14 +403,9 @@ func TestTokenOKWorks(t *testing.T) {
 		t.Errorf("wrapper saw %v, want %v", got, want)
 	}
 
-	// The node is never elected, so it times out into a pre-candidate: an event.
-	stream, err := r.admin.Events(ctx, &raftkvv1.EventsRequest{})
+	ev, err := r.firstEvent(ctx)
 	if err != nil {
 		t.Fatalf("Events: %v", err)
-	}
-	ev, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("Events Recv: %v", err)
 	}
 	if ev.GetKind() != raftkvv1.EventKind_EVENT_KIND_STATE || ev.GetNode() != 1 || ev.GetSeq() == 0 {
 		t.Errorf("first event = %+v, want a STATE event from node 1 with a seq", ev)
@@ -372,9 +421,15 @@ func TestChaosRPCsNeedAdminChaos(t *testing.T) {
 	ctx = withToken(ctx, adminToken)
 
 	for _, c := range adminCalls() {
+		if c.name == "Events" {
+			if _, err := r.firstEvent(ctx); err != nil {
+				t.Errorf("Events without chaos: %v, want success", err)
+			}
+			continue
+		}
 		err := c.call(ctx, r.admin)
 		switch c.name {
-		case "Status", "Events":
+		case "Status":
 			if err != nil {
 				t.Errorf("%s without chaos: %v, want success", c.name, err)
 			}
@@ -536,18 +591,12 @@ func TestAdminStatusAndEventsWorkWhilePaused(t *testing.T) {
 		t.Error("Status.paused = false while paused")
 	}
 
-	stream, err := r.admin.Events(ctx, &raftkvv1.EventsRequest{})
+	ev, err := r.firstEvent(ctx) // a paused node does not tick; firstEvent triggers the transition from outside
 	if err != nil {
 		t.Fatalf("Events while paused: %v", err)
 	}
-	// A paused node does not tick, so make a transition happen from outside.
-	r.node.Step(raft.Message{Type: raft.MsgHeartbeat, From: 2, To: 1, Term: 50})
-	ev, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("Events Recv while paused: %v", err)
-	}
-	if ev.GetTerm() != 50 {
-		t.Errorf("event term = %d, want 50", ev.GetTerm())
+	if ev.GetTerm() < 5000 {
+		t.Errorf("event term = %d, want the poked term", ev.GetTerm())
 	}
 }
 
@@ -869,4 +918,231 @@ func TestPartitionedLeaderLosesLeadership(t *testing.T) {
 	if err != nil || string(got.GetValue()) != "ok" {
 		t.Errorf("read after the heal: %q, %v; want ok", got.GetValue(), err)
 	}
+}
+
+// fixedNode serves a canned Status so the mapping to the wire can be checked
+// field by field, including states a live node is hard to hold in.
+type fixedNode struct {
+	st     node.Status
+	paused bool
+}
+
+func (f fixedNode) Status() node.Status { return f.st }
+func (f fixedNode) Subscribe() (*node.Subscription, error) {
+	return nil, errors.New("fixedNode: no events")
+}
+func (f fixedNode) Pause(time.Duration) time.Duration { return 0 }
+func (f fixedNode) Paused() bool                      { return f.paused }
+
+func statusViaGRPC(t *testing.T, f fixedNode) *raftkvv1.AdminStatusResponse {
+	t.Helper()
+	srv, err := NewAdminServer(AdminConfig{Node: f, Faults: &spyFaults{}, Clock: newFakeClock(), Exit: func(int) {}})
+	if err != nil {
+		t.Fatalf("NewAdminServer: %v", err)
+	}
+	u, st := NewAdminInterceptors(adminToken, false)
+	gs := grpc.NewServer(grpc.ChainUnaryInterceptor(u), grpc.ChainStreamInterceptor(st))
+	srv.Register(gs)
+	l := listen(t)
+	go func() { _ = gs.Serve(l) }()
+	t.Cleanup(gs.Stop)
+
+	ctx, cancel := adminCtx(t)
+	defer cancel()
+	resp, err := raftkvv1.NewAdminServiceClient(dial(t, l.Addr().String())).
+		Status(withToken(ctx, adminToken), &raftkvv1.AdminStatusRequest{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	return resp
+}
+
+// Decision 3: Status carries the KVService fields plus members, joint and the
+// first, last and snapshot indexes, and says whether the node is paused.
+func TestAdminStatusMapsEveryField(t *testing.T) {
+	joint := statusViaGRPC(t, fixedNode{paused: true, st: node.Status{
+		ID: 1, Leader: 2, Term: 7, State: raft.Follower, Commit: 9, Applied: 8,
+		Members: raft.ConfState{
+			Voters: []raft.NodeID{1, 2, 3}, Incoming: []raft.NodeID{1, 2, 4}, Joint: true,
+			Addrs: map[raft.NodeID]string{2: "b:2", 4: "d:4"},
+		},
+		FirstIndex: 4, LastIndex: 12, SnapshotIndex: 3,
+	}})
+	if joint.GetNodeId() != 1 || joint.GetLeaderId() != 2 || joint.GetLeaderAddress() != "b:2" ||
+		joint.GetTerm() != 7 || joint.GetState() != raftkvv1.NodeState_NODE_STATE_FOLLOWER ||
+		joint.GetCommitIndex() != 9 || joint.GetAppliedIndex() != 8 {
+		t.Errorf("KVService fields: %+v", joint)
+	}
+	if !joint.GetJoint() {
+		t.Error("joint = false for a joint configuration")
+	}
+	if joint.GetFirstIndex() != 4 || joint.GetLastIndex() != 12 || joint.GetSnapshotIndex() != 3 {
+		t.Errorf("indexes first %d last %d snapshot %d, want 4, 12, 3",
+			joint.GetFirstIndex(), joint.GetLastIndex(), joint.GetSnapshotIndex())
+	}
+	if !joint.GetPaused() {
+		t.Error("paused = false for a paused node")
+	}
+	got := map[uint64]string{}
+	for _, m := range joint.GetMembers() {
+		got[m.GetId()] = m.GetAddress()
+	}
+	if want := (map[uint64]string{1: "", 2: "b:2", 4: "d:4"}); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("members %v, want the incoming set %v (as ListMembers reports during a joint configuration)", got, want)
+	}
+
+	plain := statusViaGRPC(t, fixedNode{st: node.Status{
+		ID: 3, Leader: 3, State: raft.Leader, Members: raft.ConfState{Voters: []raft.NodeID{1, 2, 3}},
+	}})
+	if plain.GetJoint() || plain.GetPaused() || len(plain.GetMembers()) != 3 ||
+		plain.GetState() != raftkvv1.NodeState_NODE_STATE_LEADER {
+		t.Errorf("plain configuration: %+v", plain)
+	}
+	if plain.GetFirstIndex() != 0 || plain.GetLastIndex() != 0 || plain.GetSnapshotIndex() != 0 {
+		t.Errorf("an empty log must report zero indexes, got %+v", plain)
+	}
+}
+
+// The token file must not be readable by group or others, and the error must
+// say so without ever showing what the file holds.
+func TestTokenFileMustNotBeGroupOrWorldReadable(t *testing.T) {
+	dir := t.TempDir()
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o644, 0o660, 0o666, 0o607} {
+		path := filepath.Join(dir, fmt.Sprintf("tok-%o", mode))
+		if err := os.WriteFile(path, []byte(adminToken+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		tok, err := LoadAdminToken(path)
+		if err == nil {
+			t.Errorf("mode %o: accepted, want a refusal", mode)
+			continue
+		}
+		if tok != "" || strings.Contains(err.Error(), adminToken) {
+			t.Errorf("mode %o: token %q returned or leaked in %q", mode, tok, err)
+		}
+	}
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		path := filepath.Join(dir, fmt.Sprintf("ok-%o", mode))
+		if err := os.WriteFile(path, []byte(adminToken), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		if tok, err := LoadAdminToken(path); err != nil || tok != adminToken {
+			t.Errorf("mode %o: got %q, %v; want the token", mode, tok, err)
+		}
+	}
+}
+
+// tryEvents opens an Events stream and reports whether the server admitted it.
+// The stream stays open until its returned cancel is called.
+func (r *adminRig) tryEvents() (admitted bool, cancel context.CancelFunc) {
+	r.t.Helper()
+	return r.tryEventsOn(r.admin)
+}
+
+func (r *adminRig) tryEventsOn(client raftkvv1.AdminServiceClient) (admitted bool, cancel context.CancelFunc) {
+	r.t.Helper()
+	ctx, cancel := context.WithCancel(withToken(context.Background(), adminToken))
+	r.t.Cleanup(cancel)
+	beforeAttempts, beforeRefused := r.node.subCounts()
+	stream, err := client.Events(ctx, &raftkvv1.EventsRequest{})
+	if err != nil {
+		r.t.Fatalf("opening Events: %v", err)
+	}
+	deadline := time.Now().Add(adminWait)
+	for {
+		attempts, refused := r.node.subCounts()
+		if attempts > beforeAttempts {
+			if refused > beforeRefused {
+				_, err := stream.Recv()
+				wantCode(r.t, "a refused Events stream", err, codes.ResourceExhausted)
+				return false, cancel
+			}
+			return true, cancel
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatal("the Events call never reached the node")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Events is bounded: node.MaxSubscribers streams are admitted and the next is
+// refused with ResourceExhausted. A stream that goes away gives its slot back.
+func TestEventsAreBoundedOverGRPC(t *testing.T) {
+	r := newAdminRig(t, false)
+
+	var cancels []context.CancelFunc
+	for i := 0; i < node.MaxSubscribers; i++ {
+		ok, cancel := r.tryEvents()
+		if !ok {
+			t.Fatalf("stream %d of %d refused", i+1, node.MaxSubscribers)
+		}
+		cancels = append(cancels, cancel)
+	}
+	if ok, _ := r.tryEvents(); ok {
+		t.Fatalf("stream %d admitted, want ResourceExhausted at the cap", node.MaxSubscribers+1)
+	}
+
+	cancels[0]() // a client disconnects
+	deadline := time.Now().Add(adminWait)
+	for {
+		if ok, _ := r.tryEvents(); ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the slot of a disconnected stream was never released")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A subscriber that stops reading is dropped, not waited for, and its slot is
+// released: with every slot held by a client that never reads, enough events
+// overflow the buffers and a new stream is admitted again.
+func TestSlowEventsClientIsDroppedAndItsSlotReleasedOverGRPC(t *testing.T) {
+	r := newAdminRig(t, false)
+
+	// A tiny static flow-control window, so a client that never reads backs the
+	// server's sends up after a few events instead of after megabytes.
+	conn, err := grpc.NewClient(r.adminAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStaticStreamWindowSize(1024), grpc.WithStaticConnWindowSize(1024))
+	if err != nil {
+		t.Fatalf("dialling: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	slow := raftkvv1.NewAdminServiceClient(conn)
+
+	for i := 0; i < node.MaxSubscribers; i++ {
+		if ok, _ := r.tryEventsOn(slow); !ok { // never read from these streams
+			t.Fatalf("stream %d refused", i+1)
+		}
+	}
+	if ok, _ := r.tryEvents(); ok {
+		t.Fatal("admitted past the cap")
+	}
+
+	// Each higher term is one event. gRPC queues up to about 64 KiB of unsent
+	// data per stream (some 1,500 events) before the server's send blocks; after
+	// that the per-subscriber buffer (node.SubscriberBuffer) fills and overflows.
+	term := raft.Term(1000)
+	for batch := 0; batch < 60; batch++ {
+		for i := 0; i < 100; i++ {
+			term++
+			r.node.Step(raft.Message{Type: raft.MsgHeartbeat, From: 2, To: 1, Term: term})
+			for r.node.Status().Term < term {
+				time.Sleep(50 * time.Microsecond)
+			}
+		}
+		if ok, _ := r.tryEvents(); ok {
+			return
+		}
+	}
+	t.Fatal("after 6000 events no slow subscriber was dropped, so no slot was released")
 }
