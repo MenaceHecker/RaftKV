@@ -639,3 +639,347 @@ var KVService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "raftkv/v1/raftkv.proto",
 }
+
+const (
+	AdminService_Status_FullMethodName       = "/raftkv.v1.AdminService/Status"
+	AdminService_Crash_FullMethodName        = "/raftkv.v1.AdminService/Crash"
+	AdminService_Pause_FullMethodName        = "/raftkv.v1.AdminService/Pause"
+	AdminService_SetPartition_FullMethodName = "/raftkv.v1.AdminService/SetPartition"
+	AdminService_SetNetem_FullMethodName     = "/raftkv.v1.AdminService/SetNetem"
+	AdminService_Events_FullMethodName       = "/raftkv.v1.AdminService/Events"
+)
+
+// AdminServiceClient is the client API for AdminService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// AdminService is the operator and demo control surface of one node.
+//
+// It is served on its own listener (--admin-listen), never on the shared
+// client and peer listener. Every method needs the bearer token; Crash, Pause,
+// SetPartition and SetNetem also need --admin-chaos. The faults it injects are
+// application-level: they drop or delay Raft messages and stop ticks inside
+// the process, they do not touch the kernel network stack or the OS scheduler.
+type AdminServiceClient interface {
+	// Status reports everything KVService.Status does plus the log and
+	// membership detail an operator wants. It keeps working while paused.
+	Status(ctx context.Context, in *AdminStatusRequest, opts ...grpc.CallOption) (*AdminStatusResponse, error)
+	// Crash replies, then terminates the process with exit status 137 about 50ms
+	// later and without running deferred cleanup. The reply is best effort: a
+	// caller must treat a lost connection right after Crash as success.
+	Crash(ctx context.Context, in *CrashRequest, opts ...grpc.CallOption) (*CrashResponse, error)
+	// Pause stops ticks, drops peer messages in both directions and makes every
+	// KVService and ClusterService method return UNAVAILABLE. Apply is not
+	// frozen. Zero duration resumes at once; the duration is clamped to 60s and
+	// the node resumes by itself when it elapses.
+	Pause(ctx context.Context, in *PauseRequest, opts ...grpc.CallOption) (*PauseResponse, error)
+	// SetPartition replaces the set of peers this node can neither send to nor
+	// receive from. An empty set heals the partition. It expires after 120s.
+	SetPartition(ctx context.Context, in *SetPartitionRequest, opts ...grpc.CallOption) (*SetPartitionResponse, error)
+	// SetNetem replaces the loss and delay applied to messages sent to a peer
+	// (or to every peer). Zero delay and zero loss clears it. It expires after
+	// 120s.
+	SetNetem(ctx context.Context, in *SetNetemRequest, opts ...grpc.CallOption) (*SetNetemResponse, error)
+	// Events streams observed (term, role, leader) transitions. Transitions that
+	// start and end between two observations are not guaranteed to be seen.
+	Events(ctx context.Context, in *EventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
+}
+
+type adminServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewAdminServiceClient(cc grpc.ClientConnInterface) AdminServiceClient {
+	return &adminServiceClient{cc}
+}
+
+func (c *adminServiceClient) Status(ctx context.Context, in *AdminStatusRequest, opts ...grpc.CallOption) (*AdminStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AdminStatusResponse)
+	err := c.cc.Invoke(ctx, AdminService_Status_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) Crash(ctx context.Context, in *CrashRequest, opts ...grpc.CallOption) (*CrashResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CrashResponse)
+	err := c.cc.Invoke(ctx, AdminService_Crash_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) Pause(ctx context.Context, in *PauseRequest, opts ...grpc.CallOption) (*PauseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PauseResponse)
+	err := c.cc.Invoke(ctx, AdminService_Pause_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) SetPartition(ctx context.Context, in *SetPartitionRequest, opts ...grpc.CallOption) (*SetPartitionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetPartitionResponse)
+	err := c.cc.Invoke(ctx, AdminService_SetPartition_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) SetNetem(ctx context.Context, in *SetNetemRequest, opts ...grpc.CallOption) (*SetNetemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetNetemResponse)
+	err := c.cc.Invoke(ctx, AdminService_SetNetem_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *adminServiceClient) Events(ctx context.Context, in *EventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AdminService_ServiceDesc.Streams[0], AdminService_Events_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[EventsRequest, Event]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AdminService_EventsClient = grpc.ServerStreamingClient[Event]
+
+// AdminServiceServer is the server API for AdminService service.
+// All implementations must embed UnimplementedAdminServiceServer
+// for forward compatibility.
+//
+// AdminService is the operator and demo control surface of one node.
+//
+// It is served on its own listener (--admin-listen), never on the shared
+// client and peer listener. Every method needs the bearer token; Crash, Pause,
+// SetPartition and SetNetem also need --admin-chaos. The faults it injects are
+// application-level: they drop or delay Raft messages and stop ticks inside
+// the process, they do not touch the kernel network stack or the OS scheduler.
+type AdminServiceServer interface {
+	// Status reports everything KVService.Status does plus the log and
+	// membership detail an operator wants. It keeps working while paused.
+	Status(context.Context, *AdminStatusRequest) (*AdminStatusResponse, error)
+	// Crash replies, then terminates the process with exit status 137 about 50ms
+	// later and without running deferred cleanup. The reply is best effort: a
+	// caller must treat a lost connection right after Crash as success.
+	Crash(context.Context, *CrashRequest) (*CrashResponse, error)
+	// Pause stops ticks, drops peer messages in both directions and makes every
+	// KVService and ClusterService method return UNAVAILABLE. Apply is not
+	// frozen. Zero duration resumes at once; the duration is clamped to 60s and
+	// the node resumes by itself when it elapses.
+	Pause(context.Context, *PauseRequest) (*PauseResponse, error)
+	// SetPartition replaces the set of peers this node can neither send to nor
+	// receive from. An empty set heals the partition. It expires after 120s.
+	SetPartition(context.Context, *SetPartitionRequest) (*SetPartitionResponse, error)
+	// SetNetem replaces the loss and delay applied to messages sent to a peer
+	// (or to every peer). Zero delay and zero loss clears it. It expires after
+	// 120s.
+	SetNetem(context.Context, *SetNetemRequest) (*SetNetemResponse, error)
+	// Events streams observed (term, role, leader) transitions. Transitions that
+	// start and end between two observations are not guaranteed to be seen.
+	Events(*EventsRequest, grpc.ServerStreamingServer[Event]) error
+	mustEmbedUnimplementedAdminServiceServer()
+}
+
+// UnimplementedAdminServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedAdminServiceServer struct{}
+
+func (UnimplementedAdminServiceServer) Status(context.Context, *AdminStatusRequest) (*AdminStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Status not implemented")
+}
+func (UnimplementedAdminServiceServer) Crash(context.Context, *CrashRequest) (*CrashResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Crash not implemented")
+}
+func (UnimplementedAdminServiceServer) Pause(context.Context, *PauseRequest) (*PauseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Pause not implemented")
+}
+func (UnimplementedAdminServiceServer) SetPartition(context.Context, *SetPartitionRequest) (*SetPartitionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetPartition not implemented")
+}
+func (UnimplementedAdminServiceServer) SetNetem(context.Context, *SetNetemRequest) (*SetNetemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetNetem not implemented")
+}
+func (UnimplementedAdminServiceServer) Events(*EventsRequest, grpc.ServerStreamingServer[Event]) error {
+	return status.Error(codes.Unimplemented, "method Events not implemented")
+}
+func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
+func (UnimplementedAdminServiceServer) testEmbeddedByValue()                      {}
+
+// UnsafeAdminServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to AdminServiceServer will
+// result in compilation errors.
+type UnsafeAdminServiceServer interface {
+	mustEmbedUnimplementedAdminServiceServer()
+}
+
+func RegisterAdminServiceServer(s grpc.ServiceRegistrar, srv AdminServiceServer) {
+	// If the following call panics, it indicates UnimplementedAdminServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&AdminService_ServiceDesc, srv)
+}
+
+func _AdminService_Status_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AdminStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).Status(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_Status_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).Status(ctx, req.(*AdminStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_Crash_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CrashRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).Crash(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_Crash_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).Crash(ctx, req.(*CrashRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_Pause_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PauseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).Pause(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_Pause_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).Pause(ctx, req.(*PauseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_SetPartition_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetPartitionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).SetPartition(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_SetPartition_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).SetPartition(ctx, req.(*SetPartitionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_SetNetem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetNetemRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).SetNetem(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_SetNetem_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).SetNetem(ctx, req.(*SetNetemRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AdminService_Events_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(EventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AdminServiceServer).Events(m, &grpc.GenericServerStream[EventsRequest, Event]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AdminService_EventsServer = grpc.ServerStreamingServer[Event]
+
+// AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var AdminService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "raftkv.v1.AdminService",
+	HandlerType: (*AdminServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Status",
+			Handler:    _AdminService_Status_Handler,
+		},
+		{
+			MethodName: "Crash",
+			Handler:    _AdminService_Crash_Handler,
+		},
+		{
+			MethodName: "Pause",
+			Handler:    _AdminService_Pause_Handler,
+		},
+		{
+			MethodName: "SetPartition",
+			Handler:    _AdminService_SetPartition_Handler,
+		},
+		{
+			MethodName: "SetNetem",
+			Handler:    _AdminService_SetNetem_Handler,
+		},
+	},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Events",
+			Handler:       _AdminService_Events_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "raftkv/v1/raftkv.proto",
+}

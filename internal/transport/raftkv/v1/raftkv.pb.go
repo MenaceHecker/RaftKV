@@ -209,6 +209,53 @@ func (NodeState) EnumDescriptor() ([]byte, []int) {
 	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{2}
 }
 
+type EventKind int32
+
+const (
+	EventKind_EVENT_KIND_UNSPECIFIED EventKind = 0
+	// The observed (term, role, leader) tuple changed.
+	EventKind_EVENT_KIND_STATE EventKind = 1
+)
+
+// Enum value maps for EventKind.
+var (
+	EventKind_name = map[int32]string{
+		0: "EVENT_KIND_UNSPECIFIED",
+		1: "EVENT_KIND_STATE",
+	}
+	EventKind_value = map[string]int32{
+		"EVENT_KIND_UNSPECIFIED": 0,
+		"EVENT_KIND_STATE":       1,
+	}
+)
+
+func (x EventKind) Enum() *EventKind {
+	p := new(EventKind)
+	*p = x
+	return p
+}
+
+func (x EventKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EventKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_raftkv_v1_raftkv_proto_enumTypes[3].Descriptor()
+}
+
+func (EventKind) Type() protoreflect.EnumType {
+	return &file_raftkv_v1_raftkv_proto_enumTypes[3]
+}
+
+func (x EventKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EventKind.Descriptor instead.
+func (EventKind) EnumDescriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{3}
+}
+
 // Entry is one record in the replicated log. The pair (term, index) identifies
 // it uniquely across the cluster.
 type Entry struct {
@@ -1657,6 +1704,671 @@ func (x *StatusResponse) GetAppliedIndex() uint64 {
 	return 0
 }
 
+type AdminStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdminStatusRequest) Reset() {
+	*x = AdminStatusRequest{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdminStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdminStatusRequest) ProtoMessage() {}
+
+func (x *AdminStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdminStatusRequest.ProtoReflect.Descriptor instead.
+func (*AdminStatusRequest) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{24}
+}
+
+type AdminStatusResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        uint64                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	LeaderId      uint64                 `protobuf:"varint,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	LeaderAddress string                 `protobuf:"bytes,3,opt,name=leader_address,json=leaderAddress,proto3" json:"leader_address,omitempty"`
+	Term          uint64                 `protobuf:"varint,4,opt,name=term,proto3" json:"term,omitempty"`
+	State         NodeState              `protobuf:"varint,5,opt,name=state,proto3,enum=raftkv.v1.NodeState" json:"state,omitempty"`
+	CommitIndex   uint64                 `protobuf:"varint,6,opt,name=commit_index,json=commitIndex,proto3" json:"commit_index,omitempty"`
+	AppliedIndex  uint64                 `protobuf:"varint,7,opt,name=applied_index,json=appliedIndex,proto3" json:"applied_index,omitempty"`
+	Members       []*Member              `protobuf:"bytes,8,rep,name=members,proto3" json:"members,omitempty"`
+	Joint         bool                   `protobuf:"varint,9,opt,name=joint,proto3" json:"joint,omitempty"`
+	// First and last index present in the log, and the index of the latest
+	// snapshot. Zero when there is none.
+	FirstIndex    uint64 `protobuf:"varint,10,opt,name=first_index,json=firstIndex,proto3" json:"first_index,omitempty"`
+	LastIndex     uint64 `protobuf:"varint,11,opt,name=last_index,json=lastIndex,proto3" json:"last_index,omitempty"`
+	SnapshotIndex uint64 `protobuf:"varint,12,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	Paused        bool   `protobuf:"varint,13,opt,name=paused,proto3" json:"paused,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdminStatusResponse) Reset() {
+	*x = AdminStatusResponse{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdminStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdminStatusResponse) ProtoMessage() {}
+
+func (x *AdminStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdminStatusResponse.ProtoReflect.Descriptor instead.
+func (*AdminStatusResponse) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *AdminStatusResponse) GetNodeId() uint64 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetLeaderId() uint64 {
+	if x != nil {
+		return x.LeaderId
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetLeaderAddress() string {
+	if x != nil {
+		return x.LeaderAddress
+	}
+	return ""
+}
+
+func (x *AdminStatusResponse) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetState() NodeState {
+	if x != nil {
+		return x.State
+	}
+	return NodeState_NODE_STATE_UNSPECIFIED
+}
+
+func (x *AdminStatusResponse) GetCommitIndex() uint64 {
+	if x != nil {
+		return x.CommitIndex
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetAppliedIndex() uint64 {
+	if x != nil {
+		return x.AppliedIndex
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetMembers() []*Member {
+	if x != nil {
+		return x.Members
+	}
+	return nil
+}
+
+func (x *AdminStatusResponse) GetJoint() bool {
+	if x != nil {
+		return x.Joint
+	}
+	return false
+}
+
+func (x *AdminStatusResponse) GetFirstIndex() uint64 {
+	if x != nil {
+		return x.FirstIndex
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetLastIndex() uint64 {
+	if x != nil {
+		return x.LastIndex
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
+	}
+	return 0
+}
+
+func (x *AdminStatusResponse) GetPaused() bool {
+	if x != nil {
+		return x.Paused
+	}
+	return false
+}
+
+type CrashRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CrashRequest) Reset() {
+	*x = CrashRequest{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CrashRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CrashRequest) ProtoMessage() {}
+
+func (x *CrashRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CrashRequest.ProtoReflect.Descriptor instead.
+func (*CrashRequest) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{26}
+}
+
+type CrashResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CrashResponse) Reset() {
+	*x = CrashResponse{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CrashResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CrashResponse) ProtoMessage() {}
+
+func (x *CrashResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CrashResponse.ProtoReflect.Descriptor instead.
+func (*CrashResponse) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{27}
+}
+
+type PauseRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How long to pause, in milliseconds. Zero resumes. Clamped to 60000.
+	DurationMs    uint64 `protobuf:"varint,1,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PauseRequest) Reset() {
+	*x = PauseRequest{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PauseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PauseRequest) ProtoMessage() {}
+
+func (x *PauseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PauseRequest.ProtoReflect.Descriptor instead.
+func (*PauseRequest) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *PauseRequest) GetDurationMs() uint64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+type PauseResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PauseResponse) Reset() {
+	*x = PauseResponse{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PauseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PauseResponse) ProtoMessage() {}
+
+func (x *PauseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PauseResponse.ProtoReflect.Descriptor instead.
+func (*PauseResponse) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{29}
+}
+
+type SetPartitionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Peers cut off from this node in both directions.
+	Blocked       []uint64 `protobuf:"varint,1,rep,packed,name=blocked,proto3" json:"blocked,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetPartitionRequest) Reset() {
+	*x = SetPartitionRequest{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetPartitionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetPartitionRequest) ProtoMessage() {}
+
+func (x *SetPartitionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetPartitionRequest.ProtoReflect.Descriptor instead.
+func (*SetPartitionRequest) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *SetPartitionRequest) GetBlocked() []uint64 {
+	if x != nil {
+		return x.Blocked
+	}
+	return nil
+}
+
+type SetPartitionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetPartitionResponse) Reset() {
+	*x = SetPartitionResponse{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetPartitionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetPartitionResponse) ProtoMessage() {}
+
+func (x *SetPartitionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetPartitionResponse.ProtoReflect.Descriptor instead.
+func (*SetPartitionResponse) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{31}
+}
+
+type SetNetemRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The peer the rule applies to; zero means every peer.
+	Peer uint64 `protobuf:"varint,1,opt,name=peer,proto3" json:"peer,omitempty"`
+	// Fixed delay added to each message sent, in milliseconds.
+	DelayMs uint32 `protobuf:"varint,2,opt,name=delay_ms,json=delayMs,proto3" json:"delay_ms,omitempty"`
+	// Percentage of messages dropped, 0 to 100 inclusive.
+	DropPercent   uint32 `protobuf:"varint,3,opt,name=drop_percent,json=dropPercent,proto3" json:"drop_percent,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetNetemRequest) Reset() {
+	*x = SetNetemRequest{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetNetemRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetNetemRequest) ProtoMessage() {}
+
+func (x *SetNetemRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetNetemRequest.ProtoReflect.Descriptor instead.
+func (*SetNetemRequest) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *SetNetemRequest) GetPeer() uint64 {
+	if x != nil {
+		return x.Peer
+	}
+	return 0
+}
+
+func (x *SetNetemRequest) GetDelayMs() uint32 {
+	if x != nil {
+		return x.DelayMs
+	}
+	return 0
+}
+
+func (x *SetNetemRequest) GetDropPercent() uint32 {
+	if x != nil {
+		return x.DropPercent
+	}
+	return 0
+}
+
+type SetNetemResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetNetemResponse) Reset() {
+	*x = SetNetemResponse{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetNetemResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetNetemResponse) ProtoMessage() {}
+
+func (x *SetNetemResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetNetemResponse.ProtoReflect.Descriptor instead.
+func (*SetNetemResponse) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{33}
+}
+
+type EventsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EventsRequest) Reset() {
+	*x = EventsRequest{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EventsRequest) ProtoMessage() {}
+
+func (x *EventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EventsRequest.ProtoReflect.Descriptor instead.
+func (*EventsRequest) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{34}
+}
+
+// Event is one observed state transition. seq increases by exactly one per
+// event on a node, so a gap means the stream lost events.
+type Event struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          EventKind              `protobuf:"varint,1,opt,name=kind,proto3,enum=raftkv.v1.EventKind" json:"kind,omitempty"`
+	Node          uint64                 `protobuf:"varint,2,opt,name=node,proto3" json:"node,omitempty"`
+	Term          uint64                 `protobuf:"varint,3,opt,name=term,proto3" json:"term,omitempty"`
+	Role          NodeState              `protobuf:"varint,4,opt,name=role,proto3,enum=raftkv.v1.NodeState" json:"role,omitempty"`
+	Leader        uint64                 `protobuf:"varint,5,opt,name=leader,proto3" json:"leader,omitempty"`
+	Commit        uint64                 `protobuf:"varint,6,opt,name=commit,proto3" json:"commit,omitempty"`
+	Applied       uint64                 `protobuf:"varint,7,opt,name=applied,proto3" json:"applied,omitempty"`
+	SnapshotIndex uint64                 `protobuf:"varint,8,opt,name=snapshot_index,json=snapshotIndex,proto3" json:"snapshot_index,omitempty"`
+	Seq           uint64                 `protobuf:"varint,9,opt,name=seq,proto3" json:"seq,omitempty"`
+	UnixNano      int64                  `protobuf:"varint,10,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Event) Reset() {
+	*x = Event{}
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Event) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Event) ProtoMessage() {}
+
+func (x *Event) ProtoReflect() protoreflect.Message {
+	mi := &file_raftkv_v1_raftkv_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Event.ProtoReflect.Descriptor instead.
+func (*Event) Descriptor() ([]byte, []int) {
+	return file_raftkv_v1_raftkv_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *Event) GetKind() EventKind {
+	if x != nil {
+		return x.Kind
+	}
+	return EventKind_EVENT_KIND_UNSPECIFIED
+}
+
+func (x *Event) GetNode() uint64 {
+	if x != nil {
+		return x.Node
+	}
+	return 0
+}
+
+func (x *Event) GetTerm() uint64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *Event) GetRole() NodeState {
+	if x != nil {
+		return x.Role
+	}
+	return NodeState_NODE_STATE_UNSPECIFIED
+}
+
+func (x *Event) GetLeader() uint64 {
+	if x != nil {
+		return x.Leader
+	}
+	return 0
+}
+
+func (x *Event) GetCommit() uint64 {
+	if x != nil {
+		return x.Commit
+	}
+	return 0
+}
+
+func (x *Event) GetApplied() uint64 {
+	if x != nil {
+		return x.Applied
+	}
+	return 0
+}
+
+func (x *Event) GetSnapshotIndex() uint64 {
+	if x != nil {
+		return x.SnapshotIndex
+	}
+	return 0
+}
+
+func (x *Event) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *Event) GetUnixNano() int64 {
+	if x != nil {
+		return x.UnixNano
+	}
+	return 0
+}
+
 var File_raftkv_v1_raftkv_proto protoreflect.FileDescriptor
 
 const file_raftkv_v1_raftkv_proto_rawDesc = "" +
@@ -1752,7 +2464,52 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x04term\x18\x04 \x01(\x04R\x04term\x12*\n" +
 	"\x05state\x18\x05 \x01(\x0e2\x14.raftkv.v1.NodeStateR\x05state\x12!\n" +
 	"\fcommit_index\x18\x06 \x01(\x04R\vcommitIndex\x12#\n" +
-	"\rapplied_index\x18\a \x01(\x04R\fappliedIndex*\x84\x03\n" +
+	"\rapplied_index\x18\a \x01(\x04R\fappliedIndex\"\x14\n" +
+	"\x12AdminStatusRequest\"\xbc\x03\n" +
+	"\x13AdminStatusResponse\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\x04R\x06nodeId\x12\x1b\n" +
+	"\tleader_id\x18\x02 \x01(\x04R\bleaderId\x12%\n" +
+	"\x0eleader_address\x18\x03 \x01(\tR\rleaderAddress\x12\x12\n" +
+	"\x04term\x18\x04 \x01(\x04R\x04term\x12*\n" +
+	"\x05state\x18\x05 \x01(\x0e2\x14.raftkv.v1.NodeStateR\x05state\x12!\n" +
+	"\fcommit_index\x18\x06 \x01(\x04R\vcommitIndex\x12#\n" +
+	"\rapplied_index\x18\a \x01(\x04R\fappliedIndex\x12+\n" +
+	"\amembers\x18\b \x03(\v2\x11.raftkv.v1.MemberR\amembers\x12\x14\n" +
+	"\x05joint\x18\t \x01(\bR\x05joint\x12\x1f\n" +
+	"\vfirst_index\x18\n" +
+	" \x01(\x04R\n" +
+	"firstIndex\x12\x1d\n" +
+	"\n" +
+	"last_index\x18\v \x01(\x04R\tlastIndex\x12%\n" +
+	"\x0esnapshot_index\x18\f \x01(\x04R\rsnapshotIndex\x12\x16\n" +
+	"\x06paused\x18\r \x01(\bR\x06paused\"\x0e\n" +
+	"\fCrashRequest\"\x0f\n" +
+	"\rCrashResponse\"/\n" +
+	"\fPauseRequest\x12\x1f\n" +
+	"\vduration_ms\x18\x01 \x01(\x04R\n" +
+	"durationMs\"\x0f\n" +
+	"\rPauseResponse\"/\n" +
+	"\x13SetPartitionRequest\x12\x18\n" +
+	"\ablocked\x18\x01 \x03(\x04R\ablocked\"\x16\n" +
+	"\x14SetPartitionResponse\"c\n" +
+	"\x0fSetNetemRequest\x12\x12\n" +
+	"\x04peer\x18\x01 \x01(\x04R\x04peer\x12\x19\n" +
+	"\bdelay_ms\x18\x02 \x01(\rR\adelayMs\x12!\n" +
+	"\fdrop_percent\x18\x03 \x01(\rR\vdropPercent\"\x12\n" +
+	"\x10SetNetemResponse\"\x0f\n" +
+	"\rEventsRequest\"\xa3\x02\n" +
+	"\x05Event\x12(\n" +
+	"\x04kind\x18\x01 \x01(\x0e2\x14.raftkv.v1.EventKindR\x04kind\x12\x12\n" +
+	"\x04node\x18\x02 \x01(\x04R\x04node\x12\x12\n" +
+	"\x04term\x18\x03 \x01(\x04R\x04term\x12(\n" +
+	"\x04role\x18\x04 \x01(\x0e2\x14.raftkv.v1.NodeStateR\x04role\x12\x16\n" +
+	"\x06leader\x18\x05 \x01(\x04R\x06leader\x12\x16\n" +
+	"\x06commit\x18\x06 \x01(\x04R\x06commit\x12\x18\n" +
+	"\aapplied\x18\a \x01(\x04R\aapplied\x12%\n" +
+	"\x0esnapshot_index\x18\b \x01(\x04R\rsnapshotIndex\x12\x10\n" +
+	"\x03seq\x18\t \x01(\x04R\x03seq\x12\x1b\n" +
+	"\tunix_nano\x18\n" +
+	" \x01(\x03R\bunixNano*\x84\x03\n" +
 	"\vMessageType\x12\x1c\n" +
 	"\x18MESSAGE_TYPE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19MESSAGE_TYPE_VOTE_REQUEST\x10\x01\x12\x1e\n" +
@@ -1775,7 +2532,10 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x16NODE_STATE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13NODE_STATE_FOLLOWER\x10\x01\x12\x18\n" +
 	"\x14NODE_STATE_CANDIDATE\x10\x02\x12\x15\n" +
-	"\x11NODE_STATE_LEADER\x10\x032\x9a\x01\n" +
+	"\x11NODE_STATE_LEADER\x10\x03*=\n" +
+	"\tEventKind\x12\x1a\n" +
+	"\x16EVENT_KIND_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10EVENT_KIND_STATE\x10\x012\x9a\x01\n" +
 	"\vRaftService\x12@\n" +
 	"\aDeliver\x12\x19.raftkv.v1.DeliverRequest\x1a\x1a.raftkv.v1.DeliverResponse\x12I\n" +
 	"\x0fDeliverSnapshot\x12\x18.raftkv.v1.SnapshotChunk\x1a\x1a.raftkv.v1.DeliverResponse(\x012\xeb\x01\n" +
@@ -1788,7 +2548,14 @@ const file_raftkv_v1_raftkv_proto_rawDesc = "" +
 	"\x03Get\x12\x15.raftkv.v1.GetRequest\x1a\x16.raftkv.v1.GetResponse\x124\n" +
 	"\x03Put\x12\x15.raftkv.v1.PutRequest\x1a\x16.raftkv.v1.PutResponse\x12=\n" +
 	"\x06Delete\x12\x18.raftkv.v1.DeleteRequest\x1a\x19.raftkv.v1.DeleteResponse\x12=\n" +
-	"\x06Status\x12\x18.raftkv.v1.StatusRequest\x1a\x19.raftkv.v1.StatusResponseB\xa7\x01\n" +
+	"\x06Status\x12\x18.raftkv.v1.StatusRequest\x1a\x19.raftkv.v1.StatusResponse2\x9d\x03\n" +
+	"\fAdminService\x12G\n" +
+	"\x06Status\x12\x1d.raftkv.v1.AdminStatusRequest\x1a\x1e.raftkv.v1.AdminStatusResponse\x12:\n" +
+	"\x05Crash\x12\x17.raftkv.v1.CrashRequest\x1a\x18.raftkv.v1.CrashResponse\x12:\n" +
+	"\x05Pause\x12\x17.raftkv.v1.PauseRequest\x1a\x18.raftkv.v1.PauseResponse\x12O\n" +
+	"\fSetPartition\x12\x1e.raftkv.v1.SetPartitionRequest\x1a\x1f.raftkv.v1.SetPartitionResponse\x12C\n" +
+	"\bSetNetem\x12\x1a.raftkv.v1.SetNetemRequest\x1a\x1b.raftkv.v1.SetNetemResponse\x126\n" +
+	"\x06Events\x12\x18.raftkv.v1.EventsRequest\x1a\x10.raftkv.v1.Event0\x01B\xa7\x01\n" +
 	"\rcom.raftkv.v1B\vRaftkvProtoP\x01ZDgithub.com/MenaceHecker/raftkv/internal/transport/raftkv/v1;raftkvv1\xa2\x02\x03RXX\xaa\x02\tRaftkv.V1\xca\x02\tRaftkv\\V1\xe2\x02\x15Raftkv\\V1\\GPBMetadata\xea\x02\n" +
 	"Raftkv::V1b\x06proto3"
 
@@ -1804,74 +2571,103 @@ func file_raftkv_v1_raftkv_proto_rawDescGZIP() []byte {
 	return file_raftkv_v1_raftkv_proto_rawDescData
 }
 
-var file_raftkv_v1_raftkv_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_raftkv_v1_raftkv_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_raftkv_v1_raftkv_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_raftkv_v1_raftkv_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_raftkv_v1_raftkv_proto_goTypes = []any{
-	(MessageType)(0),            // 0: raftkv.v1.MessageType
-	(EntryType)(0),              // 1: raftkv.v1.EntryType
-	(NodeState)(0),              // 2: raftkv.v1.NodeState
-	(*Entry)(nil),               // 3: raftkv.v1.Entry
-	(*Message)(nil),             // 4: raftkv.v1.Message
-	(*DeliverRequest)(nil),      // 5: raftkv.v1.DeliverRequest
-	(*SnapshotChunk)(nil),       // 6: raftkv.v1.SnapshotChunk
-	(*ConfState)(nil),           // 7: raftkv.v1.ConfState
-	(*Snapshot)(nil),            // 8: raftkv.v1.Snapshot
-	(*DeliverResponse)(nil),     // 9: raftkv.v1.DeliverResponse
-	(*ClientRequest)(nil),       // 10: raftkv.v1.ClientRequest
-	(*GetRequest)(nil),          // 11: raftkv.v1.GetRequest
-	(*GetResponse)(nil),         // 12: raftkv.v1.GetResponse
-	(*PutRequest)(nil),          // 13: raftkv.v1.PutRequest
-	(*PutResponse)(nil),         // 14: raftkv.v1.PutResponse
-	(*DeleteRequest)(nil),       // 15: raftkv.v1.DeleteRequest
-	(*DeleteResponse)(nil),      // 16: raftkv.v1.DeleteResponse
-	(*NotLeader)(nil),           // 17: raftkv.v1.NotLeader
-	(*Member)(nil),              // 18: raftkv.v1.Member
-	(*AddNodeRequest)(nil),      // 19: raftkv.v1.AddNodeRequest
-	(*AddNodeResponse)(nil),     // 20: raftkv.v1.AddNodeResponse
-	(*RemoveNodeRequest)(nil),   // 21: raftkv.v1.RemoveNodeRequest
-	(*RemoveNodeResponse)(nil),  // 22: raftkv.v1.RemoveNodeResponse
-	(*ListMembersRequest)(nil),  // 23: raftkv.v1.ListMembersRequest
-	(*ListMembersResponse)(nil), // 24: raftkv.v1.ListMembersResponse
-	(*StatusRequest)(nil),       // 25: raftkv.v1.StatusRequest
-	(*StatusResponse)(nil),      // 26: raftkv.v1.StatusResponse
-	nil,                         // 27: raftkv.v1.ConfState.AddrsEntry
+	(MessageType)(0),             // 0: raftkv.v1.MessageType
+	(EntryType)(0),               // 1: raftkv.v1.EntryType
+	(NodeState)(0),               // 2: raftkv.v1.NodeState
+	(EventKind)(0),               // 3: raftkv.v1.EventKind
+	(*Entry)(nil),                // 4: raftkv.v1.Entry
+	(*Message)(nil),              // 5: raftkv.v1.Message
+	(*DeliverRequest)(nil),       // 6: raftkv.v1.DeliverRequest
+	(*SnapshotChunk)(nil),        // 7: raftkv.v1.SnapshotChunk
+	(*ConfState)(nil),            // 8: raftkv.v1.ConfState
+	(*Snapshot)(nil),             // 9: raftkv.v1.Snapshot
+	(*DeliverResponse)(nil),      // 10: raftkv.v1.DeliverResponse
+	(*ClientRequest)(nil),        // 11: raftkv.v1.ClientRequest
+	(*GetRequest)(nil),           // 12: raftkv.v1.GetRequest
+	(*GetResponse)(nil),          // 13: raftkv.v1.GetResponse
+	(*PutRequest)(nil),           // 14: raftkv.v1.PutRequest
+	(*PutResponse)(nil),          // 15: raftkv.v1.PutResponse
+	(*DeleteRequest)(nil),        // 16: raftkv.v1.DeleteRequest
+	(*DeleteResponse)(nil),       // 17: raftkv.v1.DeleteResponse
+	(*NotLeader)(nil),            // 18: raftkv.v1.NotLeader
+	(*Member)(nil),               // 19: raftkv.v1.Member
+	(*AddNodeRequest)(nil),       // 20: raftkv.v1.AddNodeRequest
+	(*AddNodeResponse)(nil),      // 21: raftkv.v1.AddNodeResponse
+	(*RemoveNodeRequest)(nil),    // 22: raftkv.v1.RemoveNodeRequest
+	(*RemoveNodeResponse)(nil),   // 23: raftkv.v1.RemoveNodeResponse
+	(*ListMembersRequest)(nil),   // 24: raftkv.v1.ListMembersRequest
+	(*ListMembersResponse)(nil),  // 25: raftkv.v1.ListMembersResponse
+	(*StatusRequest)(nil),        // 26: raftkv.v1.StatusRequest
+	(*StatusResponse)(nil),       // 27: raftkv.v1.StatusResponse
+	(*AdminStatusRequest)(nil),   // 28: raftkv.v1.AdminStatusRequest
+	(*AdminStatusResponse)(nil),  // 29: raftkv.v1.AdminStatusResponse
+	(*CrashRequest)(nil),         // 30: raftkv.v1.CrashRequest
+	(*CrashResponse)(nil),        // 31: raftkv.v1.CrashResponse
+	(*PauseRequest)(nil),         // 32: raftkv.v1.PauseRequest
+	(*PauseResponse)(nil),        // 33: raftkv.v1.PauseResponse
+	(*SetPartitionRequest)(nil),  // 34: raftkv.v1.SetPartitionRequest
+	(*SetPartitionResponse)(nil), // 35: raftkv.v1.SetPartitionResponse
+	(*SetNetemRequest)(nil),      // 36: raftkv.v1.SetNetemRequest
+	(*SetNetemResponse)(nil),     // 37: raftkv.v1.SetNetemResponse
+	(*EventsRequest)(nil),        // 38: raftkv.v1.EventsRequest
+	(*Event)(nil),                // 39: raftkv.v1.Event
+	nil,                          // 40: raftkv.v1.ConfState.AddrsEntry
 }
 var file_raftkv_v1_raftkv_proto_depIdxs = []int32{
 	1,  // 0: raftkv.v1.Entry.type:type_name -> raftkv.v1.EntryType
 	0,  // 1: raftkv.v1.Message.type:type_name -> raftkv.v1.MessageType
-	3,  // 2: raftkv.v1.Message.entries:type_name -> raftkv.v1.Entry
-	8,  // 3: raftkv.v1.Message.snapshot:type_name -> raftkv.v1.Snapshot
-	4,  // 4: raftkv.v1.DeliverRequest.message:type_name -> raftkv.v1.Message
-	4,  // 5: raftkv.v1.SnapshotChunk.header:type_name -> raftkv.v1.Message
-	27, // 6: raftkv.v1.ConfState.addrs:type_name -> raftkv.v1.ConfState.AddrsEntry
-	7,  // 7: raftkv.v1.Snapshot.conf:type_name -> raftkv.v1.ConfState
-	10, // 8: raftkv.v1.PutRequest.client:type_name -> raftkv.v1.ClientRequest
-	10, // 9: raftkv.v1.DeleteRequest.client:type_name -> raftkv.v1.ClientRequest
-	18, // 10: raftkv.v1.ListMembersResponse.members:type_name -> raftkv.v1.Member
+	4,  // 2: raftkv.v1.Message.entries:type_name -> raftkv.v1.Entry
+	9,  // 3: raftkv.v1.Message.snapshot:type_name -> raftkv.v1.Snapshot
+	5,  // 4: raftkv.v1.DeliverRequest.message:type_name -> raftkv.v1.Message
+	5,  // 5: raftkv.v1.SnapshotChunk.header:type_name -> raftkv.v1.Message
+	40, // 6: raftkv.v1.ConfState.addrs:type_name -> raftkv.v1.ConfState.AddrsEntry
+	8,  // 7: raftkv.v1.Snapshot.conf:type_name -> raftkv.v1.ConfState
+	11, // 8: raftkv.v1.PutRequest.client:type_name -> raftkv.v1.ClientRequest
+	11, // 9: raftkv.v1.DeleteRequest.client:type_name -> raftkv.v1.ClientRequest
+	19, // 10: raftkv.v1.ListMembersResponse.members:type_name -> raftkv.v1.Member
 	2,  // 11: raftkv.v1.StatusResponse.state:type_name -> raftkv.v1.NodeState
-	5,  // 12: raftkv.v1.RaftService.Deliver:input_type -> raftkv.v1.DeliverRequest
-	6,  // 13: raftkv.v1.RaftService.DeliverSnapshot:input_type -> raftkv.v1.SnapshotChunk
-	19, // 14: raftkv.v1.ClusterService.AddNode:input_type -> raftkv.v1.AddNodeRequest
-	21, // 15: raftkv.v1.ClusterService.RemoveNode:input_type -> raftkv.v1.RemoveNodeRequest
-	23, // 16: raftkv.v1.ClusterService.ListMembers:input_type -> raftkv.v1.ListMembersRequest
-	11, // 17: raftkv.v1.KVService.Get:input_type -> raftkv.v1.GetRequest
-	13, // 18: raftkv.v1.KVService.Put:input_type -> raftkv.v1.PutRequest
-	15, // 19: raftkv.v1.KVService.Delete:input_type -> raftkv.v1.DeleteRequest
-	25, // 20: raftkv.v1.KVService.Status:input_type -> raftkv.v1.StatusRequest
-	9,  // 21: raftkv.v1.RaftService.Deliver:output_type -> raftkv.v1.DeliverResponse
-	9,  // 22: raftkv.v1.RaftService.DeliverSnapshot:output_type -> raftkv.v1.DeliverResponse
-	20, // 23: raftkv.v1.ClusterService.AddNode:output_type -> raftkv.v1.AddNodeResponse
-	22, // 24: raftkv.v1.ClusterService.RemoveNode:output_type -> raftkv.v1.RemoveNodeResponse
-	24, // 25: raftkv.v1.ClusterService.ListMembers:output_type -> raftkv.v1.ListMembersResponse
-	12, // 26: raftkv.v1.KVService.Get:output_type -> raftkv.v1.GetResponse
-	14, // 27: raftkv.v1.KVService.Put:output_type -> raftkv.v1.PutResponse
-	16, // 28: raftkv.v1.KVService.Delete:output_type -> raftkv.v1.DeleteResponse
-	26, // 29: raftkv.v1.KVService.Status:output_type -> raftkv.v1.StatusResponse
-	21, // [21:30] is the sub-list for method output_type
-	12, // [12:21] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	2,  // 12: raftkv.v1.AdminStatusResponse.state:type_name -> raftkv.v1.NodeState
+	19, // 13: raftkv.v1.AdminStatusResponse.members:type_name -> raftkv.v1.Member
+	3,  // 14: raftkv.v1.Event.kind:type_name -> raftkv.v1.EventKind
+	2,  // 15: raftkv.v1.Event.role:type_name -> raftkv.v1.NodeState
+	6,  // 16: raftkv.v1.RaftService.Deliver:input_type -> raftkv.v1.DeliverRequest
+	7,  // 17: raftkv.v1.RaftService.DeliverSnapshot:input_type -> raftkv.v1.SnapshotChunk
+	20, // 18: raftkv.v1.ClusterService.AddNode:input_type -> raftkv.v1.AddNodeRequest
+	22, // 19: raftkv.v1.ClusterService.RemoveNode:input_type -> raftkv.v1.RemoveNodeRequest
+	24, // 20: raftkv.v1.ClusterService.ListMembers:input_type -> raftkv.v1.ListMembersRequest
+	12, // 21: raftkv.v1.KVService.Get:input_type -> raftkv.v1.GetRequest
+	14, // 22: raftkv.v1.KVService.Put:input_type -> raftkv.v1.PutRequest
+	16, // 23: raftkv.v1.KVService.Delete:input_type -> raftkv.v1.DeleteRequest
+	26, // 24: raftkv.v1.KVService.Status:input_type -> raftkv.v1.StatusRequest
+	28, // 25: raftkv.v1.AdminService.Status:input_type -> raftkv.v1.AdminStatusRequest
+	30, // 26: raftkv.v1.AdminService.Crash:input_type -> raftkv.v1.CrashRequest
+	32, // 27: raftkv.v1.AdminService.Pause:input_type -> raftkv.v1.PauseRequest
+	34, // 28: raftkv.v1.AdminService.SetPartition:input_type -> raftkv.v1.SetPartitionRequest
+	36, // 29: raftkv.v1.AdminService.SetNetem:input_type -> raftkv.v1.SetNetemRequest
+	38, // 30: raftkv.v1.AdminService.Events:input_type -> raftkv.v1.EventsRequest
+	10, // 31: raftkv.v1.RaftService.Deliver:output_type -> raftkv.v1.DeliverResponse
+	10, // 32: raftkv.v1.RaftService.DeliverSnapshot:output_type -> raftkv.v1.DeliverResponse
+	21, // 33: raftkv.v1.ClusterService.AddNode:output_type -> raftkv.v1.AddNodeResponse
+	23, // 34: raftkv.v1.ClusterService.RemoveNode:output_type -> raftkv.v1.RemoveNodeResponse
+	25, // 35: raftkv.v1.ClusterService.ListMembers:output_type -> raftkv.v1.ListMembersResponse
+	13, // 36: raftkv.v1.KVService.Get:output_type -> raftkv.v1.GetResponse
+	15, // 37: raftkv.v1.KVService.Put:output_type -> raftkv.v1.PutResponse
+	17, // 38: raftkv.v1.KVService.Delete:output_type -> raftkv.v1.DeleteResponse
+	27, // 39: raftkv.v1.KVService.Status:output_type -> raftkv.v1.StatusResponse
+	29, // 40: raftkv.v1.AdminService.Status:output_type -> raftkv.v1.AdminStatusResponse
+	31, // 41: raftkv.v1.AdminService.Crash:output_type -> raftkv.v1.CrashResponse
+	33, // 42: raftkv.v1.AdminService.Pause:output_type -> raftkv.v1.PauseResponse
+	35, // 43: raftkv.v1.AdminService.SetPartition:output_type -> raftkv.v1.SetPartitionResponse
+	37, // 44: raftkv.v1.AdminService.SetNetem:output_type -> raftkv.v1.SetNetemResponse
+	39, // 45: raftkv.v1.AdminService.Events:output_type -> raftkv.v1.Event
+	31, // [31:46] is the sub-list for method output_type
+	16, // [16:31] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_raftkv_v1_raftkv_proto_init() }
@@ -1888,10 +2684,10 @@ func file_raftkv_v1_raftkv_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_raftkv_v1_raftkv_proto_rawDesc), len(file_raftkv_v1_raftkv_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   25,
+			NumEnums:      4,
+			NumMessages:   37,
 			NumExtensions: 0,
-			NumServices:   3,
+			NumServices:   4,
 		},
 		GoTypes:           file_raftkv_v1_raftkv_proto_goTypes,
 		DependencyIndexes: file_raftkv_v1_raftkv_proto_depIdxs,
