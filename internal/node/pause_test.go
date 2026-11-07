@@ -52,6 +52,11 @@ func TestPauseWithCommittedEntriesAndPendingSnapshotAppliesOnce(t *testing.T) {
 	if err := src.Apply(raft.Entry{Term: 1, Index: 1, Type: raft.EntryNormal, Data: putCmd(1, "snap", 9)}); err != nil {
 		t.Fatalf("building the snapshot image: %v", err)
 	}
+	for i := raft.Index(2); i <= 10; i++ { // the image must be applied through the snapshot's index
+		if err := src.Apply(raft.Entry{Term: 1, Index: i, Type: raft.EntryNoOp}); err != nil {
+			t.Fatalf("building the snapshot image: %v", err)
+		}
+	}
 	image, err := src.Snapshot()
 	if err != nil {
 		t.Fatalf("snapshot image: %v", err)
