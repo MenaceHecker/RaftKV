@@ -502,8 +502,8 @@ func TestDelayKeepsPerPeerOrderAndUsesInjectedClock(t *testing.T) {
 	expectTerms(t, "second at 60ms", inner.terms(2), []raft.Term{1, 2})
 
 	// A later, shorter delay must not let a newer message overtake an older one.
-	f.SetDelay(2, 100*time.Millisecond)
-	f.Send([]raft.Message{msg(2, 3)}) // due +100ms
+	f.SetDelay(2, 100*time.Millisecond) // guard:fakeclock
+	f.Send([]raft.Message{msg(2, 3)})   // due +100ms
 	f.SetDelay(2, 10*time.Millisecond)
 	f.Send([]raft.Message{msg(2, 4)}) // due +10ms, but queued behind 3
 
@@ -781,14 +781,14 @@ func TestResetAndClearRaceWithExpiry(t *testing.T) {
 				clock.advisoryStop = tc.advisory
 
 				f.SetPartition([]raft.NodeID{2}) // expires 120s
-				clock.Advance(100 * time.Second)
+				clock.Advance(100 * time.Second) // guard:fakeclock
 				f.SetPartition([]raft.NodeID{2}) // re-set: expires 220s
 
 				clock.Advance(20 * time.Second) // 120s: the first deadline passes
 				f.Send([]raft.Message{msg(2, 1)})
 				expectTerms(t, "at 120s the re-set partition holds", inner.terms(2), nil)
 
-				clock.Advance(99*time.Second + 999*time.Millisecond) // 219.999s
+				clock.Advance(99*time.Second + 999*time.Millisecond) // 219.999s // guard:fakeclock
 				f.Send([]raft.Message{msg(2, 2)})
 				expectTerms(t, "just before 220s", inner.terms(2), nil)
 
@@ -802,7 +802,7 @@ func TestResetAndClearRaceWithExpiry(t *testing.T) {
 				clock.advisoryStop = tc.advisory
 
 				f.SetPartition([]raft.NodeID{2}) // would expire at 120s
-				clock.Advance(119 * time.Second)
+				clock.Advance(119 * time.Second) // guard:fakeclock
 				f.ClearFaults()
 				// Set again 1ns before the cleared fault's deadline, so that deadline
 				// passes after the new fault exists and a stale timer could hit it.
@@ -814,7 +814,7 @@ func TestResetAndClearRaceWithExpiry(t *testing.T) {
 				f.Send([]raft.Message{msg(2, 1)})
 				expectTerms(t, "a new fault survives the old deadline", inner.terms(2), nil)
 
-				clock.Advance(118*time.Second + 999*time.Millisecond) // 121s -> 239.999s
+				clock.Advance(118*time.Second + 999*time.Millisecond) // 121s -> 239.999s // guard:fakeclock
 				f.Send([]raft.Message{msg(2, 2)})
 				expectTerms(t, "just before the new deadline at 240s", inner.terms(2), nil)
 
@@ -854,12 +854,12 @@ func TestDelayQueueIsBoundedAndDroppedOnExpiryOrClear(t *testing.T) {
 
 	t.Run("expiry discards queued messages and later ones pass at once", func(t *testing.T) {
 		f, inner, clock, _ := newTestFaults(t)
-		f.SetDelay(2, 119*time.Second) // expires at 120s
+		f.SetDelay(2, 119*time.Second) // expires at 120s // guard:fakeclock
 
 		clock.Advance(10 * time.Second)
 		f.Send([]raft.Message{msg(2, 1)}) // due at 129s, after the fault is gone
 
-		clock.Advance(110 * time.Second) // 120s: the delay expires with no admin call
+		clock.Advance(110 * time.Second) // 120s: the delay expires with no admin call // guard:fakeclock
 		if got := f.Stats().Discarded; got != 1 {
 			t.Fatalf("Discarded = %d after expiry, want 1", got)
 		}
@@ -868,7 +868,7 @@ func TestDelayQueueIsBoundedAndDroppedOnExpiryOrClear(t *testing.T) {
 		f.Send([]raft.Message{msg(2, 2)})
 		expectTerms(t, "a message after expiry passes at once", inner.terms(2), []raft.Term{2})
 
-		clock.Advance(100 * time.Second) // past the discarded message's old due time
+		clock.Advance(100 * time.Second) // past the discarded message's old due time // guard:fakeclock
 		expectTerms(t, "the discarded message never arrives", inner.terms(2), []raft.Term{2})
 	})
 
