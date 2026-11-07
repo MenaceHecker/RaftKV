@@ -57,6 +57,9 @@ type Config struct {
 	MaxCommittedEntries int
 
 	MaxProposalBatch int
+
+	// Clock drives ticks and timers. Nil means the real clock.
+	Clock Clock
 }
 
 const (
@@ -87,6 +90,9 @@ func (c *Config) applyDefaults() {
 	if c.MaxProposalBatch == 0 {
 		c.MaxProposalBatch = DefaultMaxProposalBatch
 	}
+	if c.Clock == nil {
+		c.Clock = realClock{}
+	}
 }
 
 func (c *Config) validate() error {
@@ -113,6 +119,13 @@ type Status struct {
 	Members raft.ConfState
 
 	SnapshotsReceived uint64
+
+	// FirstIndex and LastIndex bound the log entries present, and are both zero
+	// when it holds none. SnapshotIndex is the index of the latest snapshot, or
+	// zero. Whether the configuration is joint is Members.Joint.
+	FirstIndex    raft.Index
+	LastIndex     raft.Index
+	SnapshotIndex raft.Index
 }
 
 type proposal struct {
@@ -164,6 +177,19 @@ type Node struct {
 
 	lastTerm   raft.Term
 	lastLeader raft.NodeID
+
+	// lastObserved is the (term, role, leader) tuple of the last event, so both
+	// observation hooks together emit each transition once.
+	lastObserved observation
+
+	events eventBus
+	pause  pauseState
+}
+
+type observation struct {
+	term   raft.Term
+	role   raft.State
+	leader raft.NodeID
 }
 
 type proposalRequest struct {
@@ -359,7 +385,7 @@ func (n *Node) Get(ctx context.Context, key string) ([]byte, bool, error) {
 func (n *Node) run() {
 	defer close(n.donec)
 
-	ticker := time.NewTicker(n.cfg.TickInterval)
+	ticker := n.cfg.Clock.NewTicker(n.cfg.TickInterval)
 	defer ticker.Stop()
 
 	for {
@@ -368,7 +394,12 @@ func (n *Node) run() {
 			n.failAllPending(ErrStopped)
 			return
 
-		case <-ticker.C:
+		case <-ticker.C():
+			// A paused node skips its ticks: no election timeout, no heartbeat.
+			// Every other case, including applyc below, is served as usual.
+			if n.Paused() {
+				break
+			}
 			if err := n.raft.Tick(); err != nil {
 				n.failAllPending(fmt.Errorf("node: %w", err))
 				return
@@ -413,7 +444,18 @@ func (n *Node) run() {
 }
 
 func (n *Node) status() Status {
+	// The log holds entries first..last. After a snapshot the log can be empty,
+	// with last below first; report that as no entries, as the admin API says.
+	first, last := n.storage.FirstIndex(), n.raft.LastIndex()
+	if last < first {
+		first, last = 0, 0
+	}
+
 	return Status{
+		FirstIndex:    first,
+		LastIndex:     last,
+		SnapshotIndex: n.lastSnapshot,
+
 		ID:      n.raft.ID(),
 		Leader:  n.raft.Leader(),
 		Term:    n.raft.Term(),
@@ -777,11 +819,35 @@ func (n *Node) reconcileTransport() {
 	}
 }
 
+// observeLeadership is called from both observation points in processReady.
+//
+// Events are observed transitions only: a change of the (term, role, leader)
+// tuple seen at one of the two hooks, deduplicated on the full tuple across
+// both hooks so one transition is emitted once. Transitions that start and end
+// between two observations (for example a candidate round inside one Tick) are
+// not seen, and there is no per-vote detail. Seq is assigned by the event bus.
 func (n *Node) observeLeadership() {
-	term, leader := n.raft.Term(), n.raft.Leader()
-	if term == n.lastTerm && leader == n.lastLeader {
+	term, leader, role := n.raft.Term(), n.raft.Leader(), n.raft.State()
+
+	// The leadership metric keeps its original condition: term or leader only.
+	if term != n.lastTerm || leader != n.lastLeader {
+		n.lastTerm, n.lastLeader = term, leader
+		n.cfg.Metrics.LeaderChanged(uint64(term), uint64(leader), role == raft.Leader)
+	}
+
+	obs := observation{term: term, role: role, leader: leader}
+	if obs == n.lastObserved {
 		return
 	}
-	n.lastTerm, n.lastLeader = term, leader
-	n.cfg.Metrics.LeaderChanged(uint64(term), uint64(leader), n.raft.State() == raft.Leader)
+	n.lastObserved = obs
+	n.events.publish(Event{
+		UnixNano:      n.cfg.Clock.Now().UnixNano(),
+		Node:          n.raft.ID(),
+		Term:          term,
+		Role:          role,
+		Leader:        leader,
+		Commit:        n.raft.CommitIndex(),
+		Applied:       n.kv.Applied(),
+		SnapshotIndex: n.lastSnapshot,
+	})
 }

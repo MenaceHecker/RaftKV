@@ -342,3 +342,108 @@ message StatusResponse {
   uint64 commit_index = 6;
   uint64 applied_index = 7;
 }
+
+// AdminService is the operator and demo control surface of one node.
+//
+// It is served on its own listener (--admin-listen), never on the shared
+// client and peer listener. Every method needs the bearer token; Crash, Pause,
+// SetPartition and SetNetem also need --admin-chaos. The faults it injects are
+// application-level: they drop or delay Raft messages and stop ticks inside
+// the process, they do not touch the kernel network stack or the OS scheduler.
+service AdminService {
+  // Status reports everything KVService.Status does plus the log and
+  // membership detail an operator wants. It keeps working while paused.
+  rpc Status(AdminStatusRequest) returns (AdminStatusResponse);
+
+  // Crash replies, then terminates the process with exit status 137 about 50ms
+  // later and without running deferred cleanup. The reply is best effort: a
+  // caller must treat a lost connection right after Crash as success.
+  rpc Crash(CrashRequest) returns (CrashResponse);
+
+  // Pause stops ticks, drops peer messages in both directions and makes every
+  // KVService and ClusterService method return UNAVAILABLE. Apply is not
+  // frozen. Zero duration resumes at once; the duration is clamped to 60s and
+  // the node resumes by itself when it elapses.
+  rpc Pause(PauseRequest) returns (PauseResponse);
+
+  // SetPartition replaces the set of peers this node can neither send to nor
+  // receive from. An empty set heals the partition. It expires after 120s.
+  rpc SetPartition(SetPartitionRequest) returns (SetPartitionResponse);
+
+  // SetNetem replaces the loss and delay applied to messages sent to a peer
+  // (or to every peer). Zero delay and zero loss clears it. It expires after
+  // 120s.
+  rpc SetNetem(SetNetemRequest) returns (SetNetemResponse);
+
+  // Events streams observed (term, role, leader) transitions. Transitions that
+  // start and end between two observations are not guaranteed to be seen.
+  rpc Events(EventsRequest) returns (stream Event);
+}
+
+message AdminStatusRequest {}
+
+message AdminStatusResponse {
+  uint64 node_id = 1;
+  uint64 leader_id = 2;
+  string leader_address = 3;
+  uint64 term = 4;
+  NodeState state = 5;
+  uint64 commit_index = 6;
+  uint64 applied_index = 7;
+  repeated Member members = 8;
+  bool joint = 9;
+  // First and last index present in the log, and the index of the latest
+  // snapshot. Zero when there is none.
+  uint64 first_index = 10;
+  uint64 last_index = 11;
+  uint64 snapshot_index = 12;
+  bool paused = 13;
+}
+
+message CrashRequest {}
+message CrashResponse {}
+
+message PauseRequest {
+  // How long to pause, in milliseconds. Zero resumes. Clamped to 60000.
+  uint64 duration_ms = 1;
+}
+message PauseResponse {}
+
+message SetPartitionRequest {
+  // Peers cut off from this node in both directions.
+  repeated uint64 blocked = 1;
+}
+message SetPartitionResponse {}
+
+message SetNetemRequest {
+  // The peer the rule applies to; zero means every peer.
+  uint64 peer = 1;
+  // Fixed delay added to each message sent, in milliseconds.
+  uint32 delay_ms = 2;
+  // Percentage of messages dropped, 0 to 100 inclusive.
+  uint32 drop_percent = 3;
+}
+message SetNetemResponse {}
+
+message EventsRequest {}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  // The observed (term, role, leader) tuple changed.
+  EVENT_KIND_STATE = 1;
+}
+
+// Event is one observed state transition. seq increases by exactly one per
+// event on a node, so a gap means the stream lost events.
+message Event {
+  EventKind kind = 1;
+  uint64 node = 2;
+  uint64 term = 3;
+  NodeState role = 4;
+  uint64 leader = 5;
+  uint64 commit = 6;
+  uint64 applied = 7;
+  uint64 snapshot_index = 8;
+  uint64 seq = 9;
+  int64 unix_nano = 10;
+}

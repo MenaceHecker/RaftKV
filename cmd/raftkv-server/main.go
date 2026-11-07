@@ -1,3 +1,17 @@
+// Command raftkv-server runs one RaftKV node.
+//
+// The optional admin API (-admin-listen, -admin-token-file, -admin-chaos) is OFF
+// by default, and what it protects is narrow. Its bearer token, the chaos switch
+// and the separate listener guard the AdminService RPCs only. They do NOT cover
+// the shared -listen port, which still accepts without authentication:
+//
+//   - AddNode and RemoveNode, so anyone who can reach that port can change
+//     cluster membership; and
+//   - snapshot streams of up to 1 GiB each, with no bound on how many run at
+//     once or on the memory they hold in total.
+//
+// Both are pre-existing and tracked as backlog card T3.18. Keep the shared port
+// on a trusted network; the admin token does not make it safe to expose.
 package main
 
 import (
@@ -12,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,6 +39,7 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 	"github.com/MenaceHecker/raftkv/internal/storage"
 	"github.com/MenaceHecker/raftkv/internal/transport"
+	raftkvv1 "github.com/MenaceHecker/raftkv/internal/transport/raftkv/v1"
 )
 
 func main() {
@@ -45,32 +61,64 @@ type options struct {
 	snapshot uint64
 	logLevel string
 	metrics  string
+
+	adminListen    string
+	adminTokenFile string
+	adminChaos     bool
+}
+
+// defineFlags registers the server's flags on fs. The admin flags default to off.
+func defineFlags(fs *flag.FlagSet, opt *options) {
+	fs.Uint64Var(&opt.id, "id", 0,
+		"this node's ID; must be non-zero and appear in -peers")
+	fs.StringVar(&opt.peers, "peers", "",
+		"comma-separated id=host:port for every member, including this one")
+	fs.StringVar(&opt.listen, "listen", "",
+		"address to bind (default: this node's address from -peers)")
+	fs.StringVar(&opt.dataDir, "data-dir", "",
+		"directory for the write-ahead log and snapshots")
+	fs.DurationVar(&opt.tick, "tick", node.DefaultTickInterval,
+		"how much wall time one logical tick represents")
+	fs.IntVar(&opt.election, "election-ticks", node.DefaultElectionTick,
+		"ticks without hearing from a leader before starting an election")
+	fs.IntVar(&opt.beat, "heartbeat-ticks", node.DefaultHeartbeatTick,
+		"ticks between a leader's heartbeats; must be well below -election-ticks")
+	fs.BoolVar(&opt.fsync, "fsync", true,
+		"fsync every write-ahead log append; disabling it survives a process crash but not power loss")
+	fs.Uint64Var(&opt.snapshot, "snapshot-threshold", node.DefaultSnapshotThreshold,
+		"entries applied past the last snapshot before another is taken")
+	fs.StringVar(&opt.logLevel, "log-level", "info", "debug, info, warn, or error")
+	fs.StringVar(&opt.metrics, "metrics-listen", "",
+		"address to serve Prometheus metrics and health on, e.g. 127.0.0.1:9101 (empty disables it)")
+	fs.StringVar(&opt.adminListen, "admin-listen", "",
+		"address for the admin API (status, events, fault injection); empty disables it. Needs -admin-token-file")
+	fs.StringVar(&opt.adminTokenFile, "admin-token-file", "",
+		"file holding the admin bearer token, readable only by its owner (mode 0600); required with -admin-listen")
+	fs.BoolVar(&opt.adminChaos, "admin-chaos", false,
+		"also allow the admin RPCs that inject faults: Crash, Pause, SetPartition, SetNetem")
+}
+
+// validateAdminOptions fails closed. The admin listener starts only with a usable
+// token; the chaos switch and the token file mean nothing without the listener, so
+// they are refused too rather than silently ignored. It returns the token, or ""
+// when the admin API is off. It never includes the token in an error.
+func validateAdminOptions(opt options) (token string, err error) {
+	if opt.adminListen == "" {
+		if opt.adminChaos {
+			return "", errors.New("-admin-chaos has no effect without -admin-listen")
+		}
+		if opt.adminTokenFile != "" {
+			return "", errors.New("-admin-token-file has no effect without -admin-listen")
+		}
+		return "", nil
+	}
+	return transport.LoadAdminToken(opt.adminTokenFile)
 }
 
 func run() error {
 	var opt options
 
-	flag.Uint64Var(&opt.id, "id", 0,
-		"this node's ID; must be non-zero and appear in -peers")
-	flag.StringVar(&opt.peers, "peers", "",
-		"comma-separated id=host:port for every member, including this one")
-	flag.StringVar(&opt.listen, "listen", "",
-		"address to bind (default: this node's address from -peers)")
-	flag.StringVar(&opt.dataDir, "data-dir", "",
-		"directory for the write-ahead log and snapshots")
-	flag.DurationVar(&opt.tick, "tick", node.DefaultTickInterval,
-		"how much wall time one logical tick represents")
-	flag.IntVar(&opt.election, "election-ticks", node.DefaultElectionTick,
-		"ticks without hearing from a leader before starting an election")
-	flag.IntVar(&opt.beat, "heartbeat-ticks", node.DefaultHeartbeatTick,
-		"ticks between a leader's heartbeats; must be well below -election-ticks")
-	flag.BoolVar(&opt.fsync, "fsync", true,
-		"fsync every write-ahead log append; disabling it survives a process crash but not power loss")
-	flag.Uint64Var(&opt.snapshot, "snapshot-threshold", node.DefaultSnapshotThreshold,
-		"entries applied past the last snapshot before another is taken")
-	flag.StringVar(&opt.logLevel, "log-level", "info", "debug, info, warn, or error")
-	flag.StringVar(&opt.metrics, "metrics-listen", "",
-		"address to serve Prometheus metrics and health on, e.g. 127.0.0.1:9101 (empty disables it)")
+	defineFlags(flag.CommandLine, &opt)
 	flag.Parse()
 
 	logger, err := newLogger(opt.logLevel)
@@ -90,6 +138,13 @@ func run() error {
 	if opt.dataDir == "" {
 		return errors.New("-data-dir is required")
 	}
+
+	// Fail closed before anything starts: the admin listener needs a usable token.
+	adminToken, err := validateAdminOptions(opt)
+	if err != nil {
+		return err
+	}
+	adminOn := opt.adminListen != ""
 
 	bind := opt.listen
 	if bind == "" {
@@ -114,6 +169,25 @@ func run() error {
 	}
 	defer peerTransport.Close()
 
+	// With the admin API off nothing is wrapped and behaviour is unchanged. With
+	// it on, faults sit between the node and the peer transport, and the ingress
+	// filter and pause gate are installed below.
+	var (
+		nodeTransport node.Transport = peerTransport
+		faults        *transport.FaultTransport
+		nodeRef       atomic.Pointer[node.Node]
+	)
+	if adminOn {
+		faults = transport.NewFaultTransport(transport.FaultConfig{
+			Self:   self,
+			Inner:  peerTransport,
+			Clock:  transport.RealClock{},
+			Rand:   transport.RealRand{},
+			Paused: func() bool { n := nodeRef.Load(); return n != nil && n.Paused() },
+		})
+		nodeTransport = faults
+	}
+
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(
 		collectors.NewGoCollector(),
@@ -131,7 +205,7 @@ func run() error {
 		ID:                self,
 		Peers:             ids,
 		DataDir:           opt.dataDir,
-		Transport:         peerTransport,
+		Transport:         nodeTransport,
 		TickInterval:      opt.tick,
 		ElectionTick:      opt.election,
 		HeartbeatTick:     opt.beat,
@@ -143,6 +217,8 @@ func run() error {
 		listener.Close()
 		return err
 	}
+
+	nodeRef.Store(n)
 
 	registry.MustRegister(metrics.NewCollector(n, peerTransport))
 
@@ -168,9 +244,39 @@ func run() error {
 		return err
 	}
 
-	grpcServer := grpc.NewServer()
-	raftServer.Register(grpcServer)
-	kvServer.Register(grpcServer)
+	var faultsForServer *transport.FaultTransport
+	if adminOn {
+		faultsForServer = faults
+	}
+	grpcServer := newSharedServer(n, raftServer, kvServer, faultsForServer)
+
+	// AdminService is served on its own listener and nowhere else.
+	var (
+		adminServer *grpc.Server
+		adminErr    chan error
+	)
+	if adminOn {
+		adminListener, err := net.Listen("tcp", opt.adminListen)
+		if err != nil {
+			_ = n.Stop() // best effort: already failing
+			_ = listener.Close()
+			return fmt.Errorf("listening for the admin API on %s: %w", opt.adminListen, err)
+		}
+		adminServer, err = newAdminServer(n, faults, adminToken, opt.adminChaos)
+		if err != nil {
+			_ = n.Stop() // best effort: already failing
+			_ = listener.Close()
+			_ = adminListener.Close()
+			return err
+		}
+
+		adminErr = make(chan error, 1)
+		go func() { adminErr <- adminServer.Serve(adminListener) }()
+		slog.Info("admin API enabled", "address", adminListener.Addr().String(), "chaos", opt.adminChaos)
+		if opt.adminChaos {
+			slog.Warn("fault injection is enabled (-admin-chaos): Crash, Pause, SetPartition and SetNetem will act")
+		}
+	}
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -191,7 +297,13 @@ func run() error {
 			n.Stop()
 			return fmt.Errorf("serving: %w", err)
 		}
+	case err := <-adminErr: // nil channel, so never ready, when the admin API is off
+		if err != nil {
+			_ = n.Stop() // best effort: already failing
+			return fmt.Errorf("serving the admin API: %w", err)
+		}
 	case <-n.Done():
+		stopAdmin(adminServer)
 		stopServer(grpcServer)
 		if metricsServer != nil {
 			metricsServer.Close()
@@ -199,6 +311,7 @@ func run() error {
 		return errors.New("the consensus loop stopped")
 	}
 
+	stopAdmin(adminServer)
 	stopServer(grpcServer)
 
 	if metricsServer != nil {
@@ -212,7 +325,47 @@ func run() error {
 	return nil
 }
 
+// newSharedServer builds the gRPC server for the shared -listen port: the Raft
+// and client services and, deliberately, never AdminService. With faults nil (the
+// admin API is off) it is exactly the plain server. With faults set, the Raft
+// endpoint goes through the ingress filter and the pause gate fails the client
+// services while the node is paused.
+func newSharedServer(n *node.Node, raftServer *transport.RaftServer, kvServer *transport.KVServer, faults *transport.FaultTransport) *grpc.Server {
+	var srv *grpc.Server
+	if faults != nil {
+		pauseUnary, pauseStream := transport.NewPauseGate(n.Paused)
+		srv = grpc.NewServer(grpc.ChainUnaryInterceptor(pauseUnary), grpc.ChainStreamInterceptor(pauseStream))
+		raftkvv1.RegisterRaftServiceServer(srv, faults.WrapRaftServer(raftServer))
+	} else {
+		srv = grpc.NewServer()
+		raftServer.Register(srv)
+	}
+	kvServer.Register(srv)
+	return srv
+}
+
+// newAdminServer builds the gRPC server for -admin-listen: AdminService behind
+// the token interceptors, and nothing else.
+func newAdminServer(n *node.Node, faults *transport.FaultTransport, token string, chaos bool) (*grpc.Server, error) {
+	svc, err := transport.NewAdminServer(transport.AdminConfig{Node: n, Faults: faults, Chaos: chaos})
+	if err != nil {
+		return nil, err
+	}
+	authUnary, authStream := transport.NewAdminInterceptors(token, chaos)
+	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(authUnary), grpc.ChainStreamInterceptor(authStream))
+	svc.Register(srv)
+	return srv, nil
+}
+
 const shutdownGrace = 5 * time.Second
+
+// stopAdmin stops the admin server, if there is one, without waiting for streams:
+// an Events client would otherwise hold a graceful stop open until the grace expires.
+func stopAdmin(srv *grpc.Server) {
+	if srv != nil {
+		srv.Stop()
+	}
+}
 
 func stopServer(srv *grpc.Server) {
 	done := make(chan struct{})
