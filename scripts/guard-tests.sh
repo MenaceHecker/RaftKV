@@ -11,5 +11,19 @@ if echo "$diff" | grep -E '^-\s*(require|assert)\.' | head -1 >/dev/null; then
   if [ "$removed" -gt "$added" ]; then echo "WARN: net assertions removed ($removed removed, $added added)"; bad=1; fi
 fi
 # Both orders: `time.Millisecond * 5000` and `5000 * time.Millisecond`.
-if echo "$diff" | grep -E '^\+.*(time\.(Second|Millisecond)\s*\*\s*[0-9]{3,}|[0-9]{3,}\s*\*\s*time\.(Second|Millisecond))' ; then echo "WARN: large timeout added"; bad=1; fi
+mult='(time\.(Second|Millisecond)[[:space:]]*\*[[:space:]]*[0-9]{3,}|[0-9]{3,}[[:space:]]*\*[[:space:]]*time\.(Second|Millisecond))'
+# Fake-clock inputs cost no real time. A line is exempt only when it ends in the marker comment
+# `// guard:fakeclock` and contains no real wait (time.Sleep/After/Tick/NewTimer/NewTicker,
+# context.WithTimeout/WithDeadline, Eventually, WaitFor).
+marker='//[[:space:]]*guard:fakeclock[[:space:]]*$'
+real='time\.(Sleep|After|AfterFunc|Tick|NewTimer|NewTicker)\(|context\.With(Timeout|Deadline)\(|Eventually|WaitFor'
+big=$(echo "$diff" | grep -E "^\+.*$mult" || true)
+if [ -n "$big" ]; then
+  flagged=""
+  while IFS= read -r line; do
+    if ! echo "$line" | grep -qE "$real" && echo "$line" | grep -qE "$marker"; then continue; fi
+    flagged+="$line"$'\n'
+  done <<< "$big"
+  if [ -n "$flagged" ]; then printf '%s' "$flagged"; echo "WARN: large timeout added"; bad=1; fi
+fi
 exit $bad
