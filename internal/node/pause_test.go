@@ -112,7 +112,16 @@ func TestResumeWithNoIncomingTrafficIsLive(t *testing.T) {
 	requirePaused(t, h.n, "after Pause")
 	releaseApply()
 
-	h.await("the backlog to drain while paused, with no traffic", func(s Status) bool { return s.Applied == 5 })
+	// Wait on the apply counter, not on Status: serving Status runs processReady
+	// too, so polling it would supply the very wakeup this test is about.
+	deadline := time.Now().Add(waitLimit)
+	for h.rec.applied.Load() < 5 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of 5 committed entries were applied while paused with no traffic: the apply wakeup was lost",
+				h.rec.applied.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
 	requirePaused(t, h.n, "after the backlog drained")
 
 	for i := 0; i < 100; i++ {
@@ -131,6 +140,9 @@ func TestResumeWithNoIncomingTrafficIsLive(t *testing.T) {
 	}
 	if st := h.n.Status(); st.State != raft.PreCandidate {
 		t.Fatalf("after Resume and 40 ticks with no traffic the node is %s, want PreCandidate", st.State)
+	}
+	if got := h.rec.applied.Load(); got != 5 {
+		t.Fatalf("%d entries applied through the pause and resume, want exactly 5, each once", got)
 	}
 }
 
