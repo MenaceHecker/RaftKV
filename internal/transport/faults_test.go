@@ -804,8 +804,11 @@ func TestResetAndClearRaceWithExpiry(t *testing.T) {
 				f.SetPartition([]raft.NodeID{2}) // would expire at 120s
 				clock.Advance(119 * time.Second)
 				f.ClearFaults()
-				clock.Advance(time.Second) // 120s: the cleared fault's deadline
-				f.SetPartition([]raft.NodeID{2})
+				// Set again 1ns before the cleared fault's deadline, so that deadline
+				// passes after the new fault exists and a stale timer could hit it.
+				clock.Advance(time.Second - time.Nanosecond)
+				f.SetPartition([]raft.NodeID{2}) // expires at 239.999999999s
+				clock.Advance(time.Nanosecond)   // 120s: the old deadline
 
 				clock.Advance(time.Second) // 121s
 				f.Send([]raft.Message{msg(2, 1)})
