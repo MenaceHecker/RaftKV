@@ -440,6 +440,8 @@ func TestDropDecisionPerMessage(t *testing.T) {
 		expectTerms(t, "100% loss", inner.terms(2), nil)
 	})
 
+	// Negative control: green against the pass-through stub by design. It
+	// guards the implementation against dropping when no loss is set.
 	t.Run("0 percent drops nothing", func(t *testing.T) {
 		f, inner, _, rnd := newTestFaults(t)
 		rnd.draws = []int{0, 99, 50}
@@ -462,6 +464,8 @@ func TestDropDecisionPerMessage(t *testing.T) {
 		}
 	})
 
+	// Negative control: green against the pass-through stub by design. It
+	// guards the implementation against dropping or delaying self messages.
 	t.Run("self messages are never dropped", func(t *testing.T) {
 		f, inner, _, _ := newTestFaults(t)
 		if err := f.SetDropPercent(0, 100); err != nil {
