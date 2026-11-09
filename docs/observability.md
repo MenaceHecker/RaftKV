@@ -128,6 +128,43 @@ lost is normal and expected.
 prometheus --config.file=deploy/prometheus.yml
 ```
 
+## Admin API and fault injection (T4.7)
+
+An optional `AdminService` lets an operator or the demo gateway read a node's state, watch it change, and inject faults. It is
+**off by default**; with the flags unset nothing is wrapped and node behaviour is unchanged.
+
+| Flag | Effect |
+|---|---|
+| `--admin-listen ADDR` | Serve `AdminService` on its own listener, never on the shared client and peer port. |
+| `--admin-token-file PATH` | Bearer token file, mode 0600. Required with `--admin-listen`; the server refuses to start without a usable token. |
+| `--admin-chaos` | Also allow `Crash`, `Pause`, `SetPartition`, `SetNetem`. Without it they return `PermissionDenied`. |
+
+Every RPC, including the `Events` stream, needs `authorization: Bearer <token>` (constant-time compare). A missing and a wrong token get the
+same `Unauthenticated` reply. The token is never logged.
+
+| RPC | Behaviour |
+|---|---|
+| `Status` | `KVService.Status` fields plus `members`, `joint`, `first_index`, `last_index`, `snapshot_index`, `paused`. Works while paused. |
+| `Events` | Stream of observed `(term, role, leader)` transitions with a gap-free `seq`. Works while paused. |
+| `Crash` | Replies, then `os.Exit(137)` about 50ms later with no deferred cleanup; a supervisor restarts the process. The reply is best effort: treat a lost connection right after `Crash` as success. |
+| `Pause(d)` | Stops ticks, drops peer messages both ways (`Deliver` and `DeliverSnapshot`, including streams already open), and makes every `KVService`/`ClusterService` method return `Unavailable`. **Apply is not frozen.** `d` is clamped to 60s and the node resumes by itself; `d = 0` resumes at once. |
+| `SetPartition(blocked)` | Cuts the listed peers off in both directions; an empty set heals. |
+| `SetNetem(peer, delay, drop%)` | Delay and loss on messages sent to one peer or all (`peer = 0`). The delay queue holds at most 1024 messages per peer and is discarded when the fault expires or is cleared. |
+
+All injected faults (partition, delay, loss) expire at the node after 120s unless set again, each on its own timer, so a gateway that
+disappears cannot leave a node degraded.
+
+### What this is and is not
+
+- **Application level.** Faults drop or delay Raft messages and stop ticks inside the process. They do not touch the kernel network stack or
+  the OS scheduler. `Pause` models a frozen process as the application sees it, not a SIGSTOP; a paused node still applies committed entries.
+- **Events are observed transitions.** A term, role or leader change that starts and ends between two observations may not appear. There is
+  no per-vote or candidate-round detail. At most 16 subscribers are served; a subscriber that falls 256 events behind is ended with
+  `ResourceExhausted` and may resubscribe. Backlog: a raft observer hook for complete election events.
+- **The admin controls cover the admin RPCs only.** The shared listener still accepts, with no authentication, `AddNode`/`RemoveNode` and
+  snapshot streams of up to 1 GiB each with no aggregate or concurrency bound. Both are pre-existing; backlog card T3.18. The admin token does
+  not make the cluster safe to expose; run it on a trusted network.
+
 ## Verifying it
 
 `internal/metrics` tests run a real single-node cluster and assert on what
