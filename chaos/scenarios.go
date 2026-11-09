@@ -8,6 +8,11 @@ import (
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
+// AllScenarios returns the scenario catalog for cmd/chaosrun.
+func AllScenarios() []Scenario {
+	return allScenarios()
+}
+
 func requireDropped(st Stats) error {
 	if st.Dropped == 0 {
 		return fmt.Errorf("no messages were dropped")

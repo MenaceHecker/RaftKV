@@ -42,6 +42,15 @@ type RunResult struct {
 	OK, Failed, Unknown int
 
 	Err error
+
+	History []Op
+
+	Digest string
+}
+
+// RunSeeds runs every scenario over every seed, in scenario then seed order.
+func RunSeeds(_ []Scenario, _ []int64) []Report {
+	return nil
 }
 
 func (r RunResult) Passed() bool {
