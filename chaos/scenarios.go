@@ -1029,6 +1029,7 @@ func allScenarios() []Scenario {
 		scenarioRetriesAcrossLeaderChanges(),
 		scenarioVotersRestartDuringElections(),
 		scenarioWholeClusterRestarts(),
+		scenarioGenerated(),
 	}
 }
 
