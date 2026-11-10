@@ -5,6 +5,16 @@ func (n *Node) campaign() error {
 		return nil
 	}
 
+	// A node outside its own configuration must not campaign: it would bump
+	// and persist its term, disrupt the cluster that removed it, and could win
+	// a vote it has no place in (dissertation §4.2.3; Raft paper §6). The guard
+	// runs before any state change or persist. Resetting electionElapsed keeps
+	// the timeout from firing on every following tick.
+	if !n.promotable() {
+		n.electionElapsed = 0
+		return nil
+	}
+
 	if n.preVote {
 		return n.preCampaign()
 	}
