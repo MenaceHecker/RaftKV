@@ -19,7 +19,7 @@ works whether or not each one took effect.
 
 ## Summary
 
-23 of 23 scenarios held across all seeds.
+24 of 24 scenarios held across all seeds.
 
 | Scenario | Seeds | Result |
 |---|---|---|
@@ -46,6 +46,7 @@ works whether or not each one took effect.
 | resent writes while leadership keeps moving | 5 | pass |
 | voters restart while an election is being contested | 5 | pass |
 | every node restarts at once, repeatedly | 5 | pass |
+| generated nemesis and workload | 5 | pass |
 
 ## Detail
 
@@ -277,5 +278,15 @@ every node restarts at once, repeatedly
   seed 3    PASS             ticks=720   ops=32/0/0 (ok/failed/unknown) msgs=5488 dropped=36 partitioned=0 dup=0 delayed=0
   seed 5    PASS             ticks=712   ops=32/0/0 (ok/failed/unknown) msgs=5552 dropped=36 partitioned=0 dup=0 delayed=0
   seed 8    PASS             ticks=712   ops=32/0/0 (ok/failed/unknown) msgs=5584 dropped=36 partitioned=0 dup=0 delayed=0
+```
+
+```
+generated nemesis and workload
+  hypothesis: a nemesis schedule and client workload drawn from the seed keep every safety invariant, and once the cluster is healed and restarted a leader is elected and a write succeeds
+  seed 1    PASS             ticks=1120  ops=272/0/8 (ok/failed/unknown) msgs=14386 dropped=984 partitioned=926 dup=739 delayed=8810
+  seed 2    PASS             ticks=848   ops=148/40/5 (ok/failed/unknown) msgs=9447 dropped=277 partitioned=492 dup=0 delayed=4732
+  seed 3    PASS             ticks=976   ops=377/3/5 (ok/failed/unknown) msgs=13349 dropped=1606 partitioned=1247 dup=119 delayed=5160
+  seed 5    PASS             ticks=1056  ops=288/1/3 (ok/failed/unknown) msgs=13230 dropped=574 partitioned=1501 dup=178 delayed=2911
+  seed 8    PASS             ticks=1065  ops=336/1/6 (ok/failed/unknown) msgs=13113 dropped=610 partitioned=693 dup=0 delayed=5795
 ```
 
