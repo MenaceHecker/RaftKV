@@ -27,6 +27,8 @@ proto:
 	@command -v buf >/dev/null || { echo "buf is not installed: https://buf.build/docs/installation"; exit 1; }
 	buf generate
 
-# No cmd/chaosrun exists yet (RUNBOOK T5.6); run the full chaos report test, which -short skips.
+# Every chaos scenario over seeds 1-20 on virtual time (RUNBOOK 6.1, T5.6). There is no -duration:
+# the simulator advances by ticks, not wall time. This no longer refreshes docs/chaos-report.md;
+# `go test ./chaos -run TestChaosReport` still does.
 chaos-smoke:
-	go test ./chaos -run TestChaosReport -count=1 -timeout 10m
+	go run ./cmd/chaosrun -sim -seeds 1-20
