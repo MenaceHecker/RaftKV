@@ -1250,3 +1250,25 @@ func sanitize(name string) string {
 		}
 	}, name)
 }
+
+// TestSelfRemovalScenarioHoldsAcrossSeeds runs the leader-removes-itself
+// scenario over many seeds. A removed node used to time out, campaign, win and
+// then panic in becomeLeader (T3.19); one seed (7) was enough to show it.
+func TestSelfRemovalScenarioHoldsAcrossSeeds(t *testing.T) {
+	last := int64(50)
+	if testing.Short() {
+		last = 10
+	}
+	var many []int64
+	for s := int64(1); s <= last; s++ {
+		many = append(many, s)
+	}
+
+	report := RunScenario(scenarioLeaderRemovesItself(), many)
+	for _, run := range report.Runs {
+		if !run.Passed() {
+			t.Errorf("seed %d did not hold: err=%v converged=%v linearizable=%s",
+				run.Seed, run.Err, run.Converged, run.Linearizable)
+		}
+	}
+}

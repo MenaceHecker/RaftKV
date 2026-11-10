@@ -158,9 +158,16 @@ OK = code does it. GAP = differs from the RUNBOOK. UNKNOWN = cannot tell by read
 - **Behaviour change visible to clients:** `AddNode` returns when the joint entry commits; an `AddNode`/`RemoveNode` immediately after is
   refused with `FailedPrecondition` until the automatic leave commits. `ListMembers` reports `joint=false` as soon as the leave is
   *appended*, which is before it commits. Two transport tests now retry on that refusal (human decision).
-- **Not fixed: a node outside its own configuration can campaign and win.** `becomeLeader` dereferences `n.progress[n.id]`
-  (`internal/raft/node.go`), which is nil for a node whose configuration lacks itself, so a removed node that times out can panic. Found by
-  the random schedule in `TestAtMostOnePendingConfEntry`, which therefore does not tick such nodes. Needs its own card.
 - **Not done from the card:** test 5b/5c (pending state across snapshot install, joint snapshot with no entry), the 4(a-c,e) variants of
   test 4, and the additive chaos scenario. The core covers 5b/5c by construction (`lastConfIndex` is assigned unconditionally) but no test
   pins it. T3.17 test 3 (card commit 10) is also not moved.
+
+## 10. T3.19 findings (branch `fix/t3-19-nonmember-campaign`)
+
+- A node whose configuration lacks its own id no longer campaigns: `campaign()` returns without side effects (no term bump, no persist, no
+  messages) unless `promotable()`, which is `conf.hasVoter(id)` (voters, plus incoming while joint; the same set as `members()`). During a
+  leave, the outgoing node is still in `voters` and stays promotable until the joint config is left. `becomeLeader` returns an error for a
+  non-member instead of panicking. Before the fix, `chaos` scenario "the leader removes itself" panicked in `becomeLeader` at seed 7.
+- Unchanged and not done: a removed node still *responds* to vote requests and appends until it learns of its removal; rejecting
+  non-member vote requests (dissertation §4.2.3 disruption defence) and telling a removed node it was removed are out of scope.
+  `TestAtMostOnePendingConfEntry` still does not tick removed nodes; that is no longer required for safety but was not changed.

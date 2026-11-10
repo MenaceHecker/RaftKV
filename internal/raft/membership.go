@@ -31,6 +31,13 @@ func (c *config) hasVoter(id NodeID) bool {
 	return ok
 }
 
+// promotable reports whether id may campaign: it must be a voter of the
+// effective configuration. That is voters, plus incoming while joint; during a
+// leave the outgoing node is still in voters and still counts toward the old
+// majority, so it stays promotable until the joint configuration is left.
+// This is the same set as members() and hasVoter().
+func (n *Node) promotable() bool { return n.conf.hasVoter(n.id) }
+
 func (c *config) members() []NodeID {
 	seen := make(map[NodeID]struct{}, len(c.voters)+len(c.incoming))
 	for id := range c.voters {

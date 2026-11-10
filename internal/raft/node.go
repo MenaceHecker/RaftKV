@@ -486,6 +486,11 @@ func (n *Node) becomeLeader() error {
 	if n.state != Candidate {
 		return fmt.Errorf("raft: cannot become leader from %s", n.state)
 	}
+	// Defence in depth for T3.19: leadership needs a progress entry for self,
+	// which is built from the configuration. Checked before any state change.
+	if !n.promotable() {
+		return fmt.Errorf("raft: %d is not in its own configuration", n.id)
+	}
 
 	n.state = Leader
 	n.leader = n.id
