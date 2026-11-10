@@ -348,7 +348,7 @@ func (c *Cluster) IDs() []raft.NodeID { return c.ids }
 func (c *Cluster) Now() int64 { return c.net.Now() }
 
 // Seed returns the seed the cluster was built with.
-func (c *Cluster) Seed() int64 { return 0 }
+func (c *Cluster) Seed() int64 { return c.cfg.Seed }
 
 func (c *Cluster) History() []Op {
 	out := make([]Op, 0, len(c.history))

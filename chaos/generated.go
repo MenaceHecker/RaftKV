@@ -1,6 +1,13 @@
 package chaos
 
-import "github.com/MenaceHecker/raftkv/internal/raft"
+import (
+	"errors"
+
+	"github.com/MenaceHecker/raftkv/internal/raft"
+)
+
+// errNotImplemented marks the stub below until the generated scenario lands.
+var errNotImplemented = errors.New("chaos: not implemented")
 
 // StepKind names one nemesis action in a generated schedule (RUNBOOK 8.4).
 type StepKind int
