@@ -44,7 +44,7 @@ The bar I set for myself was that every safety property in the paper should have
 
 **The parts around the algorithm.** A node driver that owns the core, the WAL and the state machine and runs the loop connecting them, with real goroutines, real timers and real recovery on restart. A gRPC wire protocol with the codec between it and the core fully tested, and a server that redirects a client to the leader instead of refusing it. Prometheus metrics, health and readiness endpoints, a Grafana dashboard and alert rules, covered in [docs/observability.md](docs/observability.md). A multi-stage Docker image that runs the tests during the build, a five node compose stack, and Kubernetes manifests verified against a real cluster, covered in [docs/deployment.md](docs/deployment.md).
 
-**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Twenty-three scenarios covering membership changes, snapshot transfer, client retries and whole-cluster restarts, run across multiple seeds, with Election Safety checked on every tick.
+**Chaos testing with a linearizability checker.** Partitions, crashes, packet loss, duplication and membership changes driven against real nodes, with every operation recorded and checked against what a single correct machine could have done. Twenty-four scenarios covering membership changes, snapshot transfer, client retries and whole-cluster restarts, run across multiple seeds, with Election Safety checked on every tick.
 
 ---
 
