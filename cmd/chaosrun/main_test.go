@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -128,11 +129,18 @@ func TestJSONOutputOneObjectPerRun(t *testing.T) {
 }
 
 func TestChaosrunAcceptance(t *testing.T) {
-	// The RUNBOOK T5.6 acceptance is seeds 1-200. Under -short (the pre-commit
-	// hook) a smaller range keeps the same assertions without a skip.
+	// The RUNBOOK T5.6 acceptance is seeds 1-200, run in the plain `go test`
+	// pass. Under -short (the pre-commit hook) a smaller range keeps the same
+	// assertions without a skip. The race detector and a single processor make
+	// the full range take minutes (250s on a CI runner) and starve the other
+	// packages that `go test ./...` runs in parallel, which made a timing-
+	// sensitive transport test fail in CI; those passes use the smoke range.
 	seeds := "1-200"
-	if testing.Short() {
+	switch {
+	case testing.Short():
 		seeds = "1-10"
+	case raceEnabled || runtime.GOMAXPROCS(0) == 1:
+		seeds = "1-20"
 	}
 
 	code, stdout, stderr := runArgs([]string{"-sim", "-seeds", seeds}, chaos.AllScenarios())
