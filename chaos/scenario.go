@@ -1,6 +1,8 @@
 package chaos
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"github.com/MenaceHecker/raftkv/internal/storage"
 	"path/filepath"
@@ -42,10 +44,52 @@ type RunResult struct {
 	OK, Failed, Unknown int
 
 	Err error
+
+	History []Op
+
+	Digest string
+}
+
+// RunSeeds runs every scenario over every seed, in scenario then seed order.
+func RunSeeds(scenarios []Scenario, seeds []int64) []Report {
+	reports := make([]Report, 0, len(scenarios))
+	for _, s := range scenarios {
+		reports = append(reports, RunScenario(s, seeds))
+	}
+	return reports
+}
+
+// historyDigest hashes a canonical text encoding of everything a run
+// observed, so two runs of one seed can be compared byte for byte.
+func historyDigest(history []Op, stats Stats, ticks int64) string {
+	var b strings.Builder
+	for _, op := range history {
+		fmt.Fprintf(&b, "%d|%d|%s|%q|%t|%d|%d|%d\n",
+			op.Kind, op.Client, op.Key, op.Value, op.Found, op.Invoked, op.Returned, op.Status)
+	}
+	fmt.Fprintf(&b, "stats|%d|%d|%d|%d|%d|%d\n",
+		stats.Sent, stats.Delivered, stats.Dropped, stats.Partitions, stats.Duplicated, stats.Delayed)
+	fmt.Fprintf(&b, "ticks|%d\n", ticks)
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
 }
 
 func (r RunResult) Passed() bool {
 	return r.Err == nil && r.Converged && r.Linearizable.OK()
+}
+
+// Verdict names the outcome of one run: PASS, ERROR, DIVERGED, or the
+// checker's verdict in upper case.
+func (r RunResult) Verdict() string {
+	switch {
+	case r.Err != nil:
+		return "ERROR"
+	case !r.Converged:
+		return "DIVERGED"
+	case !r.Linearizable.OK():
+		return strings.ToUpper(r.Linearizable.Verdict.String())
+	}
+	return "PASS"
 }
 
 type Report struct {
@@ -79,15 +123,7 @@ func (r Report) String() string {
 	fmt.Fprintf(&b, "  hypothesis: %s\n", r.Hypothesis)
 
 	for _, run := range r.Runs {
-		verdict := "PASS"
-		switch {
-		case run.Err != nil:
-			verdict = "ERROR"
-		case !run.Converged:
-			verdict = "DIVERGED"
-		case !run.Linearizable.OK():
-			verdict = strings.ToUpper(run.Linearizable.Verdict.String())
-		}
+		verdict := run.Verdict()
 
 		fmt.Fprintf(&b,
 			"  seed %-4d %-16s ticks=%-5d ops=%d/%d/%d (ok/failed/unknown) "+
@@ -156,6 +192,8 @@ func runOnce(s Scenario, seed int64, dataDir string) RunResult {
 	res.Ticks = c.Now()
 
 	history := c.History()
+	res.History = history
+	res.Digest = historyDigest(history, res.Stats, res.Ticks)
 	for _, op := range history {
 		switch op.Status {
 		case StatusOK:

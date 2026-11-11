@@ -347,6 +347,9 @@ func (c *Cluster) IDs() []raft.NodeID { return c.ids }
 
 func (c *Cluster) Now() int64 { return c.net.Now() }
 
+// Seed returns the seed the cluster was built with.
+func (c *Cluster) Seed() int64 { return c.cfg.Seed }
+
 func (c *Cluster) History() []Op {
 	out := make([]Op, 0, len(c.history))
 	for _, op := range c.history {
@@ -471,11 +474,17 @@ func (c *Cluster) Restart(id raft.NodeID) error {
 
 	c.net.DropAllInFlight(id)
 
-	st, err := c.openStorage(id)
-	if err != nil {
-		return err
+	// A crash loses the process, not the disk. On disk the storage is reopened and
+	// recovered. In memory the storage object is the disk, so it is kept: opening
+	// a fresh one would give the node amnesia about its term, vote and log, which
+	// Raft assumes never happens (RUNBOOK 7.2, Raft paper Figure 2 "persistent state").
+	if c.cfg.DataDir != "" || c.storages[id] == nil {
+		st, err := c.openStorage(id)
+		if err != nil {
+			return err
+		}
+		c.storages[id] = st
 	}
-	c.storages[id] = st
 
 	return c.start(id)
 }
