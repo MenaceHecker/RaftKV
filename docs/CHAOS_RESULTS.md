@@ -11,7 +11,7 @@ Each bug is a build-tagged switch (`internal/faultinject`). A bug counts as dete
 | 1 | skip fsync before acknowledging | `skip-fsync` | internal/storage/wal.go (WAL.write) | power loss after an acknowledged write | 1 (seeds 1-20) | 1 | linearizability | linearizability |
 | 2 | truncate the log on a stale append | `truncate-on-stale-append` | internal/raft/log.go (raftLog.maybeAppend) | sustained loss, delay, duplication and reordering | 1 (seeds 1-50) | 1 | committed log | committed log |
 | 3 | commit a previous-term entry by counting replicas | `commit-previous-term` | internal/raft/replication.go (Node.maybeCommit) | figure 8: a previous-term entry committed by counting | 1 (seeds 1-50) | 1 | committed log | committed log |
-| 4 | grant votes without the up-to-date check | `skip-vote-uptodate` | internal/raft/election.go (Node.handleVoteRequest), internal/raft/election.go (Node.handlePreVoteRequest) | a lagging node campaigns against an up-to-date voter | 157 (seeds 1-50) | 7 | committed log | committed log |
+| 4 | grant votes without the up-to-date check | `skip-vote-uptodate` | internal/raft/election.go (Node.handleVoteRequest), internal/raft/election.go (Node.handlePreVoteRequest) | leader crashes during a membership change | 152 (seeds 1-50) | 2 | committed log | committed log |
 | 5 | serve a read from a deposed leader | `local-read` | internal/raft/readonly.go (Node.handleReadIndex) | a read at a deposed leader before it steps down | 1 (seeds 1-50) | 1 | linearizability | linearizability |
 | 6 | skip client dedupe | `skip-dedupe` | internal/statemachine/session.go (sessions.shouldApply) | a client resends a write it never got an answer to | 1 (seeds 1-5) | 1 | linearizability | linearizability |
 | 7 | leader skips the no-op after election | `skip-noop` | internal/raft/node.go (Node.becomeLeader) | reads after an election with no new write | 1 (seeds 1-20) | 1 | liveness | liveness |
@@ -25,7 +25,7 @@ Each bug is a build-tagged switch (`internal/faultinject`). A bug counts as dete
 - **1. skip fsync before acknowledging**: power loss after an acknowledged write, seed 1, linearizability. not linearizable on key "k" after 5 states explored:
 - **2. truncate the log on a stale append**: sustained loss, delay, duplication and reordering, seed 1, committed log. chaos: committed log violated at tick 44: node 4's log ends at 3, before its commit index 4
 - **3. commit a previous-term entry by counting replicas**: figure 8: a previous-term entry committed by counting, seed 1, committed log. chaos: committed log violated at tick 128: leader 4 of term 4 holds term 2 at index 8, which was committed in term 1
-- **4. grant votes without the up-to-date check**: a lagging node campaigns against an up-to-date voter, seed 7, committed log. chaos: committed log violated at tick 102: leader 4 of term 3 holds term 3 at index 8, which was committed in term 1
+- **4. grant votes without the up-to-date check**: leader crashes during a membership change, seed 2, committed log. chaos: committed log violated at tick 60: leader 6 of term 2 holds term 2 at index 1, which was committed in term 1
   Searched first without a detection: cluster split into a majority and a minority (50 runs); leadership repeatedly forced to move (50 runs); leader partitioned from the majority mid-write (50 runs).
 - **5. serve a read from a deposed leader**: a read at a deposed leader before it steps down, seed 1, linearizability. not linearizable on key "r" after 10 states explored:
 - **6. skip client dedupe**: a client resends a write it never got an answer to, seed 1, linearizability. not linearizable on key "x" after 3 states explored:
@@ -35,4 +35,4 @@ Each bug is a build-tagged switch (`internal/faultinject`). A bug counts as dete
 
 ## Control
 
-With every switch off, the same scenarios over the same seed ranges (570 runs across 15 scenario and mutation pairs) are clean: no oracle fires and none is inconclusive. A detection above is therefore the injected bug, not the scenario's own failure.
+With every switch off, the same scenarios over the same seed ranges (670 runs across 17 scenario and mutation pairs) are clean: no oracle fires and none is inconclusive. A detection above is therefore the injected bug, not the scenario's own failure.
