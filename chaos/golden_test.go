@@ -71,3 +71,33 @@ func TestGoldenDigests(t *testing.T) {
 		}
 	}
 }
+
+const goldenMutationFile = "golden_mutation_digests.txt"
+
+// The scenarios the mutation suite adds were recorded after the harness work and
+// before any switch had a call site, so they too prove the switches change
+// nothing while off.
+func TestGoldenMutationScenarioDigests(t *testing.T) {
+	got := goldenLines(MutationScenarios())
+	if len(got) == 0 {
+		t.Fatal("no digests were produced, so this test checked nothing")
+	}
+
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		out := strings.Join(got, "\n") + "\n"
+		if err := os.WriteFile(filepath.Join("testdata", goldenMutationFile), []byte(out), 0o600); err != nil {
+			t.Fatalf("writing the golden file: %v", err)
+		}
+		return
+	}
+
+	want := readGolden(t, goldenMutationFile)
+	if len(want) != len(got) {
+		t.Fatalf("the golden file has %d entries; this run produced %d", len(want), len(got))
+	}
+	for i := range want {
+		if want[i] != got[i] {
+			t.Errorf("run %d differs from the recorded behaviour:\n  want %s\n  got  %s", i, want[i], got[i])
+		}
+	}
+}

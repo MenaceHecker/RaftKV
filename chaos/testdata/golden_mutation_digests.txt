@@ -1,0 +1,30 @@
+power loss after an acknowledged write	1	PASS	e7d08575af1d22c76c71478717e340c07d94de1c1ad8a936b8c018a04800542d
+power loss after an acknowledged write	2	PASS	12805df2904bb045f21df688d828e5e41a4f641fb9c84f03bc98b6ffb8ac728a
+power loss after an acknowledged write	3	PASS	3385aa0ad188d41edf9f00d063ea746a6061322dbf83126e8289a5ca48cc2e75
+power loss after an acknowledged write	4	PASS	ae8dba7e6dc0a4c9c31cbd6c5544b2a3b7e9bf4fcecb314101537b28f526033c
+power loss after an acknowledged write	5	PASS	8ea980fd85cc418c3b8f9224edc122dd8b7ace0427564a44574412a4c07f680f
+figure 8: a previous-term entry committed by counting	1	PASS	20c95fb2f4321dbc2e27deedd66a489cbdcccd805c9588aa3c89bccb29855752
+figure 8: a previous-term entry committed by counting	2	PASS	3b917759ee85e1128857592d8fc9914c795f8d87db03b29d77c3a6d5980787ba
+figure 8: a previous-term entry committed by counting	3	PASS	045555e72f97407a975c24a54ad3ca135bf25f245719fd35b6839ce35b0cb0aa
+figure 8: a previous-term entry committed by counting	4	PASS	856ef50189df5dc79234597d88df40a08ec962bb37bc7fb6c45d5b5babe95eae
+figure 8: a previous-term entry committed by counting	5	PASS	55fcbfc9b237234b1425865977cf4062401b3548ce192e000b014e957ec05b92
+a read at a deposed leader before it steps down	1	PASS	d3fdb3134199632338ee203dde7106aeb7ebe300cba8cf9bb84ed9a29f56e38f
+a read at a deposed leader before it steps down	2	PASS	220e51a1b88dd7ac9c8fabf2b9bcb417e5e916802d091def3adb3d6fc00d2557
+a read at a deposed leader before it steps down	3	PASS	0455be1cfe1ddfc5e5c8e8421b393775af227ac6f59342f89706fa7f44916a75
+a read at a deposed leader before it steps down	4	PASS	1ec0dd73d9e4b163947951b3939d5fc6ed7b6dc8fe7b36cec97ac4f8157b99c9
+a read at a deposed leader before it steps down	5	PASS	2ec3e7440fdbb496bd24f7aa40cf298a08859bc933887d426ad1d16a80ca7e04
+a lagging node campaigns against an up-to-date voter	1	PASS	0ee7d843bc7b5cab6fa188919daa12da36d2d8a6b22a9cf48aec8519746a0cb8
+a lagging node campaigns against an up-to-date voter	2	PASS	265296dcf018826ea12245db9be20b113379200e8df143c5d54a676b0efd9d7e
+a lagging node campaigns against an up-to-date voter	3	PASS	c133ee77be17663aeb7839bec3e92a52d9df942fa31611903aae080a8ee05be3
+a lagging node campaigns against an up-to-date voter	4	PASS	ba11dfa65039218763291ff8e5117abcaa3213a9cb583399ff4a94a9e9ae3e2d
+a lagging node campaigns against an up-to-date voter	5	PASS	255e1e6c9a055c8d48bbbc57a5138b376db6964db1679ea41cf1d42adbaaf370
+reads after an election with no new write	1	PASS	d360557627bf98c7ba2156abf233421461e2dd73efdca0046ceb05c102dd4952
+reads after an election with no new write	2	PASS	0f95048960de03789a9a2e9c6d083ce672daf3cc3242e686ebc356f163b83f10
+reads after an election with no new write	3	PASS	feaca96c19fa3e1b4c2185856b1ee568af90cdfdb8a364959ce7265c61432b8e
+reads after an election with no new write	4	PASS	786e4a1af1d23ac25704d2622815fc8c39e220cb131ff2949965070f3b2a443c
+reads after an election with no new write	5	PASS	0e24f1e18afc565b2212cb472ba699d283ee60d8da0346b79030dec95592648d
+a resend after a snapshot install	1	PASS	45af21294b5a3ac6a4efdc00b3fac46a90e1c7d729d2d4d9a93dc144fdc7f69c
+a resend after a snapshot install	2	PASS	ad4c8f0fa0c95db6117d6bc09ff6d553d67e48c18514fb9c3fb7bb1472a564b8
+a resend after a snapshot install	3	PASS	3d5eabbd797c4049954c31c92c9f251cd40f7947f7bc05225ba43139c165459b
+a resend after a snapshot install	4	PASS	e27703399fec844cc51641488c6a459b3975522e44d8d08f12cb0377af63f4f8
+a resend after a snapshot install	5	PASS	b41e6454536413a2e8bc558c03fa8c14cc80a38ab858cae41f7c37a98b86458f
