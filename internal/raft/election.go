@@ -1,5 +1,7 @@
 package raft
 
+import "github.com/MenaceHecker/raftkv/internal/faultinject"
+
 func (n *Node) campaign() error {
 	if n.state == Leader {
 		return nil
@@ -54,7 +56,9 @@ func (n *Node) handleVoteRequest(m Message) error {
 
 	upToDate := n.log.isUpToDate(m.LastLogIndex, m.LastLogTerm)
 
-	granted := canVote && upToDate
+	// Raft paper section 5.4.1: a vote is refused to a candidate whose log is
+	// less up to date. The injected bug (RUNBOOK 8.6 item 4) skips that check.
+	granted := canVote && (upToDate || faultinject.Active(faultinject.SkipVoteUpToDate))
 
 	if granted {
 		if err := n.persist(n.term, m.From); err != nil {
@@ -130,7 +134,7 @@ func (n *Node) handlePreVoteRequest(m Message) error {
 
 	upToDate := n.log.isUpToDate(m.LastLogIndex, m.LastLogTerm)
 
-	granted := !leaderIsAlive && current && upToDate
+	granted := !leaderIsAlive && current && (upToDate || faultinject.Active(faultinject.SkipVoteUpToDate))
 
 	term := n.term
 	if granted {

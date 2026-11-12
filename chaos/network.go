@@ -190,3 +190,17 @@ func (n *Network) DropAllInFlight(to raft.NodeID) {
 	}
 	n.queue = remaining
 }
+
+// DropInFlightFrom discards every queued message sent by a node, as if it had
+// failed before its sends reached the wire.
+func (n *Network) DropInFlightFrom(from raft.NodeID) {
+	remaining := n.queue[:0]
+	for _, s := range n.queue {
+		if s.msg.From == from {
+			n.stats.Dropped++
+			continue
+		}
+		remaining = append(remaining, s)
+	}
+	n.queue = remaining
+}

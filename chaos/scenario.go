@@ -26,6 +26,12 @@ type Scenario struct {
 	MinOps int
 
 	RequireFaults func(Stats) error
+
+	// Tune adjusts the cluster configuration of every run of this scenario, for
+	// a scenario that needs something the defaults do not give: a different
+	// filesystem, sync policy or append size. It is called once per run, so it
+	// may build per-run state such as a seeded filesystem.
+	Tune func(*Config)
 }
 
 const DefaultMinOps = 8
@@ -167,13 +173,18 @@ func RunScenarioOnDisk(s Scenario, seeds []int64, dir string) Report {
 func runOnce(s Scenario, seed int64, dataDir string) RunResult {
 	res := RunResult{Seed: seed}
 
-	c, err := NewCluster(Config{
+	cfg := Config{
 		Nodes:   s.Nodes,
 		Seed:    seed,
 		Faults:  s.Faults,
 		DataDir: dataDir,
 		Sync:    storage.SyncNever,
-	})
+	}
+	if s.Tune != nil {
+		s.Tune(&cfg)
+	}
+
+	c, err := NewCluster(cfg)
 	if err != nil {
 		res.Err = err
 		return res

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/MenaceHecker/raftkv/internal/storage"
+	"github.com/MenaceHecker/raftkv/internal/storage/faultfs"
 	"math/rand"
 	"path/filepath"
 	"slices"
@@ -90,6 +91,14 @@ type Config struct {
 	DataDir string
 
 	Sync storage.SyncPolicy
+
+	// FS, when set, is the filesystem every disk-backed node uses (DataDir must
+	// be set too). It lets PowerLoss drop unsynced bytes. Nil means the real OS.
+	FS *faultfs.FS
+
+	// MaxAppendBytes bounds the entries in one AppendEntries; zero keeps the
+	// default. A tiny value makes a leader replicate one entry per message.
+	MaxAppendBytes int
 }
 
 func (c *Config) applyDefaults() {
@@ -116,10 +125,16 @@ type Cluster struct {
 
 	down map[raft.NodeID]bool
 
+	// paused holds the nodes whose process is frozen: they keep their state but
+	// do not tick, step or send, and messages addressed to them are lost.
+	paused map[raft.NodeID]bool
+
 	pending []*Op
 	history []*Op
 
 	snapshotsInstalled map[raft.NodeID]int
+
+	mon logMonitor
 
 	seq int
 }
@@ -139,8 +154,11 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		machines: make(map[raft.NodeID]*statemachine.KV, cfg.Nodes),
 		storages: make(map[raft.NodeID]nodeStorage, cfg.Nodes),
 		down:     make(map[raft.NodeID]bool, cfg.Nodes),
+		paused:   make(map[raft.NodeID]bool),
 
 		snapshotsInstalled: make(map[raft.NodeID]int, cfg.Nodes),
+
+		mon: newLogMonitor(),
 	}
 	for i := range cfg.Nodes {
 		c.ids = append(c.ids, raft.NodeID(i+1))
@@ -156,6 +174,14 @@ func NewCluster(cfg Config) (*Cluster, error) {
 			return nil, err
 		}
 	}
+
+	// The data directories were provisioned before the cluster ran. The storage
+	// does not itself sync the parent entries of a directory it creates on first
+	// start, so without this a power loss would remove the directories and every
+	// node with them, which is a different bug from the ones under test.
+	if cfg.FS != nil {
+		cfg.FS.SyncAll()
+	}
 	return c, nil
 }
 
@@ -165,11 +191,15 @@ func (c *Cluster) openStorage(id raft.NodeID) (nodeStorage, error) {
 	}
 
 	dir := filepath.Join(c.cfg.DataDir, fmt.Sprintf("node-%d", id))
-	st, _, err := storage.OpenDiskStorage(storage.DiskConfig{
+	dc := storage.DiskConfig{
 		Dir:         dir,
 		Sync:        c.cfg.Sync,
 		SegmentSize: 16 << 10,
-	})
+	}
+	if c.cfg.FS != nil {
+		dc.FS = c.cfg.FS
+	}
+	st, _, err := storage.OpenDiskStorage(dc)
 	if err != nil {
 		return nil, fmt.Errorf("chaos: opening storage for node %d: %w", id, err)
 	}
@@ -192,6 +222,8 @@ func (c *Cluster) start(id raft.NodeID) error {
 		CheckQuorum:   true,
 		PreVote:       true,
 		Rand:          rand.New(rand.NewSource(c.cfg.Seed + int64(id)*7919)),
+
+		MaxAppendBytes: c.cfg.MaxAppendBytes,
 	})
 	if err != nil {
 		return fmt.Errorf("chaos: starting node %d: %w", id, err)
@@ -199,6 +231,7 @@ func (c *Cluster) start(id raft.NodeID) error {
 
 	c.nodes[id] = n
 	c.machines[id] = statemachine.New()
+	delete(c.mon.cursor, id)
 
 	if snap, err := c.storages[id].Snapshot(); err == nil && snap.Index > 0 {
 		if err := c.machines[id].Restore(snap.Data); err != nil {
@@ -361,14 +394,14 @@ func (c *Cluster) History() []Op {
 func (c *Cluster) Tick() error {
 	for _, m := range c.net.Deliver() {
 		n, ok := c.nodes[m.To]
-		if !ok || c.down[m.To] {
+		if !ok || c.down[m.To] || c.paused[m.To] {
 			continue
 		}
 		_ = n.Step(m)
 	}
 
 	for _, id := range c.ids {
-		if c.down[id] {
+		if c.down[id] || c.paused[id] {
 			continue
 		}
 		if err := c.nodes[id].Tick(); err != nil {
@@ -377,7 +410,7 @@ func (c *Cluster) Tick() error {
 	}
 
 	for _, id := range c.ids {
-		if c.down[id] {
+		if c.down[id] || c.paused[id] {
 			continue
 		}
 		if err := c.drain(id); err != nil {
@@ -388,7 +421,10 @@ func (c *Cluster) Tick() error {
 	c.resolve()
 	c.net.Advance()
 
-	return c.checkElectionSafety()
+	if err := c.checkElectionSafety(); err != nil {
+		return err
+	}
+	return c.checkCommittedLog()
 }
 
 func (c *Cluster) checkElectionSafety() error {
@@ -403,12 +439,18 @@ func (c *Cluster) checkElectionSafety() error {
 			continue
 		}
 		if other, dup := leaders[n.Term()]; dup {
-			return fmt.Errorf("chaos: election safety violated at tick %d: nodes %d and %d "+
-				"both lead term %d", c.net.Now(), other, id, n.Term())
+			return c.electionSafetyError(c.net.Now(), other, id, n.Term())
 		}
 		leaders[n.Term()] = id
 	}
 	return nil
+}
+
+// electionSafetyError is the error for two leaders in one term (Raft paper
+// Figure 3, Election Safety). It wraps ErrElectionSafety so a run classifies by
+// errors.Is rather than by its text.
+func (c *Cluster) electionSafetyError(tick int64, a, b raft.NodeID, term raft.Term) error {
+	return fmt.Errorf("%w at tick %d: nodes %d and %d both lead term %d", ErrElectionSafety, tick, a, b, term)
 }
 
 func (c *Cluster) TickN(n int) error {
@@ -455,6 +497,7 @@ func (c *Cluster) Crash(id raft.NodeID) {
 		return
 	}
 	c.down[id] = true
+	delete(c.paused, id)
 	delete(c.nodes, id)
 	delete(c.machines, id)
 	c.closeStorage(id)
@@ -489,6 +532,47 @@ func (c *Cluster) Restart(id raft.NodeID) error {
 	return c.start(id)
 }
 
+// PowerLoss cuts the power to every node at once. Nothing is closed or flushed,
+// so whatever was written but never synced is lost: the filesystem drops every
+// unsynced appended byte (faultfs.DropTail). A graceful Crash closes the WAL,
+// which syncs it, so only a power loss can show a missing fsync. The nodes stay
+// down until Restart reopens their storage from what survived.
+func (c *Cluster) PowerLoss() error {
+	if c.cfg.FS == nil || c.cfg.DataDir == "" {
+		return errors.New("chaos: PowerLoss needs Config.FS and a DataDir; in-memory storage has no unsynced bytes to lose")
+	}
+
+	for _, id := range c.ids {
+		if c.down[id] {
+			continue
+		}
+		c.down[id] = true
+		delete(c.nodes, id)
+		delete(c.machines, id)
+		c.net.DropAllInFlight(id)
+	}
+	for _, op := range c.pending {
+		if op.Status == StatusPending {
+			c.finish(op, StatusUnknown)
+		}
+	}
+
+	c.cfg.FS.Crash(faultfs.CrashOptions{Tail: faultfs.DropTail})
+	return nil
+}
+
+// Pause freezes a running node's process (RUNBOOK 8.4 pause): it keeps its state
+// and its belief about who leads, but its clock stops, it handles no message,
+// and messages sent to it are lost until Resume.
+func (c *Cluster) Pause(id raft.NodeID) {
+	if _, up := c.nodes[id]; up && !c.down[id] {
+		c.paused[id] = true
+	}
+}
+
+// Resume unfreezes a paused node.
+func (c *Cluster) Resume(id raft.NodeID) { delete(c.paused, id) }
+
 func (c *Cluster) IsDown(id raft.NodeID) bool { return c.down[id] }
 
 func (c *Cluster) Leader() (raft.NodeID, bool, error) {
@@ -508,9 +592,8 @@ func (c *Cluster) Leader() (raft.NodeID, bool, error) {
 		case !found || n.Term() > bestTerm:
 			best, bestTerm, found = id, n.Term(), true
 		case n.Term() == bestTerm:
-			return 0, false, fmt.Errorf(
-				"chaos: election safety violated: nodes %d and %d both lead term %d",
-				best, id, bestTerm)
+			return 0, false, fmt.Errorf("%w: nodes %d and %d both lead term %d",
+				ErrElectionSafety, best, id, bestTerm)
 		}
 	}
 	return best, found, nil
@@ -530,6 +613,45 @@ func (c *Cluster) AwaitLeader(maxTicks int) (raft.NodeID, error) {
 		}
 	}
 	return 0, fmt.Errorf("chaos: no leader within %d ticks\n%s", maxTicks, c.Dump())
+}
+
+// readProbeKey is the key AwaitReadable reads. Nothing ever writes it, so its
+// reads cannot make a history non-linearizable.
+const readProbeKey = "_readable"
+
+// AwaitReadable ticks until a read from the leader is answered with StatusOK, or
+// fails with ErrNotReadable after maxTicks. It is the liveness check of a
+// cluster that has just elected a leader: reads need the leader to have
+// committed an entry of its own term (Raft paper section 8), so a leader that
+// skipped its no-op never becomes readable until a client writes.
+func (c *Cluster) AwaitReadable(maxTicks int) error {
+	const settle = 8
+
+	waited := 0
+	for waited < maxTicks {
+		if _, ok, err := c.Leader(); err != nil {
+			return err
+		} else if ok {
+			op := c.Read(0, readProbeKey)
+			for range settle {
+				if op.Status != StatusPending {
+					break
+				}
+				if err := c.Tick(); err != nil {
+					return err
+				}
+				waited++
+			}
+			if op.Status == StatusOK {
+				return nil
+			}
+		}
+		if err := c.Tick(); err != nil {
+			return err
+		}
+		waited++
+	}
+	return fmt.Errorf("%w within %d ticks\n%s", ErrNotReadable, maxTicks, c.Dump())
 }
 
 func (c *Cluster) Write(client int, key, value string) *Op {
