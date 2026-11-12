@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/MenaceHecker/raftkv/internal/faultinject"
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
@@ -608,7 +609,10 @@ func (w *WAL) write(buf []byte) error {
 		return fmt.Errorf("storage: writing to WAL: %w", err)
 	}
 
-	if w.policy == SyncAlways {
+	// RUNBOOK 7.2: a write is durable before it is acknowledged. This is the one
+	// place entries and hard state are written, so skipping the fsync here is the
+	// injected bug of RUNBOOK 8.6 item 1 for both.
+	if w.policy == SyncAlways && !faultinject.Active(faultinject.SkipFsync) {
 		if err := w.active.Sync(); err != nil {
 			return fmt.Errorf("storage: syncing WAL: %w", err)
 		}

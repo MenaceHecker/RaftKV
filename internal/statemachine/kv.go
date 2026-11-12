@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/MenaceHecker/raftkv/internal/faultinject"
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
@@ -233,7 +234,14 @@ func (kv *KV) Snapshot() ([]byte, error) {
 		buf = appendBytes(buf, kv.data[k])
 	}
 
-	buf = kv.sessions.encode(buf)
+	// RUNBOOK 7.5: the session table is part of the snapshot. The injected bug
+	// (RUNBOOK 8.6 item 8) writes an empty table in its place, which decode
+	// accepts.
+	if faultinject.Active(faultinject.SnapshotOmitsSessions) {
+		buf = appendUint64(buf, 0)
+	} else {
+		buf = kv.sessions.encode(buf)
+	}
 	return buf, nil
 }
 

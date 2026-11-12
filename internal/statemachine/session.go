@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/MenaceHecker/raftkv/internal/faultinject"
 	"github.com/MenaceHecker/raftkv/internal/raft"
 )
 
@@ -33,7 +34,9 @@ func newSessions(max int) *sessions {
 const NoClient uint64 = 0
 
 func (s *sessions) shouldApply(clientID, seq uint64, index raft.Index) bool {
-	if clientID == NoClient {
+	// RUNBOOK 7.4: a request already applied for this session is not applied
+	// again. The injected bug (RUNBOOK 8.6 item 6) applies every request.
+	if clientID == NoClient || faultinject.Active(faultinject.SkipDedupe) {
 		return true
 	}
 
