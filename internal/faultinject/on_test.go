@@ -56,7 +56,7 @@ func TestEnableUnknownNamePanics(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestEnableUnknownNamePanics$")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestEnableUnknownNamePanics$") //nolint:gosec // re-runs this test binary
 	cmd.Env = append(os.Environ(), "FAULTINJECT_CHILD=1", EnvVar+"=skip-noop,not-a-switch")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
