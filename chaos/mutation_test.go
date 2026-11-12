@@ -367,3 +367,22 @@ func TestChaosrunReproducesAMutation(t *testing.T) {
 		t.Fatalf("a misspelt switch exited %d, want a failure naming it:\n%s", code, out)
 	}
 }
+
+// The suite finds bug 4 in a catalog scenario first. The purpose-built scenario
+// must also catch it on its own, so the detection does not rest on one scenario
+// that happens to involve a joining node with an empty log.
+func TestLaggingNodeScenarioAloneDetectsSkippedVoteCheck(t *testing.T) {
+	d := Detect(Mutation{
+		Bug: 96, Name: "grant votes without the up-to-date check",
+		Switches:  []faultinject.Switch{faultinject.SkipVoteUpToDate},
+		Scenarios: []Scenario{scenarioLaggingNodeCampaigns()},
+		Seeds:     seedRange(1, 50), Expect: OracleCommittedLog,
+	})
+	if !d.Detected {
+		t.Fatalf("the lagging-node scenario alone did not detect the skipped vote check in %d runs", d.Tried)
+	}
+	if d.Oracle != OracleCommittedLog {
+		t.Errorf("it was caught by %s, want the committed-log monitor", d.Oracle)
+	}
+	t.Logf("caught at seed %d: %s", d.Seed, d.Detail)
+}
