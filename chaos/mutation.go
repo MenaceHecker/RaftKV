@@ -105,6 +105,11 @@ func Mutations() []Mutation {
 				catalog("cluster split into a majority and a minority"),
 				catalog("leadership repeatedly forced to move"),
 				catalog("leader partitioned from the majority mid-write"),
+				// Found by running the whole catalog with the switch on (chaosrun
+				// -sim, seeds 1-20): not in the plan's list for this bug.
+				catalog("leader crashes during a membership change"),
+				catalog("generated nemesis and workload"),
+				// Purpose-built for this bug, searched last.
 				extra("a lagging node campaigns"),
 			},
 			Seeds: seedRange(1, 50), Expect: OracleCommittedLog,
