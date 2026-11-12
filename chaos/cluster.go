@@ -125,6 +125,10 @@ type Cluster struct {
 
 	down map[raft.NodeID]bool
 
+	// paused holds the nodes whose process is frozen: they keep their state but
+	// do not tick, step or send, and messages addressed to them are lost.
+	paused map[raft.NodeID]bool
+
 	pending []*Op
 	history []*Op
 
@@ -150,6 +154,7 @@ func NewCluster(cfg Config) (*Cluster, error) {
 		machines: make(map[raft.NodeID]*statemachine.KV, cfg.Nodes),
 		storages: make(map[raft.NodeID]nodeStorage, cfg.Nodes),
 		down:     make(map[raft.NodeID]bool, cfg.Nodes),
+		paused:   make(map[raft.NodeID]bool),
 
 		snapshotsInstalled: make(map[raft.NodeID]int, cfg.Nodes),
 
@@ -389,14 +394,14 @@ func (c *Cluster) History() []Op {
 func (c *Cluster) Tick() error {
 	for _, m := range c.net.Deliver() {
 		n, ok := c.nodes[m.To]
-		if !ok || c.down[m.To] {
+		if !ok || c.down[m.To] || c.paused[m.To] {
 			continue
 		}
 		_ = n.Step(m)
 	}
 
 	for _, id := range c.ids {
-		if c.down[id] {
+		if c.down[id] || c.paused[id] {
 			continue
 		}
 		if err := c.nodes[id].Tick(); err != nil {
@@ -405,7 +410,7 @@ func (c *Cluster) Tick() error {
 	}
 
 	for _, id := range c.ids {
-		if c.down[id] {
+		if c.down[id] || c.paused[id] {
 			continue
 		}
 		if err := c.drain(id); err != nil {
@@ -492,6 +497,7 @@ func (c *Cluster) Crash(id raft.NodeID) {
 		return
 	}
 	c.down[id] = true
+	delete(c.paused, id)
 	delete(c.nodes, id)
 	delete(c.machines, id)
 	c.closeStorage(id)
@@ -554,6 +560,18 @@ func (c *Cluster) PowerLoss() error {
 	c.cfg.FS.Crash(faultfs.CrashOptions{Tail: faultfs.DropTail})
 	return nil
 }
+
+// Pause freezes a running node's process (RUNBOOK 8.4 pause): it keeps its state
+// and its belief about who leads, but its clock stops, it handles no message,
+// and messages sent to it are lost until Resume.
+func (c *Cluster) Pause(id raft.NodeID) {
+	if _, up := c.nodes[id]; up && !c.down[id] {
+		c.paused[id] = true
+	}
+}
+
+// Resume unfreezes a paused node.
+func (c *Cluster) Resume(id raft.NodeID) { delete(c.paused, id) }
 
 func (c *Cluster) IsDown(id raft.NodeID) bool { return c.down[id] }
 

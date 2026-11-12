@@ -24,6 +24,7 @@ func MutationScenarios() []Scenario {
 		scenarioPowerLossAfterAck(),
 		scenarioFigure8(),
 		scenarioStaleReadWindow(),
+		scenarioLaggingNodeCampaigns(),
 		scenarioReadAfterElection(),
 		scenarioResendAfterSnapshotInstall(),
 	}
@@ -258,14 +259,15 @@ func awaitCommitAtLeast(c *Cluster, idx raft.Index, maxTicks int) (raft.NodeID, 
 	return 0, fmt.Errorf("chaos: no leader committed index %d within %d ticks\n%s", idx, maxTicks, c.Dump())
 }
 
-// scenarioStaleReadWindow reads from a leader in the interval after a new leader
-// has committed a write and before CheckQuorum makes the old one step down. The
-// catalog's stale-leader scenario reads after more than 120 ticks, by which time
-// the old leader has long since stepped down and refuses the read at once, so it
-// never reaches the code that decides whether to ask for a quorum.
+// scenarioStaleReadWindow reads from a leader that was replaced while its process
+// was frozen (RUNBOOK 8.4 pause: a long garbage collection, a stalled VM). The
+// leader's clock did not run, so CheckQuorum has not made it step down and it still
+// believes it leads when it wakes, with a newer leader already having committed a
+// write. The catalog's stale-leader scenario reads more than 120 ticks after the
+// partition, by which time the old leader has long since stepped down and refuses
+// the read at once, so it never reaches the code that decides whether to ask for a
+// quorum.
 func scenarioStaleReadWindow() Scenario {
-	const rounds = 12
-
 	return Scenario{
 		Name: "a read at a deposed leader before it steps down",
 		Hypothesis: "a leader that has been replaced but has not yet noticed must not answer " +
@@ -275,67 +277,115 @@ func scenarioStaleReadWindow() Scenario {
 		RequireFaults: requirePartitioned,
 
 		Run: func(c *Cluster) error {
-			if _, err := SettleLeader(c, 400); err != nil {
+			old, err := SettleLeader(c, 400)
+			if err != nil {
 				return err
 			}
 			if err := Workload(c, 3, "r", "before", 2, 500); err != nil {
 				return err
 			}
 
-			reached := false
-
-			for round := 0; round < rounds && !reached; round++ {
-				old, err := SettleLeader(c, 800)
+			// The old leader freezes and the majority carries on without it.
+			c.Pause(old)
+			c.Network().Partition([]raft.NodeID{old}, MajorityWithout(c, old))
+			for {
+				if err := c.Tick(); err != nil {
+					return err
+				}
+				lead, ok, err := c.Leader()
 				if err != nil {
 					return err
 				}
-				if _, err := writeAcked(c, 1, "r", fmt.Sprintf("round-%d-old", round)); err != nil {
-					return err
+				if ok && lead != old {
+					break
 				}
-
-				c.Network().Partition([]raft.NodeID{old}, MajorityWithout(c, old))
-
-				// Tick one at a time until the majority has a new leader.
-				replaced := false
-				for range 120 {
-					if err := c.Tick(); err != nil {
-						return err
-					}
-					if lead, ok, err := c.Leader(); err != nil {
-						return err
-					} else if ok && lead != old {
-						replaced = true
-						break
-					}
-				}
-
-				if replaced {
-					op, err := WriteAndSettle(c, 2, "r", fmt.Sprintf("round-%d-new", round), 60)
-					if err != nil {
-						return err
-					}
-					// The write is acknowledged, so a read that starts now must see it.
-					// Whether the old leader still believes it leads is up to its
-					// CheckQuorum timer; read only if it does.
-					if op.Status == StatusOK && c.nodes[old].State() == raft.Leader {
-						if _, err := ReadFromAndSettle(c, 9, old, "r", 6); err != nil {
-							return err
-						}
-						reached = true
-					}
-				}
-
-				c.Network().Heal()
-				if err := c.TickN(200); err != nil {
-					return err
+				if c.Now() > 2000 {
+					return fmt.Errorf("chaos: the majority never replaced the paused leader\n%s", c.Dump())
 				}
 			}
-
-			if !reached {
-				return fmt.Errorf("chaos: the old leader stepped down before a new leader committed a write in all %d rounds, so no read reached it\n%s",
-					rounds, c.Dump())
+			moved, err := WriteAndSettle(c, 2, "r", "moved-on", 100)
+			if err != nil {
+				return err
 			}
-			return c.TickN(200)
+			if moved.Status != StatusOK {
+				return fmt.Errorf("chaos: the new leader did not commit a write (%s)\n%s", moved.Status, c.Dump())
+			}
+
+			// The old leader wakes up still believing it leads. The write above is
+			// acknowledged, so a read that starts now must not return the old value.
+			c.Resume(old)
+			if c.nodes[old].State() != raft.Leader {
+				return fmt.Errorf("chaos: node %d stopped believing it leads before it could be asked\n%s", old, c.Dump())
+			}
+			if _, err := ReadFromAndSettle(c, 9, old, "r", 6); err != nil {
+				return err
+			}
+
+			c.Network().Heal()
+			if _, err := SettleLeader(c, 800); err != nil {
+				return err
+			}
+			return c.TickN(300)
+		},
+	}
+}
+
+// scenarioLaggingNodeCampaigns has two nodes miss committed entries, then leaves
+// one up-to-date node, the two laggards and nothing else. The laggards may only be
+// elected with votes from nodes that are at least as up to date as they are
+// (Raft paper section 5.4.1); the one up-to-date node must refuse them, so only it
+// can win. A leader that lacks a committed entry would overwrite it.
+func scenarioLaggingNodeCampaigns() Scenario {
+	return Scenario{
+		Name: "a lagging node campaigns against an up-to-date voter",
+		Hypothesis: "a node that missed committed entries cannot win an election, because " +
+			"the voters that hold them refuse it (Raft paper section 5.4.1, Leader " +
+			"Completeness)",
+		Nodes:         5,
+		RequireFaults: requirePartitioned,
+
+		Run: func(c *Cluster) error {
+			l, err := SettleLeader(c, 400)
+			if err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "v", "before", 2, 500); err != nil {
+				return err
+			}
+
+			var others []raft.NodeID
+			for _, id := range c.IDs() {
+				if id != l {
+					others = append(others, id)
+				}
+			}
+			a, b, lag1, lag2 := others[0], others[1], others[2], others[3]
+
+			// The laggards miss entries that the majority L, A and B commit.
+			c.Network().Partition([]raft.NodeID{l, a, b}, []raft.NodeID{lag1, lag2})
+			if err := Workload(c, 3, "v", "ahead", 3, 500); err != nil {
+				return err
+			}
+
+			// L and B go away; A and the two laggards can talk again. They are a
+			// majority of the five, and A is the only one that holds the entries.
+			c.Crash(l)
+			c.Crash(b)
+			c.Network().Heal()
+			if _, err := SettleLeader(c, 800); err != nil {
+				return err
+			}
+			if err := Workload(c, 3, "v", "after", 2, 800); err != nil {
+				return err
+			}
+
+			if err := c.Restart(l); err != nil {
+				return err
+			}
+			if err := c.Restart(b); err != nil {
+				return err
+			}
+			return c.TickN(400)
 		},
 	}
 }

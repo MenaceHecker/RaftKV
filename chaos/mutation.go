@@ -101,6 +101,7 @@ func Mutations() []Mutation {
 				catalog("cluster split into a majority and a minority"),
 				catalog("leadership repeatedly forced to move"),
 				catalog("leader partitioned from the majority mid-write"),
+				extra("a lagging node campaigns"),
 			},
 			Seeds: seedRange(1, 50), Expect: OracleCommittedLog,
 		},
