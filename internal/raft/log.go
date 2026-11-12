@@ -1,6 +1,10 @@
 package raft
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/MenaceHecker/raftkv/internal/faultinject"
+)
 
 type raftLog struct {
 	storage Storage
@@ -90,6 +94,16 @@ func (l *raftLog) maybeAppend(prevIdx Index, prevTerm Term, leaderCommit Index, 
 	conflict := l.findConflict(entries)
 	switch {
 	case conflict == 0:
+		// Raft paper Figure 2, AppendEntries 3: nothing is truncated unless an
+		// existing entry conflicts with a new one. The injected bug (RUNBOOK 8.6
+		// item 2) writes the entries anyway, which removes everything after them
+		// when a stale or duplicated request arrives late.
+		if faultinject.Active(faultinject.TruncateOnStaleAppend) &&
+			len(entries) > 0 && entries[0].Index >= l.firstIndex() {
+			if err := l.storage.Append(entries); err != nil {
+				return appendResult{}, false, fmt.Errorf("raft: appending entries: %w: %w", ErrStorage, err)
+			}
+		}
 	case conflict <= l.committed:
 		panic(fmt.Sprintf("raft: entry %d conflicts with committed index %d", conflict, l.committed))
 	default:
@@ -151,7 +165,7 @@ func (l *raftLog) appliedTo(i Index) {
 	if i == 0 {
 		return
 	}
-	if i > l.committed || i < l.applied {
+	if (i > l.committed && !faultinject.Active(faultinject.ApplyBeyondCommit)) || i < l.applied {
 		panic(fmt.Sprintf("raft: applied index %d out of range (applied %d, committed %d)",
 			i, l.applied, l.committed))
 	}
@@ -159,10 +173,16 @@ func (l *raftLog) appliedTo(i Index) {
 }
 
 func (l *raftLog) nextCommitted(max int) ([]Entry, error) {
-	if l.committed <= l.applied {
+	// Raft paper Figure 2, rules for servers: only committed entries are applied.
+	// The injected bug (RUNBOOK 8.6 item 9) applies everything in the log.
+	limit := l.committed
+	if faultinject.Active(faultinject.ApplyBeyondCommit) {
+		limit = l.lastIndex()
+	}
+	if limit <= l.applied {
 		return nil, nil
 	}
-	hi := l.committed + 1
+	hi := limit + 1
 	if max > 0 && hi-l.applied-1 > Index(max) {
 		hi = l.applied + 1 + Index(max)
 	}

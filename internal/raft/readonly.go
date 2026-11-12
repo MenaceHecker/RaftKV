@@ -1,6 +1,10 @@
 package raft
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/MenaceHecker/raftkv/internal/faultinject"
+)
 
 var (
 	ErrLeaderNotReady = errors.New("raft: leader has not yet committed an entry in its term")
@@ -58,7 +62,10 @@ func (n *Node) handleReadIndex(m Message) error {
 		return ErrLeaderNotReady
 	}
 
-	if n.isSoleVoter() {
+	// A sole voter needs no one to confirm its leadership. The injected bug
+	// (RUNBOOK 8.6 item 5) takes this path for every leader, so a deposed leader
+	// answers from local state without the heartbeat quorum round of section 8.
+	if n.isSoleVoter() || faultinject.Active(faultinject.LocalRead) {
 		n.readStates = append(n.readStates, ReadState{
 			Index:   n.log.committed,
 			Context: cloneBytes(m.Context),

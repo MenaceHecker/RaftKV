@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+
+	"github.com/MenaceHecker/raftkv/internal/faultinject"
 )
 
 var ErrNotLeader = errors.New("raft: node is not the leader")
@@ -502,13 +504,18 @@ func (n *Node) becomeLeader() error {
 		n.progress[p] = &progress{next: n.log.lastIndex() + 1}
 	}
 
-	noop := Entry{
-		Term:  n.term,
-		Index: n.log.lastIndex() + 1,
-		Type:  EntryNoOp,
-	}
-	if _, err := n.log.append([]Entry{noop}); err != nil {
-		return err
+	// Raft paper section 8: a new leader appends a no-op of its own term so that
+	// earlier entries can commit and reads become safe. The injected bug
+	// (RUNBOOK 8.6 item 7) skips it.
+	if !faultinject.Active(faultinject.SkipNoop) {
+		noop := Entry{
+			Term:  n.term,
+			Index: n.log.lastIndex() + 1,
+			Type:  EntryNoOp,
+		}
+		if _, err := n.log.append([]Entry{noop}); err != nil {
+			return err
+		}
 	}
 	n.progress[n.id].match = n.log.lastIndex()
 	n.progress[n.id].next = n.log.lastIndex() + 1

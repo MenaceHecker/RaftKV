@@ -3,6 +3,8 @@ package raft
 import (
 	"fmt"
 	"sort"
+
+	"github.com/MenaceHecker/raftkv/internal/faultinject"
 )
 
 func (n *Node) propose(entries []Entry) error {
@@ -234,8 +236,11 @@ func (n *Node) maybeCommit() bool {
 			continue
 		}
 
+		// Raft paper section 5.4.2: only an entry of the current term is committed
+		// by counting replicas. The injected bug (RUNBOOK 8.6 item 3) counts an
+		// earlier term's entry too, which Figure 8 shows can be overwritten.
 		t, err := n.log.term(candidate)
-		if err != nil || t != n.term {
+		if err != nil || (t != n.term && !faultinject.Active(faultinject.CommitPreviousTerm)) {
 			return false
 		}
 
