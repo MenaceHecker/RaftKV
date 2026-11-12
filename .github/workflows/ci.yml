@@ -73,6 +73,38 @@ jobs:
         # boundary between them is respected.
         run: go test -race ./...
 
+  mutation:
+    name: mutation suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: vet with the faultinject tag
+        run: go vet -tags faultinject ./...
+
+      - name: test with the faultinject tag
+        # RUNBOOK 8.6: nine known bugs sit behind this tag and an oracle must flag
+        # each. TestMutationSuite is red if any is undetected, if the control run
+        # (every switch off) is not clean, or if a switch has no call site. With
+        # no switch enabled the same packages must still pass, so the tag does
+        # not change the default behaviour.
+        run: >
+          go test -tags faultinject -count=1 -timeout 20m
+          ./chaos ./internal/raft ./internal/statemachine ./internal/storage
+          ./internal/faultinject ./internal/determinism
+
+      - name: the results document is current
+        # The results table is generated, without timestamps, so any difference
+        # means a result changed and the document was not regenerated.
+        run: |
+          WRITE_CHAOS_RESULTS=1 go test -tags faultinject -count=1 ./chaos -run TestMutationSuite
+          git diff --exit-code docs/CHAOS_RESULTS.md
+
   fuzz:
     name: fuzz the decoders
     runs-on: ubuntu-latest
