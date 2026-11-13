@@ -3,17 +3,19 @@
 // # What the admin controls do NOT cover
 //
 // The admin token, --admin-chaos and the default-off admin listener guard the
-// AdminService RPCs only. They do not protect the shared listener, which still
-// accepts, with no authentication:
+// AdminService RPCs only. On the shared listener, AddNode and RemoveNode are
+// protected only if --cluster-token-file is set (off by default). Without it,
+// and regardless of it for everything else, the shared listener accepts with no
+// authentication:
 //
-//   - AddNode and RemoveNode, so anyone who can reach the shared port can change
-//     cluster membership; and
-//   - snapshot streams of up to 1 GiB each (MaxSnapshotBytes), with no bound on
-//     how many run at once or on the memory they hold in total.
+//   - AddNode and RemoveNode (when --cluster-token-file is unset);
+//   - Deliver and DeliverSnapshot, whose senders are not authenticated or
+//     checked for membership; incoming snapshot streams are bounded in total
+//     bytes and count (DefaultSnapshotBudgetBytes, DefaultSnapshotStreams) and
+//     at MaxSnapshotBytes each, but that is a safety net, not authentication; and
+//   - KVService and ListMembers.
 //
-// Both are pre-existing and out of scope for this change. They are tracked as
-// backlog card T3.18 (T4.7 decision 6). Do not read the admin token as securing
-// the cluster.
+// Do not read the admin or cluster token as securing the cluster.
 package transport
 
 import (

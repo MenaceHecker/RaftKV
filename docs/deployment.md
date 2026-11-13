@@ -222,3 +222,22 @@ cluster has agreed to admit it through joint consensus. A pod that is running
 but not a member will sit there campaigning and never win, which is the correct
 behaviour and looks alarming if you were expecting the replica count alone to
 do the work.
+
+`AddNode` and `RemoveNode` are open to anyone who can reach the shared port unless
+you start every server with `--cluster-token-file=<path>`. The file holds one
+bearer token, must be mode 0600, and the server refuses to start if the flag is
+set and the file is missing, empty or readable by others. Send the token as
+`authorization: Bearer <token>` metadata on those two calls (for example
+`grpcurl -H "authorization: Bearer $(cat token)" ... AddNode`). `ListMembers` and
+`KVService` never need it, and without the flag nothing changes. The token is not
+logged. In Kubernetes, mount it from a Secret with `defaultMode: 0400`.
+
+This is not authentication of the cluster. `Deliver` and `DeliverSnapshot` (peer
+traffic) and `KVService` remain unauthenticated, so keep the shared port on a
+trusted network. As a safety net against memory exhaustion, each node buffers at
+most 256 MiB of incoming snapshot data across all streams and serves at most 4
+snapshot streams at once (constants `DefaultSnapshotBudgetBytes` and
+`DefaultSnapshotStreams` in `internal/transport/peer.go`); a stream over either
+limit gets `ResourceExhausted` and the sender sees an error. A single snapshot is still
+capped at 1 GiB, so a snapshot larger than 256 MiB cannot be installed until the
+budget is raised in code; see [Snapshots and size](#snapshots-and-size).
