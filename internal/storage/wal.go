@@ -45,6 +45,10 @@ const (
 
 var ErrCorruptWAL = errors.New("storage: write-ahead log is corrupt")
 
+// ErrWALFailed is returned by every write once the WAL has seen a failed write,
+// sync, roll or cleanup. The error also wraps the first failure.
+var ErrWALFailed = errors.New("storage: write-ahead log failed earlier and refuses further writes")
+
 type Options struct {
 	Dir string
 
@@ -108,6 +112,15 @@ type WAL struct {
 	hardState raft.HardState
 
 	lastIndex raft.Index
+
+	// failed is the first error from a write, sync, roll or cleanup. Once set
+	// the WAL refuses every write: after a failed fsync the kernel may have
+	// dropped the dirty pages, so a later fsync can succeed for data that never
+	// reached the disk, and a failed write can leave partial bytes that a
+	// further append would bury mid-log (RUNBOOK 7.2 item 1, 7.3 #3, #4). The
+	// only safe recovery is to stop and rebuild from what is durable at the next
+	// Open.
+	failed error
 
 	closed bool
 }
@@ -505,6 +518,27 @@ func (w *WAL) roll(seq uint64, firstIndex raft.Index) error {
 	return nil
 }
 
+// fail records err as the failure that poisons the WAL, unless one is already
+// recorded, and returns err for the caller to return.
+func (w *WAL) fail(err error) error {
+	if w.failed == nil {
+		w.failed = err
+	}
+	return err
+}
+
+// usable reports why the WAL cannot take a write: it is closed, or an earlier
+// failure poisoned it. The error wraps ErrWALFailed and that first failure.
+func (w *WAL) usable() error {
+	if w.closed {
+		return errors.New("storage: WAL is closed")
+	}
+	if w.failed != nil {
+		return fmt.Errorf("%w: %w", ErrWALFailed, w.failed)
+	}
+	return nil
+}
+
 func (w *WAL) AppendEntries(entries []raft.Entry) error {
 	if len(entries) == 0 {
 		return nil
@@ -513,8 +547,8 @@ func (w *WAL) AppendEntries(entries []raft.Entry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
-		return errors.New("storage: WAL is closed")
+	if err := w.usable(); err != nil {
+		return err
 	}
 
 	for i := 1; i < len(entries); i++ {
@@ -541,8 +575,8 @@ func (w *WAL) SaveHardState(hs raft.HardState) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
-		return errors.New("storage: WAL is closed")
+	if err := w.usable(); err != nil {
+		return err
 	}
 
 	buf := appendRecord(nil, recordHardState, encodeHardState(nil, hs))
@@ -558,8 +592,8 @@ func (w *WAL) SaveSnapshotMeta(meta SnapshotMeta) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
-		return errors.New("storage: WAL is closed")
+	if err := w.usable(); err != nil {
+		return err
 	}
 
 	buf := appendRecord(nil, recordSnapshotMeta, encodeSnapshotMeta(nil, meta))
@@ -579,8 +613,8 @@ func (w *WAL) SaveSnapshotMetaAndDiscardSuffix(meta SnapshotMeta, fromIndex raft
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
-		return errors.New("storage: WAL is closed")
+	if err := w.usable(); err != nil {
+		return err
 	}
 	if fromIndex == 0 {
 		return errors.New("storage: cannot discard the log from index 0")
@@ -605,8 +639,11 @@ func (w *WAL) SaveSnapshotMetaAndDiscardSuffix(meta SnapshotMeta, fromIndex raft
 func (w *WAL) write(buf []byte) error {
 	n, err := w.active.Write(buf)
 	w.activeSize += int64(n)
+	if err == nil && n < len(buf) {
+		err = io.ErrShortWrite // an io.Writer must not, but a File is only an interface
+	}
 	if err != nil {
-		return fmt.Errorf("storage: writing to WAL: %w", err)
+		return w.fail(fmt.Errorf("storage: writing to WAL: %w", err))
 	}
 
 	// RUNBOOK 7.2: a write is durable before it is acknowledged. This is the one
@@ -614,7 +651,7 @@ func (w *WAL) write(buf []byte) error {
 	// injected bug of RUNBOOK 8.6 item 1 for both.
 	if w.policy == SyncAlways && !faultinject.Active(faultinject.SkipFsync) {
 		if err := w.active.Sync(); err != nil {
-			return fmt.Errorf("storage: syncing WAL: %w", err)
+			return w.fail(fmt.Errorf("storage: syncing WAL: %w", err))
 		}
 	}
 	return nil
@@ -625,18 +662,23 @@ func (w *WAL) maybeRoll() error {
 		return nil
 	}
 	last := w.segments[len(w.segments)-1]
-	return w.roll(last.seq+1, w.lastIndex+1)
+	if err := w.roll(last.seq+1, w.lastIndex+1); err != nil {
+		// The write that filled the segment is already written (and synced),
+		// but the log has no segment to continue in.
+		return w.fail(err)
+	}
+	return nil
 }
 
 func (w *WAL) Sync() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
-		return errors.New("storage: WAL is closed")
+	if err := w.usable(); err != nil {
+		return err
 	}
 	if err := w.active.Sync(); err != nil {
-		return fmt.Errorf("storage: syncing WAL: %w", err)
+		return w.fail(fmt.Errorf("storage: syncing WAL: %w", err))
 	}
 	return nil
 }
@@ -645,8 +687,8 @@ func (w *WAL) TruncateBefore(index raft.Index) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
-		return errors.New("storage: WAL is closed")
+	if err := w.usable(); err != nil {
+		return err
 	}
 
 	if !w.hardState.IsEmpty() {
@@ -670,11 +712,11 @@ func (w *WAL) TruncateBefore(index raft.Index) error {
 
 	for _, seg := range w.segments[:keepFrom] {
 		if err := w.fs.Remove(filepath.Join(w.dir, seg.name)); err != nil {
-			return fmt.Errorf("storage: removing superseded segment %s: %w", seg.name, err)
+			return w.fail(fmt.Errorf("storage: removing superseded segment %s: %w", seg.name, err))
 		}
 	}
 	if err := w.fs.SyncDir(w.dir); err != nil {
-		return err
+		return w.fail(err)
 	}
 
 	w.segments = append([]segment(nil), w.segments[keepFrom:]...)
@@ -693,9 +735,15 @@ func (w *WAL) Close() error {
 	if w.active == nil {
 		return nil
 	}
+	if w.failed != nil {
+		// Do not fsync a failed WAL: a success now would prove nothing. Release
+		// the descriptor and report why it failed.
+		_ = w.active.Close()
+		return fmt.Errorf("%w: %w", ErrWALFailed, w.failed)
+	}
 	if err := w.active.Sync(); err != nil {
 		_ = w.active.Close()
-		return fmt.Errorf("storage: syncing WAL on close: %w", err)
+		return w.fail(fmt.Errorf("storage: syncing WAL on close: %w", err))
 	}
 	if err := w.active.Close(); err != nil {
 		return fmt.Errorf("storage: closing WAL: %w", err)
