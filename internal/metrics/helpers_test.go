@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -66,6 +67,22 @@ func histogramCount(t *testing.T, reg *prometheus.Registry, name string) uint64 
 		t.Fatalf("histogram %q has %d series, want exactly 1", name, len(metrics))
 	}
 	return metrics[0].GetHistogram().GetSampleCount()
+}
+
+// atLeastEventually waits for read() to reach want and returns the last value
+// read. Node.Propose returns as soon as the entry is applied, but the apply
+// metrics are recorded once the whole committed batch has been applied, so a
+// test that reads them right after Propose can see the previous batch only.
+// The wait is bounded; the assertion on the final value is unchanged.
+func atLeastEventually(read func() float64, want float64) float64 {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := read()
+		if got >= want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func scrape(t *testing.T, reg *prometheus.Registry) string {
