@@ -388,33 +388,39 @@ func LoadAdminToken(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("transport: --admin-token-file is required when the admin listener is enabled")
 	}
+	return loadTokenFile(path, "admin")
+}
+
+// loadTokenFile holds the rules shared by the admin and cluster token files;
+// kind only words the errors.
+func loadTokenFile(path, kind string) (string, error) {
 	f, err := os.Open(path) //nolint:gosec // the operator names this file on purpose
 	if err != nil {
-		return "", fmt.Errorf("transport: admin token file: %w", err)
+		return "", fmt.Errorf("transport: %s token file: %w", kind, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return "", fmt.Errorf("transport: checking admin token file %s: %w", path, err)
+		return "", fmt.Errorf("transport: checking %s token file %s: %w", kind, path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("transport: admin token file %s is not a regular file", path)
+		return "", fmt.Errorf("transport: %s token file %s is not a regular file", kind, path)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return "", fmt.Errorf("transport: admin token file %s has mode %04o, readable by group or others; use chmod 600", path, perm)
+		return "", fmt.Errorf("transport: %s token file %s has mode %04o, readable by group or others; use chmod 600", kind, path, perm)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(f, maxTokenFileBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("transport: reading admin token file %s: %w", path, err)
+		return "", fmt.Errorf("transport: reading %s token file %s: %w", kind, path, err)
 	}
 	if len(body) > maxTokenFileBytes {
-		return "", fmt.Errorf("transport: admin token file %s is larger than %d bytes", path, maxTokenFileBytes)
+		return "", fmt.Errorf("transport: %s token file %s is larger than %d bytes", kind, path, maxTokenFileBytes)
 	}
 	token := strings.TrimSpace(string(body))
 	if token == "" {
-		return "", fmt.Errorf("transport: admin token file %s holds no token", path)
+		return "", fmt.Errorf("transport: %s token file %s holds no token", kind, path)
 	}
 	return token, nil
 }

@@ -65,6 +65,8 @@ type options struct {
 	adminListen    string
 	adminTokenFile string
 	adminChaos     bool
+
+	clusterTokenFile string
 }
 
 // defineFlags registers the server's flags on fs. The admin flags default to off.
@@ -96,6 +98,18 @@ func defineFlags(fs *flag.FlagSet, opt *options) {
 		"file holding the admin bearer token, readable only by its owner (mode 0600); required with -admin-listen")
 	fs.BoolVar(&opt.adminChaos, "admin-chaos", false,
 		"also allow the admin RPCs that inject faults: Crash, Pause, SetPartition, SetNetem")
+	fs.StringVar(&opt.clusterTokenFile, "cluster-token-file", "",
+		"file holding a bearer token required for AddNode and RemoveNode on the shared listener (mode 0600); empty leaves them open")
+}
+
+// validateClusterToken fails closed: an unset -cluster-token-file means off, but a
+// set one must name a usable token file or the server does not start. It never
+// includes the token in an error.
+func validateClusterToken(opt options) (string, error) {
+	if opt.clusterTokenFile == "" {
+		return "", nil
+	}
+	return transport.LoadClusterToken(opt.clusterTokenFile)
 }
 
 // validateAdminOptions fails closed. The admin listener starts only with a usable
@@ -145,6 +159,11 @@ func run() error {
 		return err
 	}
 	adminOn := opt.adminListen != ""
+
+	clusterToken, err := validateClusterToken(opt)
+	if err != nil {
+		return err
+	}
 
 	bind := opt.listen
 	if bind == "" {
@@ -248,7 +267,7 @@ func run() error {
 	if adminOn {
 		faultsForServer = faults
 	}
-	grpcServer := newSharedServer(n, raftServer, kvServer, faultsForServer)
+	grpcServer := newSharedServerWithClusterToken(n, raftServer, kvServer, faultsForServer, clusterToken)
 
 	// AdminService is served on its own listener and nowhere else.
 	var (
@@ -331,13 +350,28 @@ func run() error {
 // endpoint goes through the ingress filter and the pause gate fails the client
 // services while the node is paused.
 func newSharedServer(n *node.Node, raftServer *transport.RaftServer, kvServer *transport.KVServer, faults *transport.FaultTransport) *grpc.Server {
-	var srv *grpc.Server
+	return newSharedServerWithClusterToken(n, raftServer, kvServer, faults, "")
+}
+
+// newSharedServerWithClusterToken is newSharedServer plus, when clusterToken is
+// not empty, a bearer-token check on AddNode and RemoveNode only.
+func newSharedServerWithClusterToken(n *node.Node, raftServer *transport.RaftServer, kvServer *transport.KVServer, faults *transport.FaultTransport, clusterToken string) *grpc.Server {
+	var (
+		unary  []grpc.UnaryServerInterceptor
+		stream []grpc.StreamServerInterceptor
+	)
+	if clusterToken != "" {
+		u, s := transport.NewClusterTokenInterceptors(clusterToken)
+		unary, stream = append(unary, u), append(stream, s)
+	}
 	if faults != nil {
-		pauseUnary, pauseStream := transport.NewPauseGate(n.Paused)
-		srv = grpc.NewServer(grpc.ChainUnaryInterceptor(pauseUnary), grpc.ChainStreamInterceptor(pauseStream))
+		u, s := transport.NewPauseGate(n.Paused)
+		unary, stream = append(unary, u), append(stream, s)
+	}
+	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(unary...), grpc.ChainStreamInterceptor(stream...))
+	if faults != nil {
 		raftkvv1.RegisterRaftServiceServer(srv, faults.WrapRaftServer(raftServer))
 	} else {
-		srv = grpc.NewServer()
 		raftServer.Register(srv)
 	}
 	kvServer.Register(srv)
