@@ -161,9 +161,14 @@ disappears cannot leave a node degraded.
 - **Events are observed transitions.** A term, role or leader change that starts and ends between two observations may not appear. There is
   no per-vote or candidate-round detail. At most 16 subscribers are served; a subscriber that falls 256 events behind is ended with
   `ResourceExhausted` and may resubscribe. Backlog: a raft observer hook for complete election events.
-- **The admin controls cover the admin RPCs only.** The shared listener still accepts, with no authentication, `AddNode`/`RemoveNode` and
-  snapshot streams of up to 1 GiB each with no aggregate or concurrency bound. Both are pre-existing; backlog card T3.18. The admin token does
-  not make the cluster safe to expose; run it on a trusted network.
+- **The admin controls cover the admin RPCs only.** The admin token does not make the cluster safe to expose; run it on a trusted network.
+  On the shared listener, `AddNode` and `RemoveNode` can be protected with `--cluster-token-file` (T3.18, see
+  [deployment.md](deployment.md#scaling-the-cluster)); it is off by default. Still unauthenticated even with it: `Deliver` and
+  `DeliverSnapshot` (peer traffic carries no credentials, and a snapshot sender is not checked to be a member), and `KVService` and
+  `ListMembers`. Incoming snapshot streams are bounded to 256 MiB of buffered data in total and 4 concurrent streams per node
+  (`DefaultSnapshotBudgetBytes`, `DefaultSnapshotStreams`), plus the existing 1 GiB per stream; a stream over either bound is refused with
+  `ResourceExhausted`. That budget stops memory exhaustion, it does not authenticate anyone, and it counts buffered chunk bytes, not the
+  transient copy made while the buffer grows.
 
 ## Verifying it
 
