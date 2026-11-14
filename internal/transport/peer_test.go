@@ -218,12 +218,13 @@ func (c *grpcCluster) dump() string {
 		s := n.Status()
 		out += fmt.Sprintf("  node %d (%s): state=%-9s term=%d leader=%d commit=%d applied=%d\n",
 			s.ID, c.addrs[id], s.State, s.Term, s.Leader, s.Commit, s.Applied)
+		out += fmt.Sprintf("    inbound messages discarded by node %d: %d\n", id, n.RecvDropped())
 	}
 	for _, id := range c.ids {
 		if tr, ok := c.transports[id]; ok {
 			for _, st := range tr.Stats() {
-				out += fmt.Sprintf("  link %d->%d: sent=%d dropped=%d failed=%d\n",
-					id, st.ID, st.Sent, st.Dropped, st.Failed)
+				out += fmt.Sprintf("  link %d->%d: sent=%d dropped=%d failed=%d coalesced=%d queued=%d\n",
+					id, st.ID, st.Sent, st.Dropped, st.Failed, st.Coalesced, st.Queued)
 			}
 		}
 	}
