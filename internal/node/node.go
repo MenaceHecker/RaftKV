@@ -60,6 +60,10 @@ type Config struct {
 
 	// Clock drives ticks and timers. Nil means the real clock.
 	Clock Clock
+
+	// FS is the filesystem under DataDir. Nil means the real OS; tests set it
+	// to inject disk faults.
+	FS storage.FS
 }
 
 const (
@@ -146,6 +150,9 @@ type Node struct {
 	storage *storage.DiskStorage
 	kv      *statemachine.KV
 
+	// failure is set by fail, on the run loop only, and ends the loop.
+	failure error
+
 	recvc    chan raft.Message
 	proposec chan proposalRequest
 	readc    chan readRequest
@@ -216,6 +223,7 @@ func Start(cfg Config) (*Node, error) {
 	store, snap, err := storage.OpenDiskStorage(storage.DiskConfig{
 		Dir:  cfg.DataDir,
 		Sync: cfg.Sync,
+		FS:   cfg.FS,
 		OnRepair: func(info storage.RepairInfo) {
 			cfg.Metrics.WALRepaired(info.Bytes)
 		},
@@ -428,6 +436,10 @@ func (n *Node) run() {
 
 		case reply := <-n.compactc:
 			reply <- n.compact()
+			if n.failure != nil {
+				n.failAllPending(n.failure)
+				return
+			}
 
 		case req := <-n.confc:
 			if err := n.handleConfChange(req); err != nil {
@@ -439,6 +451,10 @@ func (n *Node) run() {
 		}
 
 		n.processReady()
+		if n.failure != nil {
+			n.failAllPending(n.failure)
+			return
+		}
 		n.retryDeferredReads()
 	}
 }
@@ -596,8 +612,20 @@ func (n *Node) processReady() {
 	}
 }
 
+// fatal reports whether err means this node can no longer record anything
+// durably and must stop. A poisoned WAL refuses every write, so it is fatal
+// however it reaches the loop (RUNBOOK 7.2 item 1).
 func fatal(err error) bool {
-	return errors.Is(err, raft.ErrStorage)
+	return errors.Is(err, raft.ErrStorage) || errors.Is(err, storage.ErrWALFailed)
+}
+
+// fail ends the run loop after its current step, like the other fatal paths:
+// the library does not exit the process, main does when Done closes. Only the
+// first failure is kept.
+func (n *Node) fail(err error) {
+	if n.failure == nil {
+		n.failure = fmt.Errorf("node: %w", err)
+	}
 }
 
 func (n *Node) applyEntry(e raft.Entry) {
@@ -740,8 +768,14 @@ func (n *Node) compact() error {
 	if err != nil {
 		return fmt.Errorf("node: configuration at index %d: %w", applied, err)
 	}
+	// Any CreateSnapshot error stops the node. A failure in its WAL writes
+	// leaves a poisoned WAL, and the disk and memory states may already differ
+	// (disk.go publishes the snapshot before the cleanup that can fail). Whether
+	// a failed purge could be survived is T3.15.
 	if err := n.storage.CreateSnapshot(applied, data, conf); err != nil {
-		return fmt.Errorf("node: compacting: %w", err)
+		err = fmt.Errorf("compacting: %w", err)
+		n.fail(err)
+		return fmt.Errorf("node: %w", err)
 	}
 	n.lastSnapshot = applied
 	n.cfg.Metrics.SnapshotCreated(uint64(applied), time.Since(start))
@@ -764,6 +798,7 @@ func (n *Node) maybeSnapshot() {
 		return
 	}
 	if err := n.storage.CreateSnapshot(applied, data, conf); err != nil {
+		n.fail(fmt.Errorf("snapshotting at index %d: %w", applied, err))
 		return
 	}
 	n.lastSnapshot = applied
