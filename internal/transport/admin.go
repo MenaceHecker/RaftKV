@@ -3,17 +3,19 @@
 // # What the admin controls do NOT cover
 //
 // The admin token, --admin-chaos and the default-off admin listener guard the
-// AdminService RPCs only. They do not protect the shared listener, which still
-// accepts, with no authentication:
+// AdminService RPCs only. On the shared listener, AddNode and RemoveNode are
+// protected only if --cluster-token-file is set (off by default). Without it,
+// and regardless of it for everything else, the shared listener accepts with no
+// authentication:
 //
-//   - AddNode and RemoveNode, so anyone who can reach the shared port can change
-//     cluster membership; and
-//   - snapshot streams of up to 1 GiB each (MaxSnapshotBytes), with no bound on
-//     how many run at once or on the memory they hold in total.
+//   - AddNode and RemoveNode (when --cluster-token-file is unset);
+//   - Deliver and DeliverSnapshot, whose senders are not authenticated or
+//     checked for membership; incoming snapshot streams are bounded in total
+//     bytes and count (DefaultSnapshotBudgetBytes, DefaultSnapshotStreams) and
+//     at MaxSnapshotBytes each, but that is a safety net, not authentication; and
+//   - KVService and ListMembers.
 //
-// Both are pre-existing and out of scope for this change. They are tracked as
-// backlog card T3.18 (T4.7 decision 6). Do not read the admin token as securing
-// the cluster.
+// Do not read the admin or cluster token as securing the cluster.
 package transport
 
 import (
@@ -388,33 +390,39 @@ func LoadAdminToken(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("transport: --admin-token-file is required when the admin listener is enabled")
 	}
+	return loadTokenFile(path, "admin")
+}
+
+// loadTokenFile holds the rules shared by the admin and cluster token files;
+// kind only words the errors.
+func loadTokenFile(path, kind string) (string, error) {
 	f, err := os.Open(path) //nolint:gosec // the operator names this file on purpose
 	if err != nil {
-		return "", fmt.Errorf("transport: admin token file: %w", err)
+		return "", fmt.Errorf("transport: %s token file: %w", kind, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return "", fmt.Errorf("transport: checking admin token file %s: %w", path, err)
+		return "", fmt.Errorf("transport: checking %s token file %s: %w", kind, path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("transport: admin token file %s is not a regular file", path)
+		return "", fmt.Errorf("transport: %s token file %s is not a regular file", kind, path)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		return "", fmt.Errorf("transport: admin token file %s has mode %04o, readable by group or others; use chmod 600", path, perm)
+		return "", fmt.Errorf("transport: %s token file %s has mode %04o, readable by group or others; use chmod 600", kind, path, perm)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(f, maxTokenFileBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("transport: reading admin token file %s: %w", path, err)
+		return "", fmt.Errorf("transport: reading %s token file %s: %w", kind, path, err)
 	}
 	if len(body) > maxTokenFileBytes {
-		return "", fmt.Errorf("transport: admin token file %s is larger than %d bytes", path, maxTokenFileBytes)
+		return "", fmt.Errorf("transport: %s token file %s is larger than %d bytes", kind, path, maxTokenFileBytes)
 	}
 	token := strings.TrimSpace(string(body))
 	if token == "" {
-		return "", fmt.Errorf("transport: admin token file %s holds no token", path)
+		return "", fmt.Errorf("transport: %s token file %s holds no token", kind, path)
 	}
 	return token, nil
 }
