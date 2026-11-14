@@ -145,10 +145,14 @@ func TestPersistAndApplyAreObserved(t *testing.T) {
 		t.Error("persisted_entries_total is zero")
 	}
 
-	if got := gatherValue(t, reg, "raftkv_applied_entries_total"); got < 2 {
+	// Propose returns when the entry is applied; the apply metrics follow when
+	// the batch finishes, so wait for them rather than reading them at once.
+	applied := func() float64 { return gatherValue(t, reg, "raftkv_applied_entries_total") }
+	if got := atLeastEventually(applied, 2); got < 2 {
 		t.Errorf("applied_entries_total = %v, want at least 2", got)
 	}
-	if got := histogramCount(t, reg, "raftkv_apply_duration_seconds"); got == 0 {
+	applyObserved := func() float64 { return float64(histogramCount(t, reg, "raftkv_apply_duration_seconds")) }
+	if got := atLeastEventually(applyObserved, 1); got == 0 {
 		t.Error("apply_duration_seconds recorded nothing")
 	}
 }

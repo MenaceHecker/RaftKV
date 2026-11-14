@@ -668,6 +668,17 @@ func (w *WAL) TruncateBefore(index raft.Index) error {
 		return nil
 	}
 
+	// The segments about to go may hold the only durable copy of currentTerm and
+	// votedFor, so the replacement record must be durable before the first
+	// delete in every fsync mode (Raft paper Figure 2, persistent state; section
+	// 5.2; RUNBOOK 7.3 "persist the intent before deleting data"). SyncAlways
+	// already synced it in write. This costs one fsync per compaction.
+	if w.policy != SyncAlways && !w.hardState.IsEmpty() {
+		if err := w.active.Sync(); err != nil {
+			return fmt.Errorf("storage: syncing WAL before removing superseded segments: %w", err)
+		}
+	}
+
 	for _, seg := range w.segments[:keepFrom] {
 		if err := w.fs.Remove(filepath.Join(w.dir, seg.name)); err != nil {
 			return fmt.Errorf("storage: removing superseded segment %s: %w", seg.name, err)
