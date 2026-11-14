@@ -50,17 +50,24 @@ type peer struct {
 	conn   *grpc.ClientConn
 	client raftkvv1.RaftServiceClient
 
-	queue chan *raftkvv1.Message
-	done  chan struct{}
+	// mu guards queue. The queue is bounded by queueSize and delivered in FIFO
+	// order, except that a newer append request replaces a still-queued older
+	// one for the same term (see enqueue).
+	mu        sync.Mutex
+	queue     []*raftkvv1.Message
+	queueSize int
+	wake      chan struct{}
+	done      chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	timeout time.Duration
 
-	dropped atomic.Uint64
-	failed  atomic.Uint64
-	sent    atomic.Uint64
+	dropped   atomic.Uint64
+	coalesced atomic.Uint64
+	failed    atomic.Uint64
+	sent      atomic.Uint64
 }
 
 type PeerTransport struct {
@@ -181,15 +188,16 @@ func (t *PeerTransport) dial(id raft.NodeID, addr string) (*peer, error) {
 
 	pctx, pcancel := context.WithCancel(context.Background())
 	p := &peer{
-		id:      id,
-		addr:    addr,
-		conn:    conn,
-		client:  raftkvv1.NewRaftServiceClient(conn),
-		queue:   make(chan *raftkvv1.Message, t.queueSize),
-		done:    make(chan struct{}),
-		ctx:     pctx,
-		cancel:  pcancel,
-		timeout: t.sendTimeout,
+		id:        id,
+		addr:      addr,
+		conn:      conn,
+		client:    raftkvv1.NewRaftServiceClient(conn),
+		queueSize: t.queueSize,
+		wake:      make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		ctx:       pctx,
+		cancel:    pcancel,
+		timeout:   t.sendTimeout,
 	}
 	go p.run()
 	return p, nil
@@ -217,23 +225,81 @@ func (t *PeerTransport) Send(msgs []raft.Message) {
 			continue
 		}
 
-		select {
-		case p.queue <- wire:
-		default:
-			p.dropped.Add(1)
+		p.enqueue(wire)
+	}
+}
+
+// enqueue adds msg to the peer's queue without blocking.
+//
+// The leader re-sends its current append to a slow follower on every heartbeat
+// tick, and each one supersedes the last (Raft paper section 5.3: the leader
+// retries AppendEntries until it succeeds, and every retry is built from the
+// leader's latest nextIndex). Keeping every one of them in a FIFO makes a fresh
+// message wait behind a whole queue of stale duplicates, up to 256 MiB of them,
+// so a recovering follower advanced by one append per queue drain. A newer
+// append request therefore replaces the queued append of the same term. The
+// removal keeps every other message in order and the new append goes to the
+// tail, so a heartbeat or response queued behind the old append waits for at
+// most one append. Appends of different terms are never merged, and snapshots
+// and every other message type are never replaced.
+func (p *peer) enqueue(msg *raftkvv1.Message) {
+	p.mu.Lock()
+	if msg.GetType() == raftkvv1.MessageType_MESSAGE_TYPE_APPEND_REQUEST {
+		for i, q := range p.queue {
+			if q.GetType() == msg.GetType() && q.GetTerm() == msg.GetTerm() {
+				p.queue = append(p.queue[:i], p.queue[i+1:]...)
+				p.coalesced.Add(1)
+				break
+			}
 		}
 	}
+	if len(p.queue) >= p.queueSize {
+		p.mu.Unlock()
+		p.dropped.Add(1)
+		return
+	}
+	p.queue = append(p.queue, msg)
+	p.mu.Unlock()
+
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (p *peer) pop() *raftkvv1.Message {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.queue) == 0 {
+		return nil
+	}
+	msg := p.queue[0]
+	p.queue[0] = nil
+	p.queue = p.queue[1:]
+	return msg
+}
+
+func (p *peer) depth() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.queue)
 }
 
 func (p *peer) run() {
 	defer close(p.done)
 
 	for {
+		if p.ctx.Err() != nil {
+			return
+		}
+		if msg := p.pop(); msg != nil {
+			p.deliver(msg)
+			continue
+		}
 		select {
 		case <-p.ctx.Done():
 			return
-		case msg := <-p.queue:
-			p.deliver(msg)
+		case <-p.wake:
 		}
 	}
 }
@@ -319,6 +385,11 @@ type PeerStats struct {
 	Sent    uint64
 	Dropped uint64
 	Failed  uint64
+
+	// Coalesced counts queued append requests replaced by a newer one, and
+	// Queued is the number of messages waiting to be delivered.
+	Coalesced uint64
+	Queued    int
 }
 
 func (t *PeerTransport) Stats() []PeerStats {
@@ -333,6 +404,9 @@ func (t *PeerTransport) Stats() []PeerStats {
 			Sent:    p.sent.Load(),
 			Dropped: p.dropped.Load(),
 			Failed:  p.failed.Load(),
+
+			Coalesced: p.coalesced.Load(),
+			Queued:    p.depth(),
 		})
 	}
 	return out

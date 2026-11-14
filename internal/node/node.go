@@ -178,6 +178,8 @@ type Node struct {
 
 	snapshotsReceived uint64
 
+	recvDropped atomic.Uint64
+
 	applyc chan struct{}
 
 	proposalBatch []proposalRequest
@@ -297,8 +299,13 @@ func (n *Node) Step(m raft.Message) {
 	case n.recvc <- m:
 	case <-n.stopc:
 	default:
+		n.recvDropped.Add(1)
 	}
 }
+
+// RecvDropped is the number of inbound messages Step discarded because the
+// node's receive buffer was full. Raft tolerates the loss, but it was silent.
+func (n *Node) RecvDropped() uint64 { return n.recvDropped.Load() }
 
 func (n *Node) Status() Status {
 	reply := make(chan Status, 1)
