@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/MenaceHecker/raftkv/internal/raft"
@@ -340,13 +342,21 @@ type RaftServer struct {
 	raftkvv1.UnimplementedRaftServiceServer
 
 	node Stepper
+
+	budget *snapshotBudget
+	// maxSnapshot is the per-stream size limit; MaxSnapshotBytes outside tests.
+	maxSnapshot int
 }
 
 func NewRaftServer(node Stepper) (*RaftServer, error) {
 	if node == nil {
 		return nil, errors.New("transport: RaftServer requires a node")
 	}
-	return &RaftServer{node: node}, nil
+	return &RaftServer{
+		node:        node,
+		budget:      newSnapshotBudget(DefaultSnapshotBudgetBytes, DefaultSnapshotStreams),
+		maxSnapshot: MaxSnapshotBytes,
+	}, nil
 }
 
 func (s *RaftServer) Deliver(ctx context.Context, req *raftkvv1.DeliverRequest) (*raftkvv1.DeliverResponse, error) {
@@ -361,11 +371,103 @@ func (s *RaftServer) Deliver(ctx context.Context, req *raftkvv1.DeliverRequest) 
 
 const MaxSnapshotBytes = 1 << 30
 
+const (
+	// DefaultSnapshotBudgetBytes bounds the snapshot bytes buffered across all
+	// in-flight DeliverSnapshot streams on one node.
+	DefaultSnapshotBudgetBytes = 256 << 20
+	// DefaultSnapshotStreams bounds concurrent DeliverSnapshot streams.
+	DefaultSnapshotStreams = 4
+)
+
+// snapshotBudget bounds the memory and stream slots that incoming snapshot
+// streams may hold at once. It is a safety net against exhaustion, not a rate
+// limiter, and it authenticates nobody. It also records peaks and refusals so
+// tests can observe the accounting.
+type snapshotBudget struct {
+	mu         sync.Mutex
+	maxBytes   int64
+	maxStreams int
+
+	bytes   int64
+	streams int
+
+	peakBytes   int64
+	peakStreams int
+	rejected    int
+}
+
+func newSnapshotBudget(maxBytes int64, maxStreams int) *snapshotBudget {
+	return &snapshotBudget{maxBytes: maxBytes, maxStreams: maxStreams}
+}
+
+type budgetUsage struct {
+	Bytes, PeakBytes     int64
+	Streams, PeakStreams int
+	Rejected             int
+}
+
+func (b *snapshotBudget) usage() budgetUsage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return budgetUsage{b.bytes, b.peakBytes, b.streams, b.peakStreams, b.rejected}
+}
+
+// openStream takes a stream slot; false means the stream must be refused.
+func (b *snapshotBudget) openStream() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.streams >= b.maxStreams {
+		b.rejected++
+		return false
+	}
+	b.streams++
+	b.peakStreams = max(b.peakStreams, b.streams)
+	return true
+}
+
+func (b *snapshotBudget) closeStream() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.streams--
+}
+
+// reserve takes n bytes; false means the budget is exhausted and nothing was taken.
+func (b *snapshotBudget) reserve(n int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.bytes+n > b.maxBytes {
+		b.rejected++
+		return false
+	}
+	b.bytes += n
+	b.peakBytes = max(b.peakBytes, b.bytes)
+	return true
+}
+
+func (b *snapshotBudget) release(n int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.bytes -= n
+}
+
+var errSnapshotBusy = status.Error(codes.ResourceExhausted, "transport: too many snapshot streams in flight")
+var errSnapshotBytes = status.Error(codes.ResourceExhausted, "transport: snapshot memory budget exhausted")
+
 func (s *RaftServer) DeliverSnapshot(stream raftkvv1.RaftService_DeliverSnapshotServer) error {
+	// A stream over the concurrency bound is refused before any frame is read,
+	// so its payload is never buffered. The slot and every reserved byte are
+	// returned on all paths, including errors and cancellation.
+	if !s.budget.openStream() {
+		return errSnapshotBusy
+	}
+	defer s.budget.closeStream()
+
 	var (
-		header *raftkvv1.Message
-		data   []byte
+		header   *raftkvv1.Message
+		data     []byte
+		reserved int64
 	)
+	defer func() { s.budget.release(reserved) }()
 
 	for {
 		chunk, err := stream.Recv()
@@ -387,9 +489,15 @@ func (s *RaftServer) DeliverSnapshot(stream raftkvv1.RaftService_DeliverSnapshot
 			if header == nil {
 				return errors.New("transport: snapshot stream sent data before its header")
 			}
-			if len(data)+len(frame.Data) > MaxSnapshotBytes {
-				return fmt.Errorf("transport: snapshot exceeds the %d byte limit", MaxSnapshotBytes)
+			if len(data)+len(frame.Data) > s.maxSnapshot {
+				return fmt.Errorf("transport: snapshot exceeds the %d byte limit", s.maxSnapshot)
 			}
+			// Reserve per chunk, before buffering it, so a small snapshot holds
+			// a small reservation.
+			if !s.budget.reserve(int64(len(frame.Data))) {
+				return errSnapshotBytes
+			}
+			reserved += int64(len(frame.Data))
 			data = append(data, frame.Data...)
 
 		default:
