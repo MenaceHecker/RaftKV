@@ -187,9 +187,9 @@ func (g *Gateway) handlePut(w http.ResponseWriter, r *http.Request) {
 		return kv.Put(ctx, key, []byte(*body.Value))
 	})
 	if err != nil {
-		// Only "no leader" proves the write never happened; for anything else
+		// Only "no leader" and "refused" prove the write never happened; for anything else
 		// the key stays registered, because it may exist.
-		if errors.Is(err, ErrNoLeader) && isNew {
+		if (errors.Is(err, ErrNoLeader) || errors.Is(err, ErrRejected)) && isNew {
 			if rerr := g.reg.remove(key); rerr != nil {
 				g.log.Error("registry append failed", "err", rerr)
 			}
@@ -228,6 +228,13 @@ func (g *Gateway) kvError(w http.ResponseWriter, err error, write bool) {
 	case errors.Is(err, ErrNoLeader), errors.Is(err, errBusy):
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, "no leader available, try again")
+	case errors.Is(err, ErrRejected):
+		if write {
+			writeJSON(w, http.StatusBadGateway, map[string]string{
+				"error": "the cluster refused the request", "outcome": "not applied"})
+			return
+		}
+		writeError(w, http.StatusBadGateway, "the cluster refused the request")
 	case errors.Is(err, ErrIndeterminate), errors.Is(err, errTimeout), errors.Is(err, context.DeadlineExceeded):
 		if write {
 			writeJSON(w, http.StatusGatewayTimeout, map[string]string{
