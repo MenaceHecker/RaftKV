@@ -479,10 +479,29 @@ type scripted struct {
 	grpc.ClientStream
 	items []any // *raftkvv1.Event or error
 	ctx   context.Context
+
+	// gate, when set, holds the first Recv until it is closed, so a test can
+	// attach its subscribers before any event is published.
+	gate <-chan struct{}
+	// exhausted, when set, is closed once every item has been returned and the
+	// relay asks for the next one: proof that it read the whole script.
+	exhausted     chan struct{}
+	exhaustedOnce sync.Once
 }
 
 func (s *scripted) Recv() (*raftkvv1.Event, error) {
+	if s.gate != nil {
+		select {
+		case <-s.gate:
+			s.gate = nil
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		}
+	}
 	if len(s.items) == 0 {
+		if s.exhausted != nil {
+			s.exhaustedOnce.Do(func() { close(s.exhausted) })
+		}
 		<-s.ctx.Done()
 		return nil, s.ctx.Err()
 	}
@@ -592,8 +611,12 @@ func TestLiveEventsDoNotBlockOnASlowSubscriber(t *testing.T) {
 	for i := uint64(1); i <= 500; i++ {
 		items = append(items, &raftkvv1.Event{Node: 1, Term: i, Seq: i})
 	}
+	// Hold the stream until both subscribers exist, so no event is published
+	// before they are attached, and note when the relay has read the whole script.
+	gate := make(chan struct{})
+	exhausted := make(chan struct{})
 	admin := &stubAdmin{events: func(int) (grpc.ServerStreamingClient[raftkvv1.Event], error) {
-		return &scripted{ctx: ctx, items: items}, nil
+		return &scripted{ctx: ctx, items: items, gate: gate, exhausted: exhausted}, nil
 	}}
 	l := stubLive(t, admin, fakecluster.NewClock())
 	slow, err := l.Events(ctx, 1) // never read until the end
@@ -604,7 +627,40 @@ func TestLiveEventsDoNotBlockOnASlowSubscriber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nextEvent(t, fast, func(e gateway.NodeEvent) bool { return e.Seq == 500 }) // the stream ran through
+
+	// The fast subscriber is drained concurrently. Subscribers have a bounded
+	// buffer and a full one drops, so which events it sees depends on scheduling;
+	// only its order is asserted.
+	var mu sync.Mutex
+	var fastSeqs []uint64
+	go func() {
+		for e := range fast {
+			mu.Lock()
+			fastSeqs = append(fastSeqs, e.Seq)
+			mu.Unlock()
+		}
+	}()
+
+	close(gate)
+	// A subscriber that is never read must not stall the relay: it reads all 500
+	// events and asks for more.
+	select {
+	case <-exhausted:
+	case <-time.After(rigWait):
+		t.Fatal("the relay did not read the whole stream: a slow subscriber blocked it")
+	}
+	eventually(t, "the fast subscriber to receive events", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(fastSeqs) > 0
+	})
+	mu.Lock()
+	for i := 1; i < len(fastSeqs); i++ {
+		if fastSeqs[i] <= fastSeqs[i-1] {
+			t.Fatalf("the fast subscriber's seq went backwards: %d after %d", fastSeqs[i], fastSeqs[i-1])
+		}
+	}
+	mu.Unlock()
 	// The slow subscriber lost events but kept their seq numbers, so a gap is detectable.
 	var last uint64
 	for drained := false; !drained; {
