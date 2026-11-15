@@ -1,18 +1,54 @@
 # Gateway (`cmd/gateway`): API, limits, restarts, and what is not exposed
 
 Spec: RUNBOOK 10.6. Card: `docs/tasks/D5.md`. This covers part 1 (core, KV, abuse
-controls, security). Chaos, `/v1/events` and `/v1/verify/*` are D5b and answer
-`501` today. The live adapter to a real cluster needs the client library (T4.6)
-and is not in this build: `cmd/gateway` only serves with `--fake-cluster`, an
-in-memory demo cluster.
+controls, security) and the live adapter. Chaos, `/v1/events` and `/v1/verify/*`
+are D5b and answer `501` today.
 
-## Running it (demo)
+## Running it
 
 ```
-gateway --fake-cluster --listen 127.0.0.1:8080 \
+gateway --listen 127.0.0.1:8080 \
+  --nodes 1=us-east-1a=10.0.1.10:7000=10.0.1.10:9000,2=us-east-1b=10.0.2.10:7000=10.0.2.10:9000,3=us-east-1c=10.0.3.10:7000=10.0.3.10:9000 \
   --admin-token-file admin.token --node-token-file node.token \
   --state-dir ./state --dashboard-origin https://dash.example.com
 ```
+
+`--nodes` is `id=az=addr=adminaddr,...`: `addr` is the node's `--listen` gRPC
+address (KVService), `adminaddr` its `--admin-listen` address. It fails closed:
+an empty list or entry, a wrong field count, id 0, a repeated id, a repeated
+address, or a port outside 1..65535 exits non-zero. The nodes must run with
+`--admin-listen` and `--admin-token-file`, and `--admin-chaos` for the chaos
+RPCs; `--node-token-file` holds that same machine token.
+
+### The live adapter (`internal/gateway/live.go`)
+
+- KV: 8 `internal/client` clients, one per pooled session, each with its own
+  random client id (never a fixed one) and serialised writes; retries with the
+  same sequence number are the client's job. `IndeterminateError` becomes
+  `ErrIndeterminate` (`504`, `"outcome":"unknown"`); no leader reached, or a
+  write that was never sent, becomes `ErrNoLeader` (`503`); a refusal by a node
+  (`InvalidArgument`, `ResourceExhausted`, ...) becomes `ErrRejected` (`502`,
+  `"outcome":"not applied"`, the key is released from the registry).
+- Admin: one `AdminServiceClient` per node, plaintext gRPC inside the VPC, the
+  machine token sent as `authorization: Bearer` on every call and never logged.
+  `ClearFaults(id)` is `SetPartition([])` then `SetNetem(0,0,0)`: the nodes have
+  no clear RPC. A wrong token gives `ErrNodeUnauthenticated`, a node without
+  `--admin-chaos` gives `ErrChaosDisabled`, a lost connection gives
+  `ErrNodeUnavailable` (what a `Crash` normally produces: the node exits about
+  50 ms after replying).
+- Events: the adapter holds one upstream `Events` stream per node for its whole
+  life and fans it out to local subscribers, so browsers never use the nodes'
+  16 subscriber slots. It reconnects with jittered exponential backoff (200 ms
+  doubling to 10 s, drawn from the upper half), also after `ResourceExhausted`
+  or `Unauthenticated`. A subscriber that falls behind loses events; the node's
+  `seq` on each event exposes the gap.
+- Only `KVService` and `AdminService` clients are built.
+
+### Demo build
+
+`--fake-cluster` (an in-memory demo cluster) exists only in a binary built with
+`go build -tags fakecluster ./cmd/gateway`. The production build has no such
+flag and does not link the fake. CI vets and tests the tagged variant.
 
 Both token files must exist, be mode 0600, be non-empty and differ from each
 other; any missing flag exits non-zero. `--public-keyspace-reset` defaults to 6h.
@@ -90,4 +126,4 @@ The `Cluster` interface has no `AddNode`, `RemoveNode` or `ListMembers`, and a
 test parses the package to keep the membership client out of it. The gateway
 never constructs a `ClusterServiceClient`. Two secrets are kept apart: the HTTP
 admin token (typed into a browser) and the machine token for node admin RPCs
-(`--node-token-file`, used only by the live adapter, which is not built yet).
+(`--node-token-file`, used only by the live adapter).
