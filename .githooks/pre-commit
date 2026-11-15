@@ -8,6 +8,10 @@ if [ -n "$unformatted" ]; then
   echo "pre-commit: these files are not gofmt'd:"; echo "$unformatted"; exit 1
 fi
 
+# A stale README count fails here in about a second, with the command that fixes it,
+# instead of after the full test run below (which still runs the unchanged test).
+go run ./cmd/readmecounts -check
+
 go vet ./...
 go test -race -short ./...
 

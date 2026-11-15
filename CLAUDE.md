@@ -23,6 +23,7 @@ If no role is given, ask which one.
 ## Commands
 - make fmt | vet | lint | test (race) | test-flaky (count=20) | chaos-smoke | proto
 - scripts/guard-tests.sh origin/main
+- After adding tests or merging main: `make readme-counts` (fixes the README test counts; `make readme-check` only reports). `make sync-main` merges origin/main and runs it; it never pushes.
 - Before every commit: make fmt vet lint test
 
 ## Conventions
