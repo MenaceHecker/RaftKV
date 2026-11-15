@@ -597,7 +597,13 @@ func (c *Client) finish(write bool, seq uint64, sent int, cause, last error) err
 }
 
 func (c *Client) unavailable(cause, last error) error {
-	if last != nil && !errors.Is(cause, last) {
+	switch {
+	case cause == nil && last == nil:
+		return ErrUnavailable
+	case cause == nil:
+		// The operation was still live: the last attempt is the whole story.
+		return fmt.Errorf("%w: %w", ErrUnavailable, last)
+	case last != nil && !errors.Is(cause, last):
 		cause = fmt.Errorf("%w; last attempt: %w", cause, last)
 	}
 	return fmt.Errorf("%w: %w", ErrUnavailable, cause)
