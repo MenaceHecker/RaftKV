@@ -2,9 +2,9 @@
 // a dashboard, with the abuse controls of RUNBOOK 10.6, in front of the
 // cluster behind the gateway.Cluster interface.
 //
-// It serves plain HTTP; TLS is D6. This build has no live cluster adapter yet
-// (it needs internal/client, card T4.6), so only --fake-cluster, an in-memory
-// demo cluster, can serve.
+// It serves plain HTTP; TLS is D6. It talks to the real cluster named by
+// --nodes through gateway.Live. An in-memory demo cluster (--fake-cluster)
+// exists only in binaries built with -tags fakecluster.
 package main
 
 import (
@@ -24,19 +24,18 @@ import (
 	"time"
 
 	"github.com/MenaceHecker/raftkv/internal/gateway"
-	"github.com/MenaceHecker/raftkv/internal/gateway/fakecluster"
 )
 
 // settings is the validated command line.
 type settings struct {
 	listen          string
-	nodes           string
+	nodes           []gateway.LiveNode
 	adminToken      string // HTTP admin Bearer
 	nodeToken       string // machine token for node admin RPCs; used by the live adapter
 	stateDir        string
 	dashboardOrigin string
 	keyspaceReset   time.Duration
-	fakeCluster     bool
+	fakeCluster     bool // set only by a -tags fakecluster build
 }
 
 // loadSettings parses and validates the flags. It fails closed: both token
@@ -44,17 +43,17 @@ type settings struct {
 // differ, so a token typed into a browser is never the machine token.
 func loadSettings(args []string) (*settings, error) {
 	var s settings
-	var adminFile, nodeFile string
+	var adminFile, nodeFile, nodeList string
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&s.listen, "listen", ":8080", "HTTP listen address (TLS is D6)")
-	fs.StringVar(&s.nodes, "nodes", "", "nodes as id=az=addr=adminaddr,... (live adapter; not in this build)")
+	fs.StringVar(&nodeList, "nodes", "", "the cluster as id=az=addr=adminaddr,... (addr: gRPC, adminaddr: admin API)")
 	fs.StringVar(&adminFile, "admin-token-file", "", "file holding the HTTP admin Bearer token (mode 0600)")
 	fs.StringVar(&nodeFile, "node-token-file", "", "file holding the machine token for node admin RPCs (mode 0600)")
 	fs.StringVar(&s.stateDir, "state-dir", "", "directory for the key registry")
 	fs.StringVar(&s.dashboardOrigin, "dashboard-origin", "", "the one origin allowed by CORS, e.g. https://dash.example.com")
 	fs.DurationVar(&s.keyspaceReset, "public-keyspace-reset", gateway.DefaultReset, "how often the public keyspace is wiped")
-	fs.BoolVar(&s.fakeCluster, "fake-cluster", false, "serve an in-memory DEMO cluster instead of a real one")
+	defineDemoFlags(fs, &s) // only a -tags fakecluster build defines --fake-cluster
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -81,8 +80,10 @@ func loadSettings(args []string) (*settings, error) {
 	if s.keyspaceReset <= 0 {
 		return nil, errors.New("--public-keyspace-reset must be positive")
 	}
-	if s.nodes == "" && !s.fakeCluster {
-		return nil, errors.New("--nodes is required")
+	if nodeList != "" || !s.fakeCluster {
+		if s.nodes, err = parseNodes(nodeList); err != nil {
+			return nil, err
+		}
 	}
 	return &s, nil
 }
@@ -122,13 +123,20 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if !s.fakeCluster {
-		return errors.New("the live cluster adapter is not part of this build (D5 step 6, after card T4.6); use --fake-cluster for a demo")
+	cl, demo := demoCluster(s, logger)
+	if !demo {
+		live, err := gateway.NewLive(gateway.LiveConfig{
+			Nodes: s.nodes, NodeToken: s.nodeToken, Clock: systemClock{}, Rand: systemRand{}, Logger: logger,
+		})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = live.Close() }()
+		cl = live
 	}
-	logger.Warn("serving an in-memory DEMO cluster, not a real one")
 
 	g, err := gateway.New(gateway.Config{
-		Cluster:         fakecluster.New(),
+		Cluster:         cl,
 		Clock:           systemClock{},
 		Rand:            systemRand{},
 		Logger:          logger,
