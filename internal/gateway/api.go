@@ -33,16 +33,6 @@ func getOnly(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// notYet answers for the parts of the API that belong to D5b (chaos, events,
-// verify): the routes exist so the dashboard gets a clear answer, and nothing
-// behind them runs.
-func notYet(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{
-		"error":  "not implemented",
-		"detail": "this endpoint is not available in this build",
-	})
-}
-
 func (g *Gateway) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", getOnly(func(w http.ResponseWriter, _ *http.Request) {
@@ -53,9 +43,15 @@ func (g *Gateway) routes() http.Handler {
 	mux.HandleFunc("/v1/kv/{key}", g.handleKV)
 	mux.HandleFunc("/v1/kv/{key}/cas", g.handleCAS)
 	mux.HandleFunc("/v1/admin/reset", g.requireAdmin(g.handleAdminReset))
-	mux.HandleFunc("/v1/events", notYet)
-	mux.HandleFunc("/v1/chaos/", notYet)
-	mux.HandleFunc("/v1/verify/", notYet)
+	mux.HandleFunc("/v1/events", g.handleEvents)
+	mux.HandleFunc("/v1/chaos/kill-leader", g.chaosHandler("kill"))
+	mux.HandleFunc("/v1/chaos/kill/{id}", g.chaosHandler("kill"))
+	mux.HandleFunc("/v1/chaos/pause/{id}", g.chaosHandler("pause"))
+	mux.HandleFunc("/v1/chaos/partition", g.chaosHandler("partition"))
+	mux.HandleFunc("/v1/chaos/delay", g.chaosHandler("delay"))
+	mux.HandleFunc("/v1/chaos/heal", g.chaosHandler("heal"))
+	mux.HandleFunc("/v1/verify/run", g.handleVerifyRun)
+	mux.HandleFunc("/v1/verify/last", g.handleVerifyLast)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})
