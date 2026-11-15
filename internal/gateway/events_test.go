@@ -10,6 +10,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func countState(c *sseConn) int {
+	n := 0
+	for _, ev := range c.all() {
+		if ev.Event == "state" {
+			n++
+		}
+	}
+	return n
+}
+
 func mustID(t *testing.T, s string) uint64 {
 	t.Helper()
 	n, err := strconv.ParseUint(s, 10, 64)
@@ -141,7 +151,7 @@ func TestLastEventIDReplayAndResync(t *testing.T) {
 	e.fc.SetLeader(2)
 	a.wait(t, "term 2", isState(2, 3))
 	e.fc.SetLeader(3)
-	a.wait(t, "term 3", isState(3, 3))
+	eventually(t, "all six state events", func() bool { return countState(a) >= 6 })
 
 	all := a.all()
 	if len(all) < 6 {
@@ -156,12 +166,12 @@ func TestLastEventIDReplayAndResync(t *testing.T) {
 	// A browser that last saw the second event gets exactly the rest, with the
 	// same ids and data.
 	b := e.connect(ip(2), "Last-Event-ID", all[1].ID)
-	b.wait(t, "the replay", isState(3, 3))
+	eventually(t, "the replay", func() bool { return countState(b) >= 4 })
 	// The start-up heal publishes a chaos event at an unpredictable moment, so
 	// compare what both browsers have in common.
 	got, now := b.all(), a.all()
-	if len(got) < len(all)-2 {
-		t.Fatalf("replay after id %s gave %d events, want at least %d: %+v", all[1].ID, len(got), len(all)-2, got)
+	if len(got) < 3 || got[0].ID != all[2].ID {
+		t.Fatalf("replay after id %s should start at id %s: %+v", all[1].ID, all[2].ID, got)
 	}
 	for i := 0; i < len(got) && i+2 < len(now); i++ {
 		if got[i] != now[i+2] {
