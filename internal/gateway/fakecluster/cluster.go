@@ -362,6 +362,7 @@ func (s *session) enter(ctx context.Context, write bool) (seq uint64, err error)
 	c := s.c
 	c.mu.Lock()
 	c.active++
+	c.cond.Broadcast()
 	if write {
 		c.inflight[s.id]++
 		if c.inflight[s.id] > 1 {
@@ -475,4 +476,13 @@ func (s *session) Delete(ctx context.Context, key string) error {
 	c.lastSeq[s.id] = seq
 	c.commit++
 	return nil
+}
+
+// WaitActive returns once at least n KV calls are executing.
+func (c *Cluster) WaitActive(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for c.active < n {
+		c.cond.Wait()
+	}
 }
