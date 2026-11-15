@@ -382,6 +382,14 @@ type vreport struct {
 
 // drive runs the fake clock until the verification run ends. Restarting the
 // nodes each step stands in for systemd.
+//
+// The run does real work after its workload ends (healing, waiting for the
+// nodes, checking the history, an fsync) while the driver keeps advancing fake
+// time. Unpaced, the driver can run the fake clock tens of minutes past the end
+// of the workload before the run reports done (seen in CI), which silently
+// consumes the 15-minute cooldown the tests then assert on. A short real pause
+// per step bounds that: each real millisecond of post-run work costs the fake
+// clock only a few seconds.
 func (e *env) drive() {
 	e.t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
@@ -394,6 +402,7 @@ func (e *env) drive() {
 		}
 		e.clk.Advance(50 * time.Millisecond)
 		runtime.Gosched()
+		time.Sleep(200 * time.Microsecond)
 	}
 }
 

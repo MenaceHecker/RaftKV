@@ -187,6 +187,11 @@ func TestLastEventIDReplayAndResync(t *testing.T) {
 		term++
 		a.wait(t, "term "+strconv.Itoa(int(term)), isState(term, 3))
 	}
+	// Every state event (3 nodes x 2 changes, then 3 x 100) must have been
+	// published before C joins: until then id 1 may still be inside the ring of
+	// 256 and C would get a replay instead of a resync (seen at GOMAXPROCS=1,
+	// where the per-node relays lag the test loop).
+	eventuallyYield(t, "every state event to reach browser A", func() bool { return countState(a) >= 3*2+3*100 })
 	c := e.connect(ip(3), "Last-Event-ID", "1")
 	c.wait(t, "a resync", func(ev sseEvent) bool { return ev.Event == "resync" })
 	first := c.all()[0]
