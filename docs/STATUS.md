@@ -1,72 +1,79 @@
-# RaftKV: current status (Task 0 audit)
+# RaftKV: current status
 
-Audited at commit `ddff529` by reading code only; line references are to that commit. The audit itself ran no
-build, test, or lint. The baseline was then run and verified (section 2a).
+Refreshed at `origin/main` `73915fa` (2026-11-15). The file began as the Task 0 audit at commit `ddff529` and was patched
+piecemeal after that; this refresh re-grounds it. **How to read the verdicts:** they come from reading the code and task cards at
+`73915fa`, plus the test runs listed in section 2a and the targeted runs named in section 2b. Where a row was carried over from the
+audit without a re-read, it says "carried". Line numbers from `ddff529` no longer match the code, so evidence now cites function and
+test names (each name was matched with `grep -rn "func TestName"`). Test, fuzz and line counts are not restated here: README.md owns
+them and `TestReadmeTestCountIsCurrent` in `internal/determinism/readme_test.go` fails when they are wrong.
 
-Summary: the repo is far ahead of the RUNBOOK's assumptions. The README claims all six phases are complete.
-What is missing is the RUNBOOK's tooling (Makefile, lint, scripts, INVARIANTS.md) and its AWS/demo track,
-not the Raft core.
+Summary: the repo is far ahead of the RUNBOOK's assumptions, and the RUNBOOK's tooling track now exists (Makefile, `.golangci.yml`,
+`scripts/`, `.githooks/`, CI, `docs/INVARIANTS.md`, `docs/tasks/`, `cmd/chaosrun`, the mutation suite, the admin API). What is still
+missing is the AWS/demo track (gateway, `infra/`, `web/`) and the deferred storage-hardening cards T3.12-T3.15. README.md says
+"Status: complete"; that is true of its six phases, not of this list (see the PR body for the conflict).
 
-## 1. Phases (README:233-238)
-| README phase | Scope per README | Status (by reading code) | RUNBOOK phase it overlaps |
+## 1. Phases (README roadmap)
+| README phase | Scope per README | Status | RUNBOOK phase it overlaps |
 |---|---|---|---|
-| P1 | Election, replication, commit rules, deterministic harness | Done: `election.go`, `replication.go`, `log.go` | P1+P2 |
-| P2 | WAL, snapshots, compaction, crash recovery, KV state machine | Done: `internal/storage`, `internal/statemachine` | P3, part of P4 |
+| P1 | Election, replication, commit rules, deterministic harness | Done: `election.go`, `replication.go`, `log.go` in `internal/raft` | P1+P2 |
+| P2 | WAL, snapshots, compaction, crash recovery, KV state machine | Done: `internal/storage`, `internal/statemachine`; crash-recovery tests on a fault-injecting filesystem (`internal/storage/faultfs`, T3.6-T3.11) | P3, part of P4 |
 | P3 | Client API: ReadIndex, dedup, node driver, wire protocol, gRPC | Done: `readonly.go`, `session.go`, `internal/node`, `internal/transport` | part of P4 |
-| P4 | Membership via joint consensus | Done: `membership.go`, `confchange.go` (RUNBOOK treats it as a non-goal) | none |
-| P5 | Chaos testing, linearizability checking, observability | Partial against RUNBOOK P5: `chaos/` and `internal/metrics` exist; see section 6 | P5 |
-| P6 | Deploy, writeup, benchmarks | Done as Docker, compose, k8s and `docs/benchmarks.md`; AWS, gateway and web demo absent | P6, D0-D9 |
+| P4 | Membership via joint consensus | Done: `membership.go`, `confchange.go`; hardened by T3.16, T3.17, T3.18, T3.19 (RUNBOOK lists dynamic membership as a non-goal) | none |
+| P5 | Chaos testing, linearizability checking, observability | Done against RUNBOOK P5 except the items in section 6: `chaos/`, `cmd/chaosrun` (T5.6), mutation suite (T5.7), `internal/metrics`, admin API (T4.7) | P5 |
+| P6 | Deploy, writeup, benchmarks | Done as Docker, compose, k8s and `docs/benchmarks.md`; AWS (`infra/`), gateway (`cmd/gateway`) and web demo (`web/`) do not exist | P6, D0-D9 |
 
-## 2. Build and run (from README and `ci.yml`)
-- `go.mod` says Go 1.25.0 (local toolchain 1.25.6). Direct deps: grpc, protobuf, prometheus client, yaml.v3.
-- `go build ./...`, `go vet ./...`, `go test ./...`, `go test -race ./...`, `GOMAXPROCS=1 go test -count=1 ./...`. CI also checks `gofmt -l` (excluding `.pb.go`).
-- Fuzz, 60s each in CI: `FuzzDecodeCommand`, `FuzzRestore` (statemachine); `FuzzReadRecord`, `FuzzDecodeEntry`, `FuzzDecodeHardState`, `FuzzDecodeSnapshotMeta` (storage); `FuzzDecodeConfChange` (raft); `FuzzMessageFromWire` (transport).
-- Node: `go build -o bin/raftkv-server ./cmd/raftkv-server`. Flags: `--id --peers --listen --data-dir --tick --election-ticks --heartbeat-ticks --fsync --snapshot-threshold --log-level --metrics-listen` (`cmd/raftkv-server/main.go:53-72`). One gRPC `--listen` address plus a separate metrics HTTP address.
-- Load generator: `cmd/raftkv-bench`. Containers: `docker compose up --build`. Kubernetes: `deploy/kubernetes/raftkv.yaml`. Protobuf: `buf generate` (generated code is committed).
-- **There is no Makefile, `scripts/`, `.golangci.yml` or `.githooks/`.** Every `make ...` command in `CLAUDE.md`, RUNBOOK §6.1 and `.claude/runner-settings.json` fails today.
+Task cards in `docs/tasks/` with no implementation on `main` (no commit mentions them in `git log`): T3.12, T3.13, T3.14, T3.15 (storage
+hardening, deferred past the demo), D5 and D5b (gateway), and T0.2 (README count tooling, in progress).
+Merged cards: T0.1, T3.6 to T3.11, T3.16 to T3.20, T4.7, T5.6, T5.7 (`git log`, section headings below).
 
-## 2a. Verified baseline (run 2026-10-23, Go 1.25.6 darwin/arm64)
-Last commit touching `*.go`, `go.mod` or `go.sum`: `a2a948b` (2026-09-24). Only documentation and agent-config files
-(`README.md`, `CLAUDE.md`, `AGENTS.md`, `docs/`, `.claude/`) changed after it, so these results hold for current `main`.
-Run at `e7e07eb`, whose Go code is identical to `a2a948b`. Commands, run from the repo root:
+## 2. Build and run (from README, `Makefile`, `.github/workflows/ci.yml`)
+- `go.mod` says Go 1.25.0. Direct deps: grpc, protobuf, prometheus client, yaml.v3.
+- Gates (`Makefile`, targets `fmt vet lint test test-flaky cover proto chaos-smoke`):
+  - `make fmt` (gofmt, excluding `*.pb.go`), `make vet`, `make lint` (needs `golangci-lint`; config `.golangci.yml`).
+  - `make test` is `go test -race -count=1 -timeout 10m ./...`; `make test-flaky` is `-count=20` over `internal/raft`, `internal/storage`, `internal/statemachine`.
+  - `make chaos-smoke` is `go run ./cmd/chaosrun -sim -seeds 1-20` (every scenario, virtual time, no `-duration`).
+  - `make proto` needs `buf` (generated code is committed).
+- `scripts/guard-tests.sh origin/main` flags added `t.Skip`, net removed assertions and large real-time test durations in the diff; `scripts/review-packet.sh <task>` builds the reviewer packet.
+- `.githooks/pre-commit` (enable with `git config core.hooksPath .githooks`): gofmt, `go vet`, `go test -race -short ./...`, `gitleaks protect --staged` when installed, then `scripts/guard-tests.sh origin/main`.
+- CI (`ci.yml`, on push to main, on pull requests, and nightly at 04:17 UTC): job `build and test` (gofmt, vet, build, `go test`, `GOMAXPROCS=1`, `-race`),
+  job `mutation suite` (`go vet -tags faultinject`, the suite, and a diff check that `docs/CHAOS_RESULTS.md` is current), job `fuzz the decoders` (60s each for
+  `FuzzDecodeCommand`, `FuzzRestore`, `FuzzReadRecord`, `FuzzDecodeEntry`, `FuzzDecodeHardState`, `FuzzDecodeSnapshotMeta`, `FuzzDecodeConfChange`, `FuzzMessageFromWire`).
+  `FuzzDecodeDiscardSuffix` and `FuzzWALReplayTail` exist but are not in that list. `ci.yml` has no lint, gitleaks, buf or guard-tests job; those run only locally.
+- Node: `go build -o bin/raftkv-server ./cmd/raftkv-server`. Flags (`cmd/raftkv-server/main.go`, `defineFlags`): `--id --peers --listen --data-dir --tick --election-ticks --heartbeat-ticks --fsync --snapshot-threshold --log-level --metrics-listen`,
+  and the optional `--admin-listen --admin-token-file --admin-chaos` (T4.7) and `--cluster-token-file` (T3.18), all off by default. One shared gRPC `--listen` address
+  (peer, KV and cluster services), a separate metrics HTTP address, and an optional separate admin gRPC address.
+- Other binaries: `cmd/raftkv-bench` (load generator; follows NOT_LEADER redirects), `cmd/chaosrun` (`-sim -seeds A-B -seed N -scenario TEXT -list -json -disk DIR`; exit 0 all passed, 1 a failure, 2 usage).
+  Containers: `docker compose up --build`. Kubernetes: `deploy/kubernetes/raftkv.yaml`. Protobuf: `buf generate`.
+- Build-tagged mutation switches: `go test -tags faultinject ./chaos -run TestMutationSuite` (section 16). The default binary contains only constant-false guards (`TestDefaultBinaryHasNoMutationMachinery`).
+- Not present, still: `cmd/gateway`, `cmd/raftkvctl`, `infra/`, `web/`, `docs/NOTES.md`, a porcupine cross-check, a JSONL history with `info` ops, a checker shrinker and an HTML report (each checked with `ls` or `grep` at `73915fa`).
+  `CODEOWNERS` and a PR template now exist under `.github/`.
+
+## 2a. Verified baseline (run 2026-11-15 at `73915fa`, Go 1.27.3 darwin/arm64)
+`go.mod` still says `go 1.25.0`; the toolchain on the machine that ran this is newer than the one the audit used. Commands, run from a clean worktree of `origin/main`:
 
 | Command | Result |
 |---|---|
-| `go version` | go1.25.6 darwin/arm64 |
-| `go build ./...` | exit 0, no output |
-| `go vet ./...` | exit 0, no output |
-| `gofmt -l .` (excluding `*.pb.go`) | no files listed |
-| `go test -race -count=1 ./...` | exit 0, 10 packages ok, none failed |
-| `GOMAXPROCS=1 go test -count=1 ./...` | exit 0, 10 packages ok, none failed |
+| `go build ./...` | exit 0 |
+| `go vet ./...` | exit 0 |
+| `gofmt -l` over all `*.go` except `*.pb.go` | no files listed |
+| `golangci-lint run` | `0 issues.` |
+| `go test -race -count=1 -timeout 15m ./...` | exit 0; 14 packages `ok`, `internal/transport/raftkv/v1` has no test files |
+| `go test -tags faultinject -count=1 ./chaos -run 'TestMutationSuite\|TestControlRunIsClean\|TestMutationTableCoversTheNineSwitches'` | `ok` (4.6s); `docs/CHAOS_RESULTS.md` unchanged |
 
-Per-package duration, `-race` / `GOMAXPROCS=1`: chaos 11.5s / 1.9s; cmd/raftkv-bench 1.3s / 0.3s; cmd/raftkv-server 16.0s / 14.3s;
-internal/determinism 1.5s / 0.2s; internal/metrics 2.2s / 0.7s; internal/node 7.7s / 4.9s; internal/raft 2.1s / 0.2s;
-internal/statemachine 5.7s / 0.7s; internal/storage 6.8s / 2.6s; internal/transport 18.9s / 8.9s.
-`internal/transport/raftkv/v1` has no test files (generated code).
+Race-run package times: chaos 36.1s, cmd/chaosrun 29.0s, cmd/raftkv-server 16.7s, internal/storage 18.3s, internal/transport 12.8s, internal/node 12.0s, internal/raft 11.5s,
+internal/statemachine 7.0s, internal/determinism 6.9s, internal/metrics 3.1s, internal/faultinject 1.7s, cmd/raftkv-bench 1.6s, faultfs and fstest about 2s each.
+Not run for this refresh: `GOMAXPROCS=1`, `-count=20`, fuzz, `make chaos-smoke`, skips under `-race` (skips were not counted). The earlier baseline (2026-10-23, Go 1.25.6) is superseded.
 
-- Warning, `-race` run only: macOS linker `ld: warning: ... malformed LC_DYSYMTAB, expected 98 undefined symbols ... found 95` for
-  `internal/metrics.test` and `cmd/raftkv-server.test`. Tests still passed; classified as environment, not investigated.
-- Skips: none in the verbose non-race run (548 `--- PASS` lines, tests plus subtests, 0 FAIL, 0 SKIP). Skips were not checked in the `-race` run.
-- Not run: `-count=20`, fuzz, lint, chaos-smoke, guard-tests (the make targets and scripts do not exist yet; see below).
+## 2b. Targeted runs behind the verdicts below
+The tests cited in sections 4, 5 and 7 to 16 and in `docs/INVARIANTS.md` were run by name with `go test -count=1 -run '<names>' <package>` at `73915fa`
+(the commands and results are listed in the PR body). A cited test that is named but not part of that run says so.
 
-## 3. Test counts (static grep of 60 `_test.go` files)
-538 `func Test*`, 8 `func Fuzz*`, 2 `func Example*`, 0 benchmarks. This matches README:11, which `internal/determinism/readme_test.go` enforces.
-
-| Package | Test | Fuzz | Example |
-|---|---|---|---|
-| internal/raft | 169 | 1 | 2 |
-| internal/storage | 85 | 4 | 0 |
-| chaos | 80 | 0 | 0 |
-| internal/transport | 69 | 1 | 0 |
-| internal/statemachine | 51 | 2 | 0 |
-| internal/node | 29 | 0 | 0 |
-| cmd/raftkv-server | 18 | 0 | 0 |
-| internal/metrics | 14 | 0 | 0 |
-| internal/determinism | 13 | 0 | 0 |
-| cmd/raftkv-bench | 10 | 0 | 0 |
-
-About 8,816 non-test lines (excluding `.pb.go`) and 16,955 test lines. Pass/fail: all passing, see section 2a.
-Chaos: 23 named scenarios (`chaos/scenarios_test.go:87-1135`), run in memory and again on disk (`TestChaosOnDisk`, :1202).
+## 3. Tests
+Counts: see README.md (generated figure owned by `TestReadmeTestCountIsCurrent`; the exact numbers are not repeated here so they cannot go stale).
+Layout: `internal/raft`, `internal/storage` (with `faultfs` and `fstest`), `internal/statemachine`, `internal/node`, `internal/transport`, `internal/metrics`,
+`internal/determinism` (repo-wide source checks), `internal/faultinject`, `chaos`, `cmd/raftkv-server`, `cmd/raftkv-bench`, `cmd/chaosrun`.
+Chaos: 24 scenarios (`go run ./cmd/chaosrun -sim -list` printed 24 lines; one is the seed-generated "generated nemesis and workload"), run in memory and on disk
+(`TestChaosOnDisk`); a further set of scenarios used only by the mutation suite lives in `chaos/mutation_scenarios.go`. `docs/chaos-report.md` records 24 of 24 held.
 
 ## 4. RUNBOOK §7.2 checklist
 OK = code does it. GAP = differs from the RUNBOOK. UNKNOWN = cannot tell by reading. Test names were matched by name only.
