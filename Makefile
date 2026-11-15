@@ -1,5 +1,5 @@
 # Gates from RUNBOOK 6.1, mapped to the real packages (see docs/STATUS.md).
-.PHONY: fmt vet lint test test-flaky cover proto chaos-smoke
+.PHONY: fmt vet lint test test-flaky cover proto chaos-smoke readme-counts readme-check sync-main
 
 # Generated protobuf code is excluded, as in .github/workflows/ci.yml.
 GOFILES = $(shell find . -name "*.go" -not -name "*.pb.go" -not -path "./.git/*")
@@ -32,3 +32,15 @@ proto:
 # `go test ./chaos -run TestChaosReport` still does.
 chaos-smoke:
 	go run ./cmd/chaosrun -sim -seeds 1-20
+
+# The README states the exact test count, and internal/determinism fails if it is stale.
+# `readme-counts` rewrites the numbers; `readme-check` only reports (used by CI and pre-commit).
+readme-counts:
+	go run ./cmd/readmecounts
+
+readme-check:
+	go run ./cmd/readmecounts -check
+
+# Merge origin/main and refresh the README counts in one step; never pushes.
+sync-main:
+	scripts/sync-main.sh
