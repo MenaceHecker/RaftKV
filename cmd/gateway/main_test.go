@@ -17,6 +17,8 @@ func writeSecret(t *testing.T, dir, name, content string) string {
 	return p
 }
 
+const testNodes = "1=az-a=127.0.0.1:7001=127.0.0.1:9001,2=az-b=127.0.0.1:7002=127.0.0.1:9002,3=az-c=127.0.0.1:7003=127.0.0.1:9003"
+
 func TestLoadSettingsFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	admin := writeSecret(t, dir, "admin", "admin-token-aaaa\n")
@@ -27,7 +29,7 @@ func TestLoadSettingsFailsClosed(t *testing.T) {
 	valid := func(mod map[string]string) []string {
 		args := map[string]string{
 			"--listen":           "127.0.0.1:0",
-			"--fake-cluster":     "true",
+			"--nodes":            testNodes,
 			"--admin-token-file": admin,
 			"--node-token-file":  node,
 			"--state-dir":        state,
@@ -51,17 +53,19 @@ func TestLoadSettingsFailsClosed(t *testing.T) {
 		t.Fatalf("a complete command line was refused: %v", err)
 	}
 	cases := map[string]map[string]string{
-		"no admin token flag":     {"--admin-token-file": ""},
-		"missing admin file":      {"--admin-token-file": filepath.Join(dir, "absent")},
-		"empty admin file":        {"--admin-token-file": empty},
-		"no node token flag":      {"--node-token-file": ""},
-		"missing node file":       {"--node-token-file": filepath.Join(dir, "absent")},
-		"empty node file":         {"--node-token-file": empty},
-		"same token twice":        {"--node-token-file": admin},
-		"no state dir":            {"--state-dir": ""},
-		"no dashboard origin":     {"--dashboard-origin": ""},
-		"wildcard origin":         {"--dashboard-origin": "*"},
-		"no cluster and no nodes": {"--fake-cluster": ""},
+		"no admin token flag": {"--admin-token-file": ""},
+		"missing admin file":  {"--admin-token-file": filepath.Join(dir, "absent")},
+		"empty admin file":    {"--admin-token-file": empty},
+		"no node token flag":  {"--node-token-file": ""},
+		"missing node file":   {"--node-token-file": filepath.Join(dir, "absent")},
+		"empty node file":     {"--node-token-file": empty},
+		"same token twice":    {"--node-token-file": admin},
+		"no state dir":        {"--state-dir": ""},
+		"no dashboard origin": {"--dashboard-origin": ""},
+		"wildcard origin":     {"--dashboard-origin": "*"},
+		"no nodes":            {"--nodes": ""},
+		"malformed nodes":     {"--nodes": "1=az=nope"},
+		"duplicate node ids":  {"--nodes": "1=a=127.0.0.1:7001=127.0.0.1:9001,1=b=127.0.0.1:7002=127.0.0.1:9002"},
 	}
 	for name, mod := range cases {
 		_, err := loadSettings(valid(mod))

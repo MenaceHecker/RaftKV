@@ -89,11 +89,11 @@ func TestAutoHealAt45s(t *testing.T) {
 		t.Fatalf("healed after 44 s: %v", spy.faults())
 	}
 	e.clk.Advance(time.Second)
-	eventually(t, "heal on all nodes", func() bool { return spy.count("clear") == 3 })
+	eventuallyYield(t, "heal on all nodes", func() bool { return spy.count("clear") == 3 })
 
 	// Node 1 is still down, so the slot stays held and the cluster says so.
 	e.pollAll()
-	eventually(t, "state recovering", func() bool { return e.chaosState() == "recovering" })
+	eventuallyYield(t, "state recovering", func() bool { return e.chaosState() == "recovering" })
 	wantStatus(t, e.bpost("/v1/chaos/delay", `{"delayMs":10}`), http.StatusConflict)
 	e.clk.Advance(time.Hour) // the bucket is not what holds it back
 	wantStatus(t, e.bpost("/v1/chaos/delay", `{"delayMs":10}`), http.StatusConflict)
@@ -110,9 +110,9 @@ func TestAutoHealClearsPausedNode(t *testing.T) {
 	e, spy := newSpyEnv(t, nil)
 	wantStatus(t, e.post("/v1/chaos/pause/2", `{"seconds":30}`), http.StatusOK)
 	e.clk.Advance(45 * time.Second)
-	eventually(t, "heal", func() bool { return spy.count("clear") == 3 })
+	eventuallyYield(t, "heal", func() bool { return spy.count("clear") == 3 })
 	e.pollAll()
-	eventually(t, "idle", func() bool { return e.chaosState() == "idle" })
+	eventuallyYield(t, "idle", func() bool { return e.chaosState() == "idle" })
 }
 
 func TestNeverTwoNodesDown(t *testing.T) {
@@ -138,7 +138,7 @@ func TestNeverTwoNodesDown(t *testing.T) {
 	t.Run("crashed node not yet back after the auto-heal", func(t *testing.T) {
 		e, spy := crashFirst(t)
 		e.clk.Advance(45 * time.Second)
-		eventually(t, "heal", func() bool { return spy.count("clear") == 3 })
+		eventuallyYield(t, "heal", func() bool { return spy.count("clear") == 3 })
 		wantStatus(t, e.bpost("/v1/chaos/delay", `{"delayMs":10}`), http.StatusConflict)
 		wantStatus(t, e.bpost("/v1/chaos/pause/3", ""), http.StatusConflict)
 	})
@@ -384,7 +384,7 @@ func TestStartupHealsAndBlocksChaosUntilNodesUp(t *testing.T) {
 		_ = fc.Crash(context.Background(), 3)
 	})
 	e.start()
-	eventually(t, "heal-all at start", func() bool { return spy.count("clear") == 3 })
+	eventuallyYield(t, "heal-all at start", func() bool { return spy.count("clear") == 3 })
 
 	// The bucket counts as just used, so a restart cannot be used to dodge it.
 	rec := e.post("/v1/chaos/kill-leader", "")

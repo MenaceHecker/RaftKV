@@ -155,7 +155,7 @@ func (e *env) chaosState() string {
 
 // eventually runs cond until it holds. It yields instead of sleeping and fails
 // instead of hanging.
-func eventually(t *testing.T, what string, cond func() bool) {
+func eventuallyYield(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for !cond() {

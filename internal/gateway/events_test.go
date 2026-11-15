@@ -42,7 +42,7 @@ func isState(term float64, node float64) func(sseEvent) bool {
 func TestOneUpstreamStreamPerNodeRegardlessOfBrowsers(t *testing.T) {
 	e := newEnv(t)
 	e.start()
-	eventually(t, "three upstream streams", func() bool { return e.fc.EventStreams() == 3 })
+	eventuallyYield(t, "three upstream streams", func() bool { return e.fc.EventStreams() == 3 })
 
 	accepted := 0
 	for i := 0; i < 200; i++ {
@@ -65,7 +65,7 @@ func TestOneUpstreamStreamPerNodeRegardlessOfBrowsers(t *testing.T) {
 func TestSlowBrowserDroppedOthersUnaffected(t *testing.T) {
 	e := newEnv(t)
 	e.start()
-	eventually(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
+	eventuallyYield(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
 	slow := e.connect(ip(1))
 	good := e.connect(ip(2))
 	if e.g.EventClients() != 2 {
@@ -79,7 +79,7 @@ func TestSlowBrowserDroppedOthersUnaffected(t *testing.T) {
 		term++
 		good.wait(t, "event of term "+strconv.Itoa(int(term)), isState(term, 3))
 	}
-	eventually(t, "the slow browser to be dropped", func() bool { return e.g.EventClients() == 1 })
+	eventuallyYield(t, "the slow browser to be dropped", func() bool { return e.g.EventClients() == 1 })
 	slow.unblockWrites()
 	select {
 	case <-slow.done:
@@ -109,7 +109,7 @@ func TestMaxBrowsersAndPerIP(t *testing.T) {
 	}
 	first.cancel()
 	<-first.done
-	eventually(t, "the slot to free", func() bool { return e.g.EventClients() == 2 })
+	eventuallyYield(t, "the slot to free", func() bool { return e.g.EventClients() == 2 })
 	if c := e.connect(same); c.status() != http.StatusOK {
 		t.Fatalf("a connection after one closed got %d, want 200", c.status())
 	}
@@ -137,7 +137,7 @@ func TestSSEHeadersAndKeepalive(t *testing.T) {
 	if ct != "text/event-stream" || cc != "no-cache" {
 		t.Fatalf("Content-Type %q, Cache-Control %q", ct, cc)
 	}
-	eventually(t, "the keepalive timer", func() bool { e.clk.Advance(15 * time.Second); c.mu.Lock(); defer c.mu.Unlock(); return c.comments >= 2 })
+	eventuallyYield(t, "the keepalive timer", func() bool { e.clk.Advance(15 * time.Second); c.mu.Lock(); defer c.mu.Unlock(); return c.comments >= 2 })
 	if rec := e.do(http.MethodPost, "/v1/events", ""); rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /v1/events = %d, want 405", rec.Code)
 	}
@@ -146,12 +146,12 @@ func TestSSEHeadersAndKeepalive(t *testing.T) {
 func TestLastEventIDReplayAndResync(t *testing.T) {
 	e := newEnv(t)
 	e.start()
-	eventually(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
+	eventuallyYield(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
 	a := e.connect(ip(1))
 	e.fc.SetLeader(2)
 	a.wait(t, "term 2", isState(2, 3))
 	e.fc.SetLeader(3)
-	eventually(t, "all six state events", func() bool { return countState(a) >= 6 })
+	eventuallyYield(t, "all six state events", func() bool { return countState(a) >= 6 })
 
 	all := a.all()
 	if len(all) < 6 {
@@ -166,7 +166,7 @@ func TestLastEventIDReplayAndResync(t *testing.T) {
 	// A browser that last saw the second event gets exactly the rest, with the
 	// same ids and data.
 	b := e.connect(ip(2), "Last-Event-ID", all[1].ID)
-	eventually(t, "the replay", func() bool { return countState(b) >= 4 })
+	eventuallyYield(t, "the replay", func() bool { return countState(b) >= 4 })
 	// The start-up heal publishes a chaos event at an unpredictable moment, so
 	// compare what both browsers have in common.
 	got, now := b.all(), a.all()
@@ -210,7 +210,7 @@ func TestUpstreamResourceExhaustedReconnects(t *testing.T) {
 	e := newEnv(t)
 	e.fc.FailEvents(2, status.Error(codes.ResourceExhausted, "too many subscribers"), 2)
 	e.start()
-	eventually(t, "streams of nodes 1 and 3", func() bool { return e.fc.EventStreams() == 2 })
+	eventuallyYield(t, "streams of nodes 1 and 3", func() bool { return e.fc.EventStreams() == 2 })
 	advanceUntil(t, e, time.Second, "node 2's stream", func() bool { return e.fc.EventStreams() == 3 })
 	c := e.connect(ip(1))
 	e.fc.SetLeader(2)
@@ -221,7 +221,7 @@ func TestUpstreamUnauthenticatedKeepsRetryingAndLogsOnce(t *testing.T) {
 	e := newEnv(t)
 	e.fc.FailEvents(1, status.Error(codes.Unauthenticated, "bad token"), 3)
 	e.start()
-	eventually(t, "the other streams", func() bool { return e.fc.EventStreams() == 2 })
+	eventuallyYield(t, "the other streams", func() bool { return e.fc.EventStreams() == 2 })
 	advanceUntil(t, e, time.Second, "node 1's stream", func() bool { return e.fc.EventStreams() == 3 })
 	if n := countLogs(e.log.String(), "events stream unauthenticated"); n != 1 {
 		t.Fatalf("the unauthenticated stream was logged %d times, want once:\n%s", n, e.log.String())
@@ -231,7 +231,7 @@ func TestUpstreamUnauthenticatedKeepsRetryingAndLogsOnce(t *testing.T) {
 func TestNodeSeqGapEmitsResync(t *testing.T) {
 	e := newEnv(t)
 	e.start()
-	eventually(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
+	eventuallyYield(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
 	c := e.connect(ip(1))
 	e.fc.SetLeader(2) // seq 1 on every node: no gap
 	c.wait(t, "term 2", isState(2, 3))
@@ -246,10 +246,10 @@ func TestNodeSeqGapEmitsResync(t *testing.T) {
 func TestCrashedNodeYieldsNodeDownThenUp(t *testing.T) {
 	e := newEnv(t)
 	e.start()
-	eventually(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
+	eventuallyYield(t, "streams", func() bool { return e.fc.EventStreams() == 3 })
 	// The start-up heal polls the nodes once; let that poll finish, so a late
 	// answer from before the crash cannot be mistaken for the node returning.
-	eventually(t, "the start-up poll", func() bool { return e.chaosState() == "idle" })
+	eventuallyYield(t, "the start-up poll", func() bool { return e.chaosState() == "idle" })
 	c := e.connect(ip(1))
 	_ = e.fc.Crash(background(), 1)
 	isNode := func(kind string) func(sseEvent) bool {

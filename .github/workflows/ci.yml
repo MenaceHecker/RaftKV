@@ -49,6 +49,14 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: go vet with the fakecluster tag
+        # cmd/gateway registers --fake-cluster only under this tag (the
+        # production binary can never serve fake data), so the tagged variant
+        # gets its own compile check and test run.
+        run: |
+          go vet -tags fakecluster ./cmd/gateway/...
+          go test -tags fakecluster -count=1 ./cmd/gateway/...
+
       - name: build
         run: go build ./...
 
