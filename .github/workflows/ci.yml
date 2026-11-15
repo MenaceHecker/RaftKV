@@ -52,6 +52,12 @@ jobs:
       - name: build
         run: go build ./...
 
+      - name: README counts are current
+        # internal/determinism fails if the README's test count is stale, but only after
+        # the whole suite. This is the same check in seconds, and it names the fix:
+        # run `make readme-counts` and commit README.md.
+        run: go run ./cmd/readmecounts -check
+
       - name: test
         run: go test ./...
 
