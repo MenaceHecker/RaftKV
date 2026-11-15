@@ -77,7 +77,13 @@ func TestSlowBrowserDroppedOthersUnaffected(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		e.fc.SetLeader(uint64(i%3 + 1))
 		term++
-		good.wait(t, "event of term "+strconv.Itoa(int(term)), isState(term, 3))
+		// Wait for all three nodes' events of this change. The node streams are
+		// separate goroutines: at one P a stream that is not waited for can fall
+		// behind and then publish its whole backlog at once, which would
+		// legitimately overflow even a healthy browser's 64 event buffer.
+		for node := 1.0; node <= 3; node++ {
+			good.wait(t, "event of term "+strconv.Itoa(int(term))+" from node "+strconv.Itoa(int(node)), isState(term, node))
+		}
 	}
 	eventuallyYield(t, "the slow browser to be dropped", func() bool { return e.g.EventClients() == 1 })
 	slow.unblockWrites()
@@ -185,7 +191,9 @@ func TestLastEventIDReplayAndResync(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		e.fc.SetLeader(uint64(i%3 + 1))
 		term++
-		a.wait(t, "term "+strconv.Itoa(int(term)), isState(term, 3))
+		for node := 1.0; node <= 3; node++ { // every stream, so none builds a backlog
+			a.wait(t, "term "+strconv.Itoa(int(term))+" node "+strconv.Itoa(int(node)), isState(term, node))
+		}
 	}
 	// Every state event (3 nodes x 2 changes, then 3 x 100) must have been
 	// published before C joins: until then id 1 may still be inside the ring of
