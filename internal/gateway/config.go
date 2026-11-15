@@ -52,6 +52,13 @@ type Config struct {
 	RatePerSecond  float64
 	Burst          int
 	MaxLimiterIPs  int
+
+	// Verification run (D5b). Zero values take the defaults in verify.go.
+	VerifyWall        time.Duration // hard wall limit of one run
+	VerifyMaxOps      int           // cap on operations in one run
+	VerifyCooldown    time.Duration // public cooldown after a run ends
+	VerifyOpTimeout   time.Duration // deadline of one operation
+	VerifyCheckBudget int           // state budget for chaos.CheckWithBudget
 }
 
 // LoadTokenFile reads a secret from a file. It fails closed: a missing file,

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"io"
@@ -113,3 +114,14 @@ func (g *Gateway) LimiterSize() int { return g.lim.size() }
 
 // Keys lists the registered public keys.
 func (g *Gateway) Keys() []string { return g.reg.list() }
+
+// Start begins the background work that needs a running process: the safe
+// start heal and the upstream event streams. Stub: filled in by the D5b
+// commits that follow.
+func (g *Gateway) Start(_ context.Context) {}
+
+// VerifyRunning reports whether a verification run is in progress. Stub.
+func (g *Gateway) VerifyRunning() bool { return false }
+
+// EventClients is the number of browsers connected to /v1/events. Stub.
+func (g *Gateway) EventClients() int { return 0 }
