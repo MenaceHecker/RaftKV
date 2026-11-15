@@ -115,6 +115,10 @@ here was matched with `grep -rn "func TestName"`; section 2b says which were run
 - Absent from the repo: see section 2 (`cmd/gateway`, `cmd/raftkvctl`, `infra/`, `web/`, `docs/NOTES.md`, porcupine cross-check, JSONL history with `info` ops, checker shrinker, HTML report, and CI jobs for lint, gitleaks, buf and guard-tests). Present now and no longer absent: Makefile, `.golangci.yml`, `scripts/`, `.githooks/`, CODEOWNERS, PR template, `docs/INVARIANTS.md`, `docs/tasks/`, a nightly schedule inside `ci.yml`, `cmd/chaosrun`, the admin service, the mutation (`faultinject`) suite.
 - Checker note: `chaos/checker.go` has pending and unknown op statuses (`StatusPending`, `StatusUnknown`), so indeterminate ops are modelled; correctness not reviewed.
 
+Findings sections: sections 7 to 10 keep their numbers and order because `docs/RUNBOOK.md` (non-goals) and the T3.19 card cite "section 9" for T3.16.
+Sections 7 to 10 are the findings as written when each card merged (T3.11, T3.17, T3.16, T3.19), updated only where a later card changed the picture;
+sections 11 to 15 are in card order (T3.9, T3.10, T3.18, T3.20, T4.7), 16 covers the chaos tooling and 17 the known limitations.
+
 ## 7. T3.11 findings (branch `feat/t3-11-stale-tail`)
 - **Fixed here: stale tail after `ApplySnapshot`.** A snapshot whose last included entry disagrees in term with the local entry at that
   index left the old entries above it in the WAL, and `OpenDiskStorage` brought them back after a restart (paper section 7,
@@ -123,10 +127,9 @@ here was matched with `grep -rn "func TestName"`; section 2b says which were run
   in the tail changed membership and quorum after a restart (`internal/node/applysnapshot_restart_test.go`, 3e). The fix is a new WAL
   record, `recordDiscardSuffix` (type 4), written together with `SnapshotMeta` in one fsynced write, only on a term mismatch.
   Compatibility: a binary without type 4 refuses such a WAL with `ErrCorruptWAL`; there is no downgrade path.
-- **Not fixed, candidate card T3.16: leaving the joint config before the joint entry commits.** `ProposeConfChange`
-  (`internal/raft/confchange.go:10-13`) accepts `ConfChangeLeaveJoint` whenever the configuration is in joint state, and
-  `handleConfChange` (`internal/node/node.go:645`) passes the proposal through, so a client can propose the leave while the joint entry
-  is still uncommitted. Not changed here.
+- **Fixed later by T3.16: leaving the joint config before the joint entry commits.** `ProposeConfChange` used to accept
+  `ConfChangeLeaveJoint` whenever the configuration was joint, so a client could propose the leave while the joint entry was still
+  uncommitted. It now refuses any change while one is uncommitted (section 9).
 - **Waiting on T3.12: the `SyncNever` variants.** The crash model's `SyncNever` runs treat a mismatching install as unacknowledged
   until a `WAL.Sync`, so they check only the weaker oracle (states a, b/c, d of `record.go`). The strict variant needs T3.12.
 - **What the tests do not cover:**
@@ -137,7 +140,7 @@ here was matched with `grep -rn "func TestName"`; section 2b says which were run
   - A matching snapshot keeps its suffix on disk while memory drops it; the difference is checked benign only at the
     storage and raft-core level (`TestMatchingSnapshotMemoryDiskDifferenceIsBenign`).
   - The "stale leader" question is not settled in general: with fixed membership the counting argument in the card holds; with changing
-    membership it relies on the fix removing the stale `ConfChange`, plus the T3.16 gap above.
+    membership it relies on the fix removing the stale `ConfChange`, plus the T3.16 fix (section 9).
 
 ## 8. T3.17 findings (branch `feat/t3-17-snapshot-conf`)
 - **Fixed here: stale configuration base.** `Node.baseConf` was set only in `NewNode` and `restore`, so a snapshot the node made itself
@@ -168,7 +171,7 @@ here was matched with `grep -rn "func TestName"`; section 2b says which were run
 - **Behaviour change visible to clients:** `AddNode` returns when the joint entry commits; an `AddNode`/`RemoveNode` immediately after is
   refused with `FailedPrecondition` until the automatic leave commits. `ListMembers` reports `joint=false` as soon as the leave is
   *appended*, which is before it commits. Two transport tests now retry on that refusal (human decision).
-- **Not done from the card:** test 5b/5c (pending state across snapshot install, joint snapshot with no entry), the 4(a-c,e) variants of
+- **Not done from the card (as recorded at the T3.16 merge; not re-checked in this refresh):** test 5b/5c (pending state across snapshot install, joint snapshot with no entry), the 4(a-c,e) variants of
   test 4, and the additive chaos scenario. The core covers 5b/5c by construction (`lastConfIndex` is assigned unconditionally) but no test
   pins it. T3.17 test 3 (card commit 10) is also not moved.
 
@@ -178,6 +181,100 @@ here was matched with `grep -rn "func TestName"`; section 2b says which were run
   messages) unless `promotable()`, which is `conf.hasVoter(id)` (voters, plus incoming while joint; the same set as `members()`). During a
   leave, the outgoing node is still in `voters` and stays promotable until the joint config is left. `becomeLeader` returns an error for a
   non-member instead of panicking. Before the fix, `chaos` scenario "the leader removes itself" panicked in `becomeLeader` at seed 7.
-- Unchanged and not done: a removed node still *responds* to vote requests and appends until it learns of its removal; rejecting
+- Unchanged and not done (as recorded at the T3.19 merge; the code in `Node.Step` still answers vote requests from any sender): a removed node still *responds* to vote requests and appends until it learns of its removal; rejecting
   non-member vote requests (dissertation §4.2.3 disruption defence) and telling a removed node it was removed are out of scope.
   `TestAtMostOnePendingConfEntry` still does not tick removed nodes; that is no longer required for safety but was not changed.
+
+## 11. T3.9 findings (PR #29, `fix(wal): poison the WAL on the first write error; node stops`)
+- **Fixed here: retry after a failed write or fsync.** `WAL.failed` (`internal/storage/wal.go`) is set by the first failed write, sync, segment roll, `TruncateBefore`
+  cleanup or `Sync`; every later `AppendEntries`, `SaveHardState`, `SaveSnapshotMeta`, `TruncateBefore` and `Sync` returns `ErrWALFailed` wrapping the cause. `Close` releases the
+  descriptor without an fsync and returns the cause, and `Sync` on a failed WAL returns the error without syncing (a success would prove nothing after a failed fsync). Reason: a retry after a failed
+  fsync can succeed for data the kernel dropped, and a short write followed by a retry buries garbage mid-log (RUNBOOK 7.2 item 1, 7.3 #3 and #4).
+  Tests (`internal/storage/poison_test.go`): `TestWriteFailurePoisonsTheWAL`, `TestSyncFailurePoisonsTheWAL`, `TestCloseAfterFailureReturnsTheCauseWithoutSyncing`,
+  `TestShortWriteThenRetryDoesNotBrickTheDirectory`, `TestSyncFailureOnRollPoisons`, `TestSyncFailureInTruncateBeforePoisons`, `TestEveryFailureAfterPoisonKeepsDurableStateIntact`.
+- **Fixed here: the node stops on any `CreateSnapshot` error.** `fatal()` (`internal/node/node.go`) matches `ErrWALFailed` as well as `raft.ErrStorage`, and both `maybeSnapshot` and
+  `compact` call `n.fail` on a `CreateSnapshot` error (the old code swallowed it). `main` exits non-zero when the node is done. Tests (`internal/node/storage_failure_test.go`):
+  `TestNodeStopsWhenTheWALFails`, `TestFailedSnapshotWriteStopsTheNode`, `TestFailedCompactStopsTheNode`, `TestSnapshotCleanupFailuresAreReportedAndStopTheNode`.
+- **Controls:** a failed snapshot *file* write does not poison the WAL (`TestSnapshotFileFailureDoesNotPoisonTheWAL`, `TestSnapshotFileFailureLeavesMemoryUnchanged`); the node still stops on it.
+- **What the tests do not cover / still open:**
+  - `maybeSnapshot` still returns without stopping the node when `kv.Snapshot()` or `ConfStateAt` fails (read in `node.go`); only a `CreateSnapshot` error is fatal.
+  - Whether a failed snapshot purge could be survived instead of stopping is T3.15 (the code comment says so); today it stops the node.
+  - Faults are injected by `faultfs`, not a real disk; the real-kernel behaviour of a failed fsync is the premise, not something a test shows.
+
+## 12. T3.10 findings (PR #28, `Synced the replacement HardState before deleting segments`)
+- **Fixed here: term and vote rollback by compaction under `SyncNever`.** `TruncateBefore` re-records HardState and then deletes older segments, which may hold the only durable
+  copy. It now syncs the active segment before the first `Remove` when `policy != SyncAlways` and the HardState is non-empty (`wal.go`; under `SyncAlways` `write` already synced the record).
+  A sync failure poisons the WAL and deletes nothing. Cost: one fsync per compaction that deletes segments.
+- Tests (`internal/storage/compaction_crash_test.go`): `TestCompactionDoesNotRollBackHardStateUnderSyncNever`, `TestCompactionKeepsNewerUnsyncedHardState`,
+  `TestCompactionCrashPointsUnderSyncNever`, `TestCompactionCrashPointsUnderSyncAlways`, `TestNoSyncWhenNothingIsDeleted`, `TestSyncFailureBeforeDeleteDeletesNothing`.
+- **Not covered:** the fsync in `roll()` (an unsynced segment roll followed by `WAL.Sync`) is T3.12 and is not implemented. The crash model is `faultfs`, not a real kernel.
+
+## 13. T3.18 findings (commit `f7c6246`, `Protected membership changes and bound snapshot streams`)
+- **Added: `--cluster-token-file`.** A bearer-token interceptor on the shared listener for exactly `AddNode` and `RemoveNode` (`newSharedServerWithClusterToken` in `cmd/raftkv-server/main.go`,
+  `transport.NewClusterTokenInterceptors`). Off by default, which keeps today's open behaviour; a set but unusable file stops the server from starting (`validateClusterToken`).
+  `ListMembers` and `KVService` stay open. Tests (`internal/transport/guard_test.go`): `TestAddRemoveNodeWithoutTokenIsUnauthenticated` (the default), `TestAddRemoveNodeWithTokenWorks`,
+  `TestListMembersAndKVStayOpen`, `TestLoadClusterTokenRefusesUnusableFiles`.
+- **Added: snapshot stream budgets.** `DeliverSnapshot` takes a stream slot before reading any frame and reserves bytes per chunk against `snapshotBudget`: `DefaultSnapshotBudgetBytes` = 256 MiB
+  in flight and `DefaultSnapshotStreams` = 4 concurrent streams per node; the 1 GiB per-stream `MaxSnapshotBytes` is unchanged. Over budget is `ResourceExhausted` and the stream is discarded
+  (`internal/transport/peer.go`). Tests (`internal/transport/snapshotbudget_test.go`): `TestSnapshotStreamsRespectTheAggregateByteBudget`, `TestSnapshotStreamCountIsBounded`,
+  `TestBudgetIsReleasedOnErrorCancelAndEarlyClose`, `TestOversizeSingleStreamIsStillRejected`, `TestRejectedSnapshotStreamDoesNotBufferPayload`, `TestInstallSnapshotStillWorksUnderBudget`.
+- **Not done:** nothing else on the shared listener is authenticated: `Deliver`, `DeliverSnapshot` (a snapshot sender is not checked to be a member), `KVService` and `ListMembers` carry no credentials
+  and there is no TLS. The budget stops memory exhaustion; it does not authenticate anyone (`docs/observability.md`).
+
+## 14. T3.20 findings (PR #31, `fix(transport): coalesce queued append requests`)
+- **Cause found for the flaky `TestFollowerCatchesUpFromALargeBacklog`** (per the PR's commit message; the card was an investigation): the leader re-sends its current append every heartbeat tick, the
+  per-peer outbound queue (256 slots, drops the newest when full, one blocking RPC at a time) filled with stale duplicates, and a fresh append waited behind a whole drain. The two control tests
+  (`TestFollowerCatchesUpAfterEveryAppendResponseIsDropped`, `TestStaleDuplicateAppendsDoNotRegressProgress`) pass on the unfixed core: no state exists in the leader that only a response can unblock.
+- **Fixed here:** in `peer.enqueue` (`internal/transport/peer.go`) a newer `MsgAppendRequest` replaces a still-queued append of the same term for that peer and goes to the tail; other message types,
+  snapshots and appends of a different term are never replaced; a full queue still drops the newest. New counters: `PeerStats.Coalesced`, `PeerStats.Queued`, and `Node.RecvDropped`
+  (inbound messages `Node.Step` discards when its 256-slot receive buffer is full). No `internal/raft` change. Tests (`internal/transport/queue_overflow_test.go`):
+  `TestFreshAppendReachesPeerAfterQueueOverflow`, `TestHeartbeatWaitsForAtMostOneQueuedAppend`, `TestCoalescingNeverMergesAcrossTermsOrTypes`.
+- **Not shown:** that the CI flake is gone (no repeated-run evidence was gathered in this refresh). **Still true:** `RaftServer.Deliver` answers OK after `Step` drops a message, so the sender counts it as sent;
+  the drop is now counted on the receiver (`RecvDropped`) but not visible to the sender. Raft tolerates the loss.
+
+## 15. T4.7 findings (PR #19, `Added admin service, fault wrapper and event stream`; docs in `docs/observability.md`)
+- **Added: `AdminService`** (`Status`, `Crash`, `Pause`, `SetPartition`, `SetNetem`, `Events`) on its own listener (`--admin-listen`), behind a bearer token (`--admin-token-file`, mode 0600, constant-time compare
+  of SHA-256 digests in `internal/transport/admin.go`). `--admin-chaos` additionally allows `Crash`, `Pause`, `SetPartition` and `SetNetem`. Everything is off by default. Constants in code:
+  `CrashDelay` 50ms and `CrashExitCode` 137; `MaxPause` 60s; `FaultExpiry` 120s; `MaxDelayQueue` 1024 per peer; `MaxSubscribers` 16 and `SubscriberBuffer` 256 (`internal/node/events.go`).
+- Tests: `TestAdminRPCsRejectMissingAndWrongTokenAndChangeNothing`, `TestTokenOKWorks`, `TestChaosRPCsNeedAdminChaos`, `TestServerRefusesAdminListenWithoutToken`, `TestTokenFileMustNotBeGroupOrWorldReadable`,
+  `TestCrashExitsAfter50msWith137`, `TestAdminOnlyOnAdminEndpoint`, `TestAdminServiceIsRegisteredOnlyOnTheAdminListener` (`cmd/raftkv-server/admin_flags_test.go`), `TestAdminStatusAndEventsWorkWhilePaused`,
+  `TestPauseStopsTicksAndDropsBothDirections`, `TestEveryKVAndClusterMethodIsUnavailableWhilePaused`, `TestPartitionedLeaderLosesLeadership`, `TestEachFaultExpiresIndependentlyAt120s`,
+  `TestDelayQueueIsBoundedAndDroppedOnExpiryOrClear`, `TestPauseAutoResumesAtCap` (`internal/node/pause_test.go`), `TestEventsAreMonotonicAndGapFree`, `TestSubscriberCountIsBounded`, `TestSlowSubscriberIsDroppedNotBlocking`.
+- **What it is not:** the faults are application-level (they drop or delay Raft messages and stop ticks inside the process; no kernel network stack, no SIGSTOP, and a paused node still applies committed
+  entries); events are observed transitions, so a change that starts and ends between two observations can be missed; the admin token does not secure the shared listener (section 13).
+
+## 16. Chaos tooling: `cmd/chaosrun` (T5.6) and the mutation suite (T5.7)
+- **`cmd/chaosrun -sim`** runs all 24 scenarios (the 23 hand-scripted ones plus the seed-generated "generated nemesis and workload") over a seed range, prints a per-run verdict and a reproduce line on failure,
+  exits 1 on any failure and 2 on a usage error; `-json` prints one object per run, `-disk DIR` uses disk-backed storage. Tests: `TestRunExitCodes`, `TestRunFailureExitsOneWithReproLine`, `TestJSONOutputOneObjectPerRun`,
+  `TestChaosrunAcceptance` (`cmd/chaosrun/main_test.go`), `TestScheduleIsPureFunctionOfSeed`, `TestGeneratedScenarioHolds`, `TestAllScenariosCatalog` (`chaos/generated_test.go`). `make chaos-smoke` runs it over seeds 1-20.
+- **What the chaos oracles check** (read from `chaos/cluster.go` and `chaos/monitor.go`): after every simulated tick, `checkElectionSafety` and then the committed-log monitor. The monitor checks (a) every node
+  that reports an entry committed holds the same term at that index as every earlier report (State Machine Safety, approximated: equal terms mean equal commands only if Log Matching holds, which is assumed),
+  (b) a state machine never applies past its node's commit index, (c) a node's log never ends before its commit index and its newest committed entries keep their recorded terms, (d) every leader of a later term
+  holds every entry recorded committed in an earlier term with the recorded term (Leader Completeness). **It does not check Log Matching directly or Leader Append-Only**, and it skips entries a node has compacted.
+  Besides the monitor, runs check replica convergence after healing (`Converged`), per-key linearizability of the client history (`chaos/checker.go`; the simulated clients issue writes and reads only, `OpKind` in `chaos/cluster.go`) and read liveness.
+  Tests: `TestCommittedLogMonitorAcceptsHealthyRuns`, `TestCommittedLogMonitorFlagsADifferentTermAtACommittedIndex`, `TestCommittedLogMonitorFlagsApplyingPastCommit`,
+  `TestCommittedLogMonitorFlagsALeaderThatLacksACommittedEntry`, `TestCommittedLogMonitorSurvivesARestartThatRewindsACommitIndex`, `TestElectionSafetyIsCheckedContinuously`.
+- **Mutation suite** (`go test -tags faultinject ./chaos -run TestMutationSuite`; `docs/CHAOS_RESULTS.md`, regenerated by CI and diffed): nine injected bugs behind the `faultinject` build tag (`internal/faultinject`;
+  call sites are `faultinject.Active(...)` guards in `internal/raft`, `internal/storage` and `internal/statemachine`), each detected by an oracle: 9 of 9, with a control (every switch off, 670 runs over 17 scenario and mutation pairs) clean. Oracles that fired: linearizability (bugs 1, 5, 6),
+  committed-log monitor (2, 3, 4, 9), liveness (7), convergence (8). Tests: `TestMutationSuite`, `TestControlRunIsClean`, `TestMutationTableCoversTheNineSwitches`, `TestEveryMutationSwitchChangesADigest`,
+  `TestSuiteReportsInertMutationUndetected`, `TestDetectRestoresTheSwitches`, `TestChaosrunReproducesAMutation`, `TestLaggingNodeScenarioAloneDetectsSkippedVoteCheck`, one `TestMutation_*` per bug,
+  and `TestCallSitesAreGuardedOnly`, `TestDefaultBinaryHasNoMutationMachinery` (`internal/determinism/faultinject_test.go`).
+- **Limits:** scenarios are scripted, so a seed varies message fate and election timeouts only; the seed range is a search, not a proof. Bug 4 (grant votes without the up-to-date check) was not found in the
+  scenarios first named for it: 152 runs, first detected at seed 2 in "leader crashes during a membership change" (`docs/CHAOS_RESULTS.md`). Bug 3 (commit a previous-term entry) rests on one scripted scenario ("figure 8") whose
+  roles depend on which node the seed elects and which is inconclusive if its partition never happens (`RequireFaults` in `chaos/mutation_scenarios.go`). The mutation results prove these nine bugs are caught,
+  not that other bugs would be.
+
+## 17. Known limitations (what the tests and tooling do not cover)
+- **The shared listener is still open.** `Deliver`, `DeliverSnapshot`, `KVService` and `ListMembers` have no authentication and there is no TLS; `AddNode` and `RemoveNode` are protected only when `--cluster-token-file` is
+  set. A snapshot sender is not checked to be a member. The snapshot budget (256 MiB, 4 streams) bounds memory, not trust. Run on a trusted network.
+- **Admin faults are application-level.** They act inside the process (message drop and delay, tick stop, `os.Exit(137)`); they say nothing about kernel, NIC or scheduler behaviour.
+- **The chaos monitor is partial.** It does not check Log Matching directly or Leader Append-Only (only approximations: committed-term-per-index and leader completeness; `TestLeaderNeverOverwritesItsOwnLog` covers
+  one three-node leader in the raft package, not chaos runs). Its State Machine Safety check assumes Log Matching.
+- **Mutation detection depends on seeds.** Bug 4 needed 152 runs across several scenarios and bug 3 depends on role assignment by the seed (section 16); a changed election-timeout draw can move a detection.
+- **Any `CreateSnapshot` error now stops the node** (T3.9). That is deliberate and safe (crash-stop is in the failure model) but it means a transient snapshot-file error takes the node down; surviving a failed purge is T3.15.
+  `maybeSnapshot` still ignores errors from `kv.Snapshot()` and `ConfStateAt`.
+- **Storage hardening is deferred, not done:** T3.12 (fsync in `roll()`), T3.13 (durable creation of data, wal and snap directories), T3.14 (oversize WAL entries and proposals), T3.15 (`SnapshotsKept`, snapshot vs purge race).
+- **Crash testing is a model.** `faultfs` is stricter than POSIX requires but has not been compared with a real kernel or a real power cut; no cross-file reordering, no mid-log bit rot.
+- **No real-time or multi-process chaos.** The simulator runs on virtual ticks in one process; the admin API exists to drive real clusters, but the gateway and the demo that would do so (D5, D5b) are not built.
+- **Removed nodes** still answer vote requests and appends until they learn of their removal; non-member vote rejection (dissertation section 4.2.3) is not implemented (section 10).
+- **Election timeout** defaults to 1.0-1.9 s, not the RUNBOOK's 600-1200ms (section 4, item 16).
