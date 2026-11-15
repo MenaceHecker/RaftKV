@@ -34,13 +34,15 @@ chaos-smoke:
 	go run ./cmd/chaosrun -sim -seeds 1-20
 
 # The README states the exact test count, and internal/determinism fails if it is stale.
-# `readme-counts` rewrites the numbers; `readme-check` only reports (used by CI and pre-commit).
+# `readme-counts` rewrites the numbers; `readme-check` only reports, failing exactly when
+# internal/determinism/readme_test.go would (used by CI and pre-commit).
 readme-counts:
 	go run ./cmd/readmecounts
 
 readme-check:
 	go run ./cmd/readmecounts -check
 
-# Merge origin/main and refresh the README counts in one step; never pushes.
+# Merge origin/main and refresh the README counts in one step. Never pushes; completes the
+# merge commit when README.md is the only conflict.
 sync-main:
 	scripts/sync-main.sh

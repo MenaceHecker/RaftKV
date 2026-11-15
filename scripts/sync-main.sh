@@ -4,7 +4,8 @@
 # The README test counts live on two lines that every PR adding tests edits, so merging
 # main often conflicts there. If README.md is the only conflicted file, this merges the
 # three versions with the number sites masked (so the counts cannot conflict) and then
-# writes the real counts. It never pushes. A clean merge is committed by git as usual; a
+# writes the real counts. It never pushes. It completes the merge commit itself when
+# README.md is the only conflict. A clean merge is committed by git as usual; a
 # README-only conflict is resolved and the merge is completed; a refreshed README after a
 # clean merge is left as an uncommitted change for you to commit.
 set -euo pipefail

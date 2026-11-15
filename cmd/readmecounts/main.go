@@ -2,7 +2,7 @@
 // internal/determinism/readme_test.go demands, without hand-editing them.
 //
 //	readmecounts           rewrite README.md in place (the default)
-//	readmecounts -check    exit 1 and print the diff and the fix command if stale
+//	readmecounts -check    exit 1 and print the problems and the fix command if readme_test.go would fail
 //	readmecounts -mask     filter a README on stdin, hiding the number sites (for merging)
 //
 // Exit codes: 0 fine, 1 stale (-check only), 2 usage error or the tree cannot be counted.
@@ -57,21 +57,35 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		say(stderr, "readmecounts: %v\n", err)
 		return 2
 	}
-	updated, err := readmecounts.Rewrite(string(old), readmecounts.Counts{Tests: tests, Fuzz: fuzz, ImplLines: impl, TestLines: testLines})
+	counts := readmecounts.Counts{Tests: tests, Fuzz: fuzz, ImplLines: impl, TestLines: testLines}
+	updated, err := readmecounts.Rewrite(string(old), counts)
 	if err != nil {
 		say(stderr, "readmecounts: %v\n", err)
 		return 2
 	}
 
-	if updated == string(old) {
-		say(stdout, "README counts are current (%d tests, %d fuzz targets).\n", tests, fuzz)
-		return 0
-	}
 	if *check {
+		// -check fails exactly when readme_test.go would: it is never stricter than the oracle.
+		problems, err := readmecounts.Check(string(old), counts)
+		if err != nil {
+			say(stderr, "readmecounts: %v\n", err)
+			return 2
+		}
+		if len(problems) == 0 {
+			say(stdout, "README counts are current (%d tests, %d fuzz targets).\n", tests, fuzz)
+			return 0
+		}
 		say(stdout, "README.md counts are stale (%d tests, %d fuzz targets, %d implementation and %d test lines actually):\n", tests, fuzz, impl, testLines)
+		for _, p := range problems {
+			say(stdout, "  %s\n", p)
+		}
 		say(stdout, "%s", changedLines(string(old), updated))
 		say(stdout, "fix: run `%s` and commit README.md\n", fixCommand)
 		return 1
+	}
+	if updated == string(old) {
+		say(stdout, "README counts are current (%d tests, %d fuzz targets).\n", tests, fuzz)
+		return 0
 	}
 	info, err := os.Stat(path)
 	mode := os.FileMode(0o644)

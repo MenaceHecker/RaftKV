@@ -27,9 +27,18 @@ type Counts struct {
 	Tests, Fuzz, ImplLines, TestLines int
 }
 
-// lineTolerance is the drift beyond which a line count is rewritten. The README test
-// allows 10%; rewriting at 5% leaves headroom so the claim is not edited on every PR.
-const lineTolerance = 0.05
+const (
+	// OracleLineTolerance is the drift the README test accepts for the line counts: the
+	// 0.10 in TestReadmeLineCountsAreRoughlyRight (internal/determinism/readme_test.go),
+	// with the same formula |claimed-actual|/actual. Check uses it, so a check fails exactly
+	// when that test would. TestToolAgreesWithTheReadmeTest pins the two together.
+	OracleLineTolerance = 0.10
+
+	// lineTolerance is the drift beyond which Rewrite refreshes a line count. It is a
+	// convenience that avoids editing the claim on every PR, not a check, and is deliberately
+	// tighter than the oracle so a rewritten claim has headroom.
+	lineTolerance = 0.05
+)
 
 var (
 	testFn = regexp.MustCompile(`(?m)^func Test\w`)
@@ -183,6 +192,59 @@ func Rewrite(readme string, c Counts) (string, error) {
 		out = out[:e.start] + e.text + out[e.end:]
 	}
 	return out, nil
+}
+
+// Check reports every way readme fails the rules of readme_test.go, and nothing else:
+// the test count (both sites) and the fuzz word must be exact, and each line count must be
+// within OracleLineTolerance of the actual. An empty result means the README test would
+// pass. The error is for a claim that has been reworded or a fuzz count with no word.
+func Check(readme string, c Counts) (problems []string, err error) {
+	word, ok := fuzzWords[c.Fuzz]
+	if !ok {
+		return nil, fmt.Errorf("there are %d fuzz targets, which readme_test.go has no word for (five to ten); extend its table first", c.Fuzz)
+	}
+	num := func(re *regexp.Regexp, what string) (int, error) {
+		m := re.FindStringSubmatch(readme)
+		if m == nil {
+			return 0, fmt.Errorf("no text matching %q: the README claim about %s has been reworded", re, what)
+		}
+		return strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
+	}
+	opening, err := num(openingRe, "the test and fuzz counts")
+	if err != nil {
+		return nil, err
+	}
+	across, err := num(acrossRe, "the layout test count")
+	if err != nil {
+		return nil, err
+	}
+	impl, err := num(implRe, "implementation lines")
+	if err != nil {
+		return nil, err
+	}
+	test, err := num(testRe, "test lines")
+	if err != nil {
+		return nil, err
+	}
+	if opening != c.Tests {
+		problems = append(problems, fmt.Sprintf("the README opens by claiming %d tests; there are %d", opening, c.Tests))
+	}
+	if across != c.Tests {
+		problems = append(problems, fmt.Sprintf("the layout section claims %d tests; there are %d", across, c.Tests))
+	}
+	if !strings.Contains(readme, word+" fuzz targets") {
+		problems = append(problems, fmt.Sprintf("the README does not say %q, but there are %d fuzz targets", word+" fuzz targets", c.Fuzz))
+	}
+	for _, l := range []struct {
+		what            string
+		claimed, actual int
+	}{{"implementation", impl, c.ImplLines}, {"test", test, c.TestLines}} {
+		if l.actual == 0 || drift(l.claimed, l.actual) > OracleLineTolerance {
+			problems = append(problems, fmt.Sprintf("the README says roughly %d %s lines; there are %d, which is %.0f%% out",
+				l.claimed, l.what, l.actual, drift(l.claimed, l.actual)*100))
+		}
+	}
+	return problems, nil
 }
 
 // Mask replaces every number site (and the fuzz word) with a fixed, valid placeholder
