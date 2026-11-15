@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -649,4 +650,22 @@ func TestCloseClosesConnsAndLeaksNoGoroutines(t *testing.T) {
 	}
 
 	settle(t, "goroutines to drain after Close", func() bool { return runtime.NumGoroutine() <= baseline })
+}
+
+func TestStatusFailureReadsCleanly(t *testing.T) {
+	f := newFakeNet(func(rec) (any, error) { return nil, code(codes.Unavailable) })
+	c := newClient(t, testConfig(f, newFakeClock(), maxRand()))
+
+	for name, call := range map[string]func() error{
+		"StatusFrom": func() error { _, err := c.StatusFrom(context.Background(), "a"); return err },
+		"Status":     func() error { _, err := c.Status(context.Background()); return err },
+	} {
+		err := call()
+		if !errors.Is(err, client.ErrUnavailable) {
+			t.Errorf("%s error = %v, want ErrUnavailable", name, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "%!") {
+			t.Errorf("%s error message is malformed: %q", name, err.Error())
+		}
+	}
 }
