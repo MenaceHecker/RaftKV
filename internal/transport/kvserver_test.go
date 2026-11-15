@@ -474,6 +474,16 @@ func TestInvalidMembershipRequestsAreRejected(t *testing.T) {
 	for name, call := range cases {
 		t.Run(name, func(t *testing.T) {
 			err := call()
+			// A fresh leader refuses every configuration change with
+			// FailedPrecondition until it has committed an entry in its own term
+			// (T3.16), and that check runs before the request is validated, so
+			// the "already a member" and "not a member" cases can see it first.
+			// Retry only on that code; the assertion below is unchanged.
+			deadline := time.Now().Add(grpcSettleTimeout)
+			for status.Code(err) == codes.FailedPrecondition && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+				err = call()
+			}
 			if err == nil {
 				t.Fatalf("%s was accepted", name)
 			}
