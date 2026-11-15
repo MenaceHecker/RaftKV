@@ -11,6 +11,12 @@ import (
 // fixture builds a tree with 3 tests, 5 fuzz targets, 2000 implementation and 1000 test lines.
 func fixture(t *testing.T, claimedTests string) string {
 	t.Helper()
+	return fixtureLines(t, claimedTests, "2,000", "1,000")
+}
+
+// fixtureLines is fixture with the claimed implementation and test line counts chosen.
+func fixtureLines(t *testing.T, claimedTests, claimedImpl, claimedTest string) string {
+	t.Helper()
 	root := t.TempDir()
 	put := func(rel, content string) {
 		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o600); err != nil {
@@ -23,7 +29,7 @@ func fixture(t *testing.T, claimedTests string) string {
 		body += "func " + n + "() {}\n"
 	}
 	put("a_test.go", body+strings.Repeat("//\n", 991))
-	put("README.md", claimedTests+" tests and five fuzz targets.\n\nRoughly 2,000 lines of implementation and 1,000 of tests, across "+claimedTests+" tests.\n")
+	put("README.md", claimedTests+" tests and five fuzz targets.\n\nRoughly "+claimedImpl+" lines of implementation and "+claimedTest+" of tests, across "+claimedTests+" tests.\n")
 	return root
 }
 
@@ -88,5 +94,43 @@ func TestMaskModeFiltersStdin(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "10 tests") || !strings.Contains(out.String(), "fuzz targets") {
 		t.Fatalf("mask output %q", out.String())
+	}
+}
+
+// The actual counts in the fixture are 2000 implementation and 1000 test lines.
+
+func TestCheckAcceptsLineDriftWithinTenPercent(t *testing.T) {
+	// 2,140 vs 2000 is 7% out (beyond the 5% rewrite threshold, inside the oracle's 10%).
+	root := fixtureLines(t, "3", "2,140", "1,070")
+	var out, errb bytes.Buffer
+	if code := run([]string{"-check", "-root", root}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("7%% line drift: exit %d, want 0 (out %q err %q)", code, out.String(), errb.String())
+	}
+}
+
+func TestCheckRejectsLineDriftBeyondTenPercent(t *testing.T) {
+	// 2,220 vs 2000 is 11% out.
+	root := fixtureLines(t, "3", "2,220", "1,000")
+	var out, errb bytes.Buffer
+	if code := run([]string{"-check", "-root", root}, strings.NewReader(""), &out, &errb); code != 1 {
+		t.Fatalf("11%% line drift: exit %d, want 1 (out %q err %q)", code, out.String(), errb.String())
+	}
+	if all := out.String(); !strings.Contains(all, "make readme-counts") || !strings.Contains(all, "11% out") {
+		t.Fatalf("output does not name the drift and the fix command: %q", all)
+	}
+}
+
+func TestWriteStillRefreshesLineDriftBeyondFivePercent(t *testing.T) {
+	root := fixtureLines(t, "3", "2,140", "1,000")
+	var out, errb bytes.Buffer
+	if code := run([]string{"-root", root}, strings.NewReader(""), &out, &errb); code != 0 {
+		t.Fatalf("write: exit %d (err %q)", code, errb.String())
+	}
+	b, err := os.ReadFile(filepath.Join(root, "README.md")) //nolint:gosec // G304: path under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "Roughly 2,000 lines of implementation") {
+		t.Fatalf("7%% drift was not refreshed by write: %q", b)
 	}
 }
