@@ -42,10 +42,10 @@ Merged cards: T0.1, T3.6 to T3.11, T3.16 to T3.20, T4.7, T5.6, T5.7 (`git log`, 
 - Node: `go build -o bin/raftkv-server ./cmd/raftkv-server`. Flags (`cmd/raftkv-server/main.go`, `defineFlags`): `--id --peers --listen --data-dir --tick --election-ticks --heartbeat-ticks --fsync --snapshot-threshold --log-level --metrics-listen`,
   and the optional `--admin-listen --admin-token-file --admin-chaos` (T4.7) and `--cluster-token-file` (T3.18), all off by default. One shared gRPC `--listen` address
   (peer, KV and cluster services), a separate metrics HTTP address, and an optional separate admin gRPC address.
-- Other binaries: `cmd/raftkv-bench` (load generator; follows NOT_LEADER redirects), `cmd/chaosrun` (`-sim -seeds A-B -seed N -scenario TEXT -list -json -disk DIR`; exit 0 all passed, 1 a failure, 2 usage).
+- Other binaries: `cmd/raftkvctl` (get, put, delete, status over `internal/client`; exit 0 ok, 1 not found, 2 failed or usage, 3 outcome unknown), `cmd/raftkv-bench` (load generator; follows NOT_LEADER redirects), `cmd/chaosrun` (`-sim -seeds A-B -seed N -scenario TEXT -list -json -disk DIR`; exit 0 all passed, 1 a failure, 2 usage).
   Containers: `docker compose up --build`. Kubernetes: `deploy/kubernetes/raftkv.yaml`. Protobuf: `buf generate`.
 - Build-tagged mutation switches: `go test -tags faultinject ./chaos -run TestMutationSuite` (section 16). The default binary contains only constant-false guards (`TestDefaultBinaryHasNoMutationMachinery`).
-- Not present, still: `cmd/gateway`, `cmd/raftkvctl`, `infra/`, `web/`, `docs/NOTES.md`, a porcupine cross-check, a JSONL history with `info` ops, a checker shrinker and an HTML report (each checked with `ls` or `grep` at `73915fa`).
+- Not present, still: `cmd/gateway`, `infra/`, `web/`, `docs/NOTES.md`, a porcupine cross-check, a JSONL history with `info` ops, a checker shrinker and an HTML report (each checked with `ls` or `grep` at `73915fa`).
   `CODEOWNERS` and a PR template now exist under `.github/`.
 
 ## 2a. Verified baseline (run 2026-11-15 at `73915fa`, Go 1.27.3 darwin/arm64)
@@ -110,9 +110,9 @@ here was matched with `grep -rn "func TestName"`; section 2b says which were run
 ## 6. Other items noted, and what does not exist
 - OK (carried): dedupe by `(clientID, seq)` inside the state machine, session table in the snapshot, bounded sessions (`internal/statemachine/kv.go`, `session.go`). NOT_LEADER with a leader address (`internal/transport/kvserver.go` `notLeaderError`; `TestFollowerRedirectsWritesAndReads`). ReadIndex requires an entry committed in the leader's term (`readonly.go`). Snapshots are written atomically (`snapshot.go`); InstallSnapshot streams 1 MiB chunks (`SnapshotChunkSize` in `internal/transport/peer.go`).
 - OK (re-read): both InstallSnapshot follower branches. `handleInstallSnapshot` errors if the receiver is a leader of that term, turns a candidate into a follower, acknowledges with its own commit index when `snap.Index <= committed`, and otherwise calls `restore` (`ApplySnapshot`, `rebuildConfig`, pending snapshot). Tests `TestStaleSnapshotDoesNotRegressAFollower` (first branch), `TestLaggingFollowerIsCaughtUpByASnapshot` (second), `TestLeaderRejectsASnapshotInItsOwnTerm`.
-- UNKNOWN: whether a client library that follows leader hints exists. None is shipped; `cmd/raftkv-bench` follows NOT_LEADER redirects (`TestNotLeaderFindsTheRedirect`) and the server side is tested (`TestARedirectIsEnoughToFindTheLeader`). Whether `time.Sleep` masks flakiness: 14 `_test.go` files use it (7 at the audit); the one flake recorded since, `TestFollowerCatchesUpFromALargeBacklog`, had a real cause (section 14), not a sleep.
+- Client library: `internal/client` (T4.6, section 18) follows leader hints and retries with the same `(id, seq)`; `cmd/raftkv-bench` still has its own redirect code (`TestNotLeaderFindsTheRedirect`) and the server side is tested (`TestARedirectIsEnoughToFindTheLeader`). Whether `time.Sleep` masks flakiness: 14 `_test.go` files use it (7 at the audit); the one flake recorded since, `TestFollowerCatchesUpFromALargeBacklog`, had a real cause (section 14), not a sleep.
 - Not present: `read_mode: log|readindex` switch (ReadIndex is the only path); snapshots are held fully in memory at both ends (README "Things that are honestly not done").
-- Absent from the repo: see section 2 (`cmd/gateway`, `cmd/raftkvctl`, `infra/`, `web/`, `docs/NOTES.md`, porcupine cross-check, JSONL history with `info` ops, checker shrinker, HTML report, and CI jobs for lint, gitleaks, buf and guard-tests). Present now and no longer absent: Makefile, `.golangci.yml`, `scripts/`, `.githooks/`, CODEOWNERS, PR template, `docs/INVARIANTS.md`, `docs/tasks/`, a nightly schedule inside `ci.yml`, `cmd/chaosrun`, the admin service, the mutation (`faultinject`) suite.
+- Absent from the repo: see section 2 (`cmd/gateway`, `infra/`, `web/`, `docs/NOTES.md`, porcupine cross-check, JSONL history with `info` ops, checker shrinker, HTML report, and CI jobs for lint, gitleaks, buf and guard-tests). Present now and no longer absent: Makefile, `.golangci.yml`, `scripts/`, `.githooks/`, CODEOWNERS, PR template, `docs/INVARIANTS.md`, `docs/tasks/`, a nightly schedule inside `ci.yml`, `cmd/chaosrun`, the admin service, the mutation (`faultinject`) suite.
 - Checker note: `chaos/checker.go` has pending and unknown op statuses (`StatusPending`, `StatusUnknown`), so indeterminate ops are modelled; correctness not reviewed.
 
 Findings sections: sections 7 to 10 keep their numbers and order because `docs/RUNBOOK.md` (non-goals) and the T3.19 card cite "section 9" for T3.16.
@@ -278,3 +278,20 @@ sections 11 to 15 are in card order (T3.9, T3.10, T3.18, T3.20, T4.7), 16 covers
 - **No real-time or multi-process chaos.** The simulator runs on virtual ticks in one process; the admin API exists to drive real clusters, but the gateway and the demo that would do so (D5, D5b) are not built.
 - **Removed nodes** still answer vote requests and appends until they learn of their removal; non-member vote rejection (dissertation section 4.2.3) is not implemented (section 10).
 - **Election timeout** defaults to 1.0-1.9 s, not the RUNBOOK's 600-1200ms (section 4, item 16).
+
+## 18. T4.6 findings (branch `feat/t4-6-client`): `internal/client` and `cmd/raftkvctl`
+- **What it is.** A Go client over `KVService` (Get, Put, Delete, Status): rotation over a static node list, NotLeader hint following with a per-operation loop guard, full-jitter exponential backoff (20 ms to 1 s,
+  never zero), 2 s per attempt, 30 s total when the caller's context has no deadline, injected `Clock` and `Rand`, one `seq` per write reused by every retry. `Close` is idempotent and unblocks waiters.
+  `raftkvctl` is a thin CLI over it. `cmd/raftkv-bench` is not migrated (out of scope).
+- **Outcomes.** A write ends `nil`, `*DefinitiveError` (cannot have been applied: nothing sent, or `InvalidArgument`, `PermissionDenied`, `Unauthenticated`, `Unimplemented`, `ResourceExhausted`) or
+  `*IndeterminateError` (an attempt was sent and no definite answer came back). Every NotLeader or lost-leadership reply to a write is indeterminate, because the node can send them after proposing; an election gap
+  therefore reports "unknown" although nothing may have been proposed. A read never reports unknown.
+- **Restart hazard (read this before reusing a client id).** The server drops any write with `seq <= lastSeq` for that id and still reports success (`internal/statemachine/session.go` `shouldApply`), with no expiry and no
+  RPC to read the mark. A process that restarts with a fixed client id and seq 1 has its writes silently dropped until the seq passes the old mark. The client therefore draws a random non-zero id per process; a caller
+  that sets `ClientID` owns `StartSeq`. Smaller hazard: the table holds 4096 sessions and evicts the least recently used, so a session evicted between an attempt and its retry makes the retry apply twice; every
+  restart with a random id adds one session. No server mechanism was added.
+- **Serialised writes.** A `Client` takes a write mutex, so one id never has two writes in flight (opposite-order application would lose the lower seq while reporting success). Use several Clients for parallel writes.
+- **Tests.** `internal/client` (fake clock and scripted nodes, plus `TestRetryAppliesOnce` and `TestKillLeaderMidWorkloadClientCompletes` on a real 3-node loopback cluster, both under `-short`), `cmd/raftkvctl`
+  (`TestCtlExitCodesAndOutput`). Leak check counts goroutines after `Close`; there is no `goleak` dependency.
+- **Unverified.** The integration tests use `SyncNever` and 10 ms ticks. `internal/transport` `TestInvalidMembershipRequestsAreRejected` failed twice during the full-repo run (FailedPrecondition instead of InvalidArgument,
+  unrelated to this task) and passed on a retry and alone; it looks load-sensitive.
