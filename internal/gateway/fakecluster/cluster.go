@@ -54,7 +54,16 @@ type Cluster struct {
 	active   int
 	clients  map[uint64]bool
 	events   map[uint64][]chan gateway.NodeEvent
-	eventSeq uint64
+	eventSeq map[uint64]uint64 // per node, +1 per event, as the real nodes do
+	failEv   map[uint64]*evFailure
+	failPut  error
+	failGet  error
+	snap     uint64
+}
+
+type evFailure struct {
+	err   error
+	times int
 }
 
 // New builds a three node cluster, one node per zone, with node 1 leading.
@@ -66,6 +75,8 @@ func New() *Cluster {
 		lastSeq:  map[uint64]uint64{},
 		clients:  map[uint64]bool{},
 		events:   map[uint64][]chan gateway.NodeEvent{},
+		eventSeq: map[uint64]uint64{},
+		failEv:   map[uint64]*evFailure{},
 		leader:   1,
 		term:     1,
 	}
@@ -119,7 +130,7 @@ func (c *Cluster) Status(ctx context.Context, id uint64) (gateway.NodeStatus, er
 	return gateway.NodeStatus{
 		ID: id, LeaderID: c.leader, Term: c.term, Role: role,
 		CommitIndex: c.commit, AppliedIndex: c.commit,
-		FirstIndex: 1, LastIndex: c.commit + 1, SnapshotIndex: 0,
+		FirstIndex: 1, LastIndex: c.commit + 1, SnapshotIndex: c.snap,
 		Paused: n.paused,
 	}, nil
 }
@@ -135,7 +146,11 @@ func (c *Cluster) NewKV() gateway.KV {
 
 // Crash implements gateway.Cluster.
 func (c *Cluster) Crash(_ context.Context, id uint64) error {
-	return c.with(id, func(n *node) { n.down = true; c.moveLeaderLocked() })
+	return c.with(id, func(n *node) {
+		n.down = true
+		c.closeEventsLocked(id) // the process is gone, so its streams end
+		c.moveLeaderLocked()
+	})
 }
 
 // Pause implements gateway.Cluster.
@@ -188,13 +203,14 @@ func (c *Cluster) moveLeaderLocked() {
 func (c *Cluster) setLeaderLocked(id uint64) {
 	c.leader = id
 	c.term++
-	for nid, subs := range c.events {
+	for _, nid := range c.order {
+		subs := c.events[nid]
 		role := "follower"
 		if nid == id {
 			role = "leader"
 		}
-		c.eventSeq++
-		ev := gateway.NodeEvent{Node: nid, Term: c.term, Role: role, LeaderID: id, Seq: c.eventSeq}
+		c.eventSeq[nid]++
+		ev := gateway.NodeEvent{Node: nid, Term: c.term, Role: role, LeaderID: id, Seq: c.eventSeq[nid]}
 		for _, ch := range subs {
 			select {
 			case ch <- ev:
@@ -207,11 +223,21 @@ func (c *Cluster) setLeaderLocked(id uint64) {
 // Events streams leadership transitions until ctx ends.
 func (c *Cluster) Events(ctx context.Context, id uint64) (<-chan gateway.NodeEvent, error) {
 	c.mu.Lock()
-	if _, ok := c.nodes[id]; !ok {
+	n, ok := c.nodes[id]
+	if !ok {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("fakecluster: no node %d", id)
 	}
-	ch := make(chan gateway.NodeEvent, 16)
+	if f := c.failEv[id]; f != nil && f.times > 0 {
+		f.times--
+		c.mu.Unlock()
+		return nil, f.err
+	}
+	if n.down {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("fakecluster: node %d is down", id)
+	}
+	ch := make(chan gateway.NodeEvent, 1024)
 	c.events[id] = append(c.events[id], ch)
 	c.mu.Unlock()
 	go func() {
@@ -222,15 +248,57 @@ func (c *Cluster) Events(ctx context.Context, id uint64) (<-chan gateway.NodeEve
 		for i, s := range subs {
 			if s == ch {
 				c.events[id] = append(subs[:i], subs[i+1:]...)
+				close(ch)
 				break
 			}
 		}
-		close(ch)
 	}()
 	return ch, nil
 }
 
+func (c *Cluster) closeEventsLocked(id uint64) {
+	for _, ch := range c.events[id] {
+		close(ch)
+	}
+	delete(c.events, id)
+}
+
 // Controls for tests.
+
+// EventStreams is how many Events streams are open across all nodes.
+func (c *Cluster) EventStreams() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, subs := range c.events {
+		n += len(subs)
+	}
+	return n
+}
+
+// FailEvents makes the next times calls of Events on the node return err.
+func (c *Cluster) FailEvents(id uint64, err error, times int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failEv[id] = &evFailure{err: err, times: times}
+}
+
+// SkipEventSeq makes the node's next event carry a seq one higher than the
+// subscribers expect, as if one event had been lost.
+func (c *Cluster) SkipEventSeq(id uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.eventSeq[id]++
+}
+
+// SetSnapshotIndex sets the snapshot index every node reports.
+func (c *Cluster) SetSnapshotIndex(n uint64) { c.mu.Lock(); c.snap = n; c.mu.Unlock() }
+
+// FailWrites makes every Put and Delete return err (nil restores them).
+func (c *Cluster) FailWrites(err error) { c.mu.Lock(); c.failPut = err; c.mu.Unlock() }
+
+// FailReads makes every Get return err (nil restores them).
+func (c *Cluster) FailReads(err error) { c.mu.Lock(); c.failGet = err; c.mu.Unlock() }
 
 // SetLeader scripts a leader change.
 func (c *Cluster) SetLeader(id uint64) {
@@ -421,6 +489,9 @@ func (s *session) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	c := s.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failGet != nil {
+		return nil, false, c.failGet
+	}
 	e, ok := c.data[key]
 	if !ok {
 		return nil, false, nil
@@ -442,6 +513,9 @@ func (s *session) Put(ctx context.Context, key string, value []byte) error {
 	c := s.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failPut != nil {
+		return c.failPut
+	}
 	if l := c.nodes[c.leader]; l == nil || l.down {
 		return gateway.ErrNoLeader
 	}
@@ -469,6 +543,9 @@ func (s *session) Delete(ctx context.Context, key string) error {
 	c := s.c
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.failPut != nil {
+		return c.failPut
+	}
 	if l := c.nodes[c.leader]; l == nil || l.down {
 		return gateway.ErrNoLeader
 	}

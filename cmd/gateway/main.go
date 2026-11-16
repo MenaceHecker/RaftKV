@@ -157,6 +157,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	go g.RunPoller(ctx, poll.C)
 	go g.RunReset(ctx, reset.C)
 	g.PollOnce(ctx)
+	g.Start(ctx) // safe-start heal and the upstream event streams
 
 	srv := newHTTPServer(s.listen, g.Handler())
 	errc := make(chan error, 1)

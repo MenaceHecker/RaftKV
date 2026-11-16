@@ -18,6 +18,11 @@ type nodeCache struct {
 // to the nodes and a hung node cannot hold one up. The whole poll is bounded
 // by PollTimeout; a node that has not answered by then counts as down.
 func (g *Gateway) PollOnce(parent context.Context) {
+	g.pollOnce(parent)
+	g.chaosObserve()
+}
+
+func (g *Gateway) pollOnce(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
@@ -59,15 +64,18 @@ func (g *Gateway) PollOnce(parent context.Context) {
 
 func (g *Gateway) record(id uint64, st NodeStatus, ok bool) {
 	g.pollMu.Lock()
-	defer g.pollMu.Unlock()
-	c := g.cache[id]
+	prev := g.cache[id]
+	c := prev
 	c.up = ok
+	now := g.clk.Now()
 	if ok {
 		c.status = st
-		c.lastOK = g.clk.Now()
+		c.lastOK = now
 		c.hasOK = true
 	}
 	g.cache[id] = c
+	g.pollMu.Unlock()
+	g.observePoll(id, prev, st, ok, now)
 }
 
 // RunPoller polls on every tick until ctx ends.
@@ -98,7 +106,8 @@ type nodeView struct {
 	Paused        bool   `json:"paused"`
 }
 
-func (g *Gateway) handleCluster(w http.ResponseWriter, _ *http.Request) {
+// clusterView is the document served at /v1/cluster, from the poll cache.
+func (g *Gateway) clusterView() map[string]any {
 	now := g.clk.Now()
 	g.pollMu.RLock()
 	nodes := make([]nodeView, 0, len(g.topology))
@@ -124,5 +133,9 @@ func (g *Gateway) handleCluster(w http.ResponseWriter, _ *http.Request) {
 		nodes = append(nodes, v)
 	}
 	g.pollMu.RUnlock()
-	writeJSON(w, http.StatusOK, map[string]any{"leaderId": leader, "nodes": nodes})
+	return map[string]any{"leaderId": leader, "nodes": nodes, "chaos": g.chaosView()}
+}
+
+func (g *Gateway) handleCluster(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, g.clusterView())
 }
