@@ -219,6 +219,9 @@ caption {
   color: var(--muted);
   padding-bottom: 4px;
 }
+th {
+  white-space: nowrap;
+}
 th,
 td {
   border-bottom: 1px solid var(--border);
@@ -304,8 +307,8 @@ details {
 }
 summary {
   min-height: 44px;
-  display: flex;
-  align-items: center;
+  display: list-item;
+  padding: 10px 0;
   cursor: pointer;
 }
 progress {

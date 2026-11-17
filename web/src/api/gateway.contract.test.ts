@@ -51,11 +51,18 @@ describe("real gateway contract", () => {
   });
 
   it("a fault and a heal parse, and the cluster document shows the fault", async () => {
-    const f = await c.chaos.killLeader();
+    // The gateway counts its public chaos bucket as just used at start (docs/gateway.md), so the
+    // first fault may be answered 429 with Retry-After: wait it out. A partition, unlike a
+    // kill, is undone completely by heal, which keeps the demo cluster reusable.
+    let f = await c.chaos.partition();
+    for (let i = 0; i < 4 && !f.ok && f.status === 429; i++) {
+      await new Promise((r) => setTimeout(r, (f.ok ? 1 : (f.retryAfterSec ?? 5)) * 1000 + 250));
+      f = await c.chaos.partition();
+    }
     expect(f.ok, JSON.stringify(f)).toBe(true);
     const during = await c.cluster();
     expect(during.ok && during.data.chaos.state !== "idle").toBe(true);
     const h = await c.chaos.heal();
     expect(h.ok, JSON.stringify(h)).toBe(true);
-  });
+  }, 60_000);
 });
