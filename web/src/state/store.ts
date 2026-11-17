@@ -36,7 +36,23 @@ export function initialState(): AppState {
   };
 }
 
-// STUB (D7 commit 1): inert store.
+/** A tiny external store for useSyncExternalStore: no Redux. */
 export function createStore(initial: AppState = initialState()): Store {
-  return { get: () => initial, set() {}, subscribe: () => () => {} };
+  let state = initial;
+  const subs = new Set<() => void>();
+  return {
+    get: () => state,
+    set(fn) {
+      const next = fn(state);
+      if (next === state) return;
+      state = next;
+      for (const s of [...subs]) s();
+    },
+    subscribe(fn) {
+      subs.add(fn);
+      return () => {
+        subs.delete(fn);
+      };
+    },
+  };
 }
