@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "../api/client";
@@ -6,8 +6,9 @@ import { CAS_DETAIL } from "../api/types";
 import { MockGateway } from "../test/mockGateway";
 import { KvPlayground, type KvProps } from "./KvPlayground";
 
+const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
 let gw: MockGateway;
-const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+const user = () => userEvent.setup({ delay: null });
 function ui(over: Partial<KvProps> = {}) {
   const client = createClient({ baseUrl: "http://gw", fetch: gw.fetch, getToken: () => null });
   return <KvPlayground client={client} mode="live" verifying={false} {...over} />;
@@ -116,7 +117,7 @@ describe("KvPlayground", () => {
     await u.type(key(), "secretkey");
     await u.type(value(), "secretvalue");
     await u.click(btn(/^put/i));
-    await vi.advanceTimersByTimeAsync(10);
+    await tick(10);
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
     expect(document.cookie).toBe("");

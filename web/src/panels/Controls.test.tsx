@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "../api/client";
@@ -6,9 +6,10 @@ import { cluster, node, withChaos } from "../test/fixtures";
 import { ADMIN_TOKEN, MockGateway } from "../test/mockGateway";
 import { Controls, type ControlsProps } from "./Controls";
 
+const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
 let gw: MockGateway;
 let token: string | null;
-const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+const user = () => userEvent.setup({ delay: null });
 
 function client() {
   return createClient({ baseUrl: "http://gw", fetch: gw.fetch, getToken: () => token });
@@ -44,8 +45,10 @@ describe("Controls", () => {
     render(ui());
     await user().click(btn(/kill leader/i));
     expect(gw.calls.filter((c) => c.path === "/v1/chaos/kill-leader")).toHaveLength(1);
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      /kill.*node 1.*heals? (automatically )?in 45 s/i,
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /kill.*node 1.*heals? (automatically )?in 45 s/i,
+      ),
     );
   });
 
@@ -87,7 +90,7 @@ describe("Controls", () => {
     disabled(/kill leader/i);
     disabled(/isolate leader/i);
     expect(screen.getByText(/fault active, heals in 30 s/i)).toBeInTheDocument();
-    await vi.advanceTimersByTimeAsync(1000);
+    await tick(1000);
     expect(screen.getByText(/fault active, heals in 29 s/i)).toBeInTheDocument();
   });
 
@@ -138,10 +141,10 @@ describe("Controls", () => {
   it("estimates a 20 s cooldown after our own fault, labelled 'about', and re-enables after it", async () => {
     render(ui());
     await user().click(btn(/isolate leader/i));
-    await vi.advanceTimersByTimeAsync(0);
+    await tick(0);
     disabled(/isolate leader/i);
     expect(screen.getByText(/cooldown about 20 s/i)).toBeInTheDocument();
-    await vi.advanceTimersByTimeAsync(20_000);
+    await tick(20_000);
     enabled(/isolate leader/i);
   });
 
@@ -154,11 +157,11 @@ describe("Controls", () => {
   it("a 429 shows the gateway's Retry-After as the cooldown", async () => {
     await client().chaos.killLeader();
     await client().chaos.heal(); // slot free, bucket still used
-    await vi.advanceTimersByTimeAsync(3000);
+    await tick(3000);
     gw.cluster = cluster();
     render(ui());
     await user().click(btn(/isolate leader/i));
-    await vi.advanceTimersByTimeAsync(0);
+    await tick(0);
     expect(screen.getByRole("status")).toHaveTextContent(/rate limit|chaos rate limit/i);
     expect(screen.getByText(/cooldown about 17 s/i)).toBeInTheDocument();
   });
@@ -167,7 +170,7 @@ describe("Controls", () => {
     token = ADMIN_TOKEN;
     render(ui());
     await user().click(btn(/isolate leader/i));
-    await vi.advanceTimersByTimeAsync(0);
+    await tick(0);
     expect(screen.queryByText(/cooldown/i)).toBeNull();
     enabled(/isolate leader/i);
   });
@@ -178,9 +181,11 @@ describe("Controls", () => {
     });
     render(ui());
     await user().click(btn(/kill leader/i));
-    const status = await screen.findByRole("status");
+    const status = screen.getByRole("status");
     expect(status).toHaveAttribute("aria-live", "polite");
-    expect(status).toHaveTextContent(/cluster is not healthy enough for a fault/i);
+    await waitFor(() =>
+      expect(status).toHaveTextContent(/cluster is not healthy enough for a fault/i),
+    );
   });
 
   it("More faults: Pause and Delay send their bodies", async () => {

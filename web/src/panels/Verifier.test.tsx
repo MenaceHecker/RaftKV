@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "../api/client";
@@ -6,9 +6,10 @@ import { report } from "../test/fixtures";
 import { MockGateway } from "../test/mockGateway";
 import { Verifier, type VerifierProps } from "./Verifier";
 
+const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
 let gw: MockGateway;
 let running: boolean[];
-const user = () => userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+const user = () => userEvent.setup({ delay: null });
 function ui(over: Partial<VerifierProps> = {}) {
   const client = createClient({ baseUrl: "http://gw", fetch: gw.fetch, getToken: () => null });
   return (
@@ -35,7 +36,7 @@ afterEach(() => vi.useRealTimers());
 describe("Verifier", () => {
   it("says there is no run yet on a 404", async () => {
     render(ui());
-    await vi.advanceTimersByTimeAsync(0);
+    await tick(0);
     expect(await screen.findByText(/no run yet/i)).toBeInTheDocument();
   });
 
@@ -48,11 +49,11 @@ describe("Verifier", () => {
     expect(
       screen.getByText(/operation counts are not reported while running/i),
     ).toBeInTheDocument();
-    await vi.advanceTimersByTimeAsync(30_000);
+    await tick(30_000);
     const bar = screen.getByRole("progressbar", { name: /verification/i }) as HTMLProgressElement;
     expect(bar.value).toBeGreaterThan(0.4);
     expect(bar.value).toBeLessThan(0.6);
-    await vi.advanceTimersByTimeAsync(31_000);
+    await tick(31_000);
     expect(await screen.findByText(/PASS/)).toBeInTheDocument();
     expect(running.at(-1)).toBe(false);
   });
@@ -61,7 +62,7 @@ describe("Verifier", () => {
     render(ui());
     await user().click(run());
     const before = gw.callsTo("/v1/verify/last").length;
-    await vi.advanceTimersByTimeAsync(10_000);
+    await tick(10_000);
     expect(gw.callsTo("/v1/verify/last").length - before).toBe(5);
   });
 
@@ -77,7 +78,7 @@ describe("Verifier", () => {
     const c = createClient({ baseUrl: "http://gw", fetch: gw.fetch, getToken: () => null });
     await c.verifyRun();
     gw.finishVerify();
-    await vi.advanceTimersByTimeAsync(60_000);
+    await tick(60_000);
     render(ui());
     await user().click(run());
     expect(await screen.findByText(/try again in 14 min/i)).toBeInTheDocument();
