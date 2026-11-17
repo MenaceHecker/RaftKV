@@ -1,4 +1,4 @@
-import type { Client } from "../api/client";
+import { type Client, createClient } from "../api/client";
 import type { Env } from "../env";
 import type { EventSourceCtor } from "./eventStream";
 import type { Store } from "./store";
@@ -23,9 +23,6 @@ export interface Runtime {
 // STUB (D7 commit 1).
 export function createRuntime(_deps: RuntimeDeps): Runtime {
   const store = createStore();
-  const todo = async () => ({ ok: false as const, status: 0, error: "todo" });
-  // biome-ignore lint/suspicious/noExplicitAny: stub
-  const client = { chaos: {} } as any as Client;
-  void todo;
+  const client = createClient({ baseUrl: "", fetch: fetch, getToken: () => null });
   return { store, client, async start() {}, stop() {} };
 }
