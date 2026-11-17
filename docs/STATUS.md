@@ -295,3 +295,17 @@ sections 11 to 15 are in card order (T3.9, T3.10, T3.18, T3.20, T4.7), 16 covers
   (`TestCtlExitCodesAndOutput`). Leak check counts goroutines after `Close`; there is no `goleak` dependency.
 - **Unverified.** The integration tests use `SyncNever` and 10 ms ticks. `internal/transport` `TestInvalidMembershipRequestsAreRejected` failed twice during the full-repo run (FailedPrecondition instead of InvalidArgument,
   unrelated to this task) and passed on a retry and alone; it looks load-sensitive.
+
+## 19. D3 findings (branch `feat/d3-release`): reproducible release build
+- **What it is.** `make release` (`scripts/release.sh`) builds `raftkv-server` and `gateway` for linux/arm64 into `dist/<version>/` (`raftkv-server-linux-arm64`, `gateway-linux-arm64`, `*.sha256`, `MANIFEST`) and runs
+  `scripts/verify-release.sh`. It is build only and needs no AWS. `make release-upload RELEASE_DIR=dist/<version>` (`scripts/release-upload.sh`) is a separate, human-run step; RUNBOOK 6.1 still says `release` uploads.
+  `raftkv-server -version` and `gateway -version` print `internal/buildinfo.Line` (first argument only).
+- **Reproducibility.** `-trimpath -buildvcs=false -ldflags "-s -w -buildid= -X ..."`, the commit date (not the build time), `-mod=readonly`, `GOWORK=off`, no tags, and `GOTOOLCHAIN` taken from the `toolchain go1.25.13`
+  line added to `go.mod`. Verified: the same commit built from two clone paths gives identical bytes. A different compiler gives different bytes. `-s -w` strips symbols (crash traces lose them).
+- **Dirty trees.** Refused (tracked changes, or untracked `*.go`/`go.mod`/`go.sum`) unless `ALLOW_DIRTY=1`, which marks version and commit `-dirty`; `release-upload.sh` never uploads those.
+- **Verify details.** Under `-trimpath`, `go version -m` records GOOS/GOARCH/CGO/-trimpath but NOT `-ldflags`, so the stamped version/commit/date are checked by searching the binary (`grep -a`, not `strings`, which missed them).
+  fakecluster is checked twice: `go list -deps ./cmd/gateway` and the package path in the gateway binary (the tagged-build test proves the second check can fail).
+- **Upload.** Refuses before any aws call when `CI`/`GITHUB_ACTIONS` is set, `RELEASE_AWS_PROFILE` or `RELEASE_BUCKET` is empty, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` is set, the manifest is
+  dirty or verification fails. It then asks `head-object` for all six keys (only "Not Found" means absent; anything else refuses) and uploads under `artifacts/raftkvd/<v>/` and `artifacts/gateway/<v>/`, MANIFEST last.
+- **Tests.** `scripts/release_test.sh`, `verify-release_test.sh`, `release-upload_test.sh` (not run by `ci.yml`; they do real go builds), plus Go tests in `internal/buildinfo`, `cmd/raftkv-server`, `cmd/gateway`.
+- **Not done.** No real upload was run; no `--config` flag (RUNBOOK 10.4/10.5 text for the node differs from the repo, see the PR); `Dockerfile:19` still passes a dead `-X main.version`.

@@ -21,3 +21,6 @@ coverage.html
 .DS_Store
 .idea/
 *.swp
+
+# Release output (make release)
+/dist/
