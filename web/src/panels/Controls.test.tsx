@@ -1,12 +1,12 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "../api/client";
 import { cluster, node, withChaos } from "../test/fixtures";
 import { ADMIN_TOKEN, MockGateway } from "../test/mockGateway";
+import { tick } from "../test/tick";
 import { Controls, type ControlsProps } from "./Controls";
 
-const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
 let gw: MockGateway;
 let token: string | null;
 const user = () => userEvent.setup({ delay: null });

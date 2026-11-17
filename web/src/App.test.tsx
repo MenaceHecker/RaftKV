@@ -8,6 +8,7 @@ import { createRuntime, type Runtime } from "./state/runtime";
 import { FakeEventSource, FakeEventSourceCtor } from "./test/fakeEventSource";
 import { cluster, node } from "./test/fixtures";
 import { MockGateway } from "./test/mockGateway";
+import { tick } from "./test/tick";
 
 let gw: MockGateway;
 let runtime: Runtime;
@@ -35,7 +36,7 @@ function boot(env: Partial<Env> = {}, search = "") {
   render(<App runtime={runtime} />);
   return runtime.start();
 }
-const settle = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
+const settle = (ms = 0) => tick(ms);
 
 beforeEach(() => {
   vi.useFakeTimers();

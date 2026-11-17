@@ -1,12 +1,12 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "../api/client";
 import { report } from "../test/fixtures";
 import { MockGateway } from "../test/mockGateway";
+import { tick } from "../test/tick";
 import { Verifier, type VerifierProps } from "./Verifier";
 
-const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
 let gw: MockGateway;
 let running: boolean[];
 const user = () => userEvent.setup({ delay: null });
@@ -43,6 +43,7 @@ describe("Verifier", () => {
   it("runs: 202, progress by time, then the result from verify/last", async () => {
     render(ui());
     await user().click(run());
+    await tick(0);
     expect(gw.calls.some((c) => c.method === "POST" && c.path === "/v1/verify/run")).toBe(true);
     expect(running).toContain(true);
     expect(screen.getByRole("progressbar", { name: /verification/i })).toBeInTheDocument();
@@ -61,6 +62,7 @@ describe("Verifier", () => {
   it("polls verify/last every 2 s while running", async () => {
     render(ui());
     await user().click(run());
+    await tick(0);
     const before = gw.callsTo("/v1/verify/last").length;
     await tick(10_000);
     expect(gw.callsTo("/v1/verify/last").length - before).toBe(5);
@@ -162,6 +164,7 @@ describe("Verifier", () => {
       }),
     );
     await user().click(run());
+    await tick(0);
     expect(screen.getByText(/verification fault: partition ok/)).toBeInTheDocument();
   });
 });

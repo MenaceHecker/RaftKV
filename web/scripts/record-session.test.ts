@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseRecording } from "../src/state/replay";
 import { cluster, report } from "../src/test/fixtures";
-import { MockGateway } from "../src/test/mockGateway";
+import { fakeRes, MockGateway } from "../src/test/mockGateway";
 import { recordSession, writeRecording } from "./record-session.mjs";
 
 let gw: MockGateway;
@@ -73,9 +73,7 @@ describe("record-session", () => {
     const poisoned: typeof fetch = async (input, init) => {
       const r = await gw.fetch(input, init);
       if (String(input).endsWith("/v1/cluster")) {
-        return new Response(JSON.stringify({ ...cluster(), note: "Authorization: Bearer abc" }), {
-          status: 200,
-        });
+        return fakeRes(200, JSON.stringify({ ...cluster(), note: "Authorization: Bearer abc" }));
       }
       return r;
     };

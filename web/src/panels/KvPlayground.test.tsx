@@ -1,12 +1,12 @@
-import { act, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "../api/client";
 import { CAS_DETAIL } from "../api/types";
 import { MockGateway } from "../test/mockGateway";
+import { tick } from "../test/tick";
 import { KvPlayground, type KvProps } from "./KvPlayground";
 
-const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
 let gw: MockGateway;
 const user = () => userEvent.setup({ delay: null });
 function ui(over: Partial<KvProps> = {}) {

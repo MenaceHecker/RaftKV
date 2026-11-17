@@ -2,6 +2,25 @@ import type { ChaosView, Cluster, VerifyReport } from "../api/types";
 import { CAS_DETAIL } from "../api/types";
 import { cluster as makeCluster, report as makeReport } from "./fixtures";
 
+/**
+ * A Response look-alike whose body resolves in microtasks only. A real Response reads its body
+ * through streams, which need real event-loop turns that fake timers do not provide.
+ */
+export function fakeRes(
+  status: number,
+  text: string,
+  headers: Record<string, string> = {},
+): Response {
+  const h = new Headers(headers);
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: h,
+    json: async () => JSON.parse(text),
+    text: async () => text,
+  } as unknown as Response;
+}
+
 export const ADMIN_TOKEN = "test-admin-token-not-a-secret";
 const PUBLIC_BUCKET_MS = 20_000; // chaos.go: one fault per 20 s
 const COOLDOWN_MS = 15 * 60_000; // verify.go DefaultCooldown
@@ -48,9 +67,7 @@ export class MockGateway {
     const body = typeof init?.body === "string" ? init.body : null;
     this.calls.push({ method, path: url.pathname + url.search, headers, body });
     if (url.pathname === "/recording.jsonl") {
-      return this.recording === null
-        ? new Response("not found", { status: 404 })
-        : new Response(this.recording, { status: 200 });
+      return this.recording === null ? fakeRes(404, "not found") : fakeRes(200, this.recording);
     }
     if (this.down) throw new TypeError("Failed to fetch");
     if (this.hang) {
@@ -64,10 +81,7 @@ export class MockGateway {
   };
 
   private json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json", ...extra },
-    });
+    return fakeRes(status, JSON.stringify(body), { "Content-Type": "application/json", ...extra });
   }
   private err(
     status: number,
