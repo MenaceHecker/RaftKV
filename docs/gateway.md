@@ -209,3 +209,12 @@ risk is accepted: a compromised host in the node subnets can still talk to the
 peer port. The gateway has no code path to membership calls, and uses
 `--node-token-file` (separate from the admin Bearer token) for node AdminService
 calls.
+
+## Dashboard
+
+The static dashboard in `web/` is the browser client of this API (live panels, the fault buttons,
+the KV playground, the verifier) and plays a recorded session when the gateway is unreachable.
+Set `--dashboard-origin` to its exact origin (production `https://raftkv.tushar25.com`, to be
+confirmed); only that origin is allowed by CORS, so Vercel preview URLs run in replay. See
+`docs/web.md` for running it, the Vercel settings, and what RUNBOOK 10.7 asks for that this API
+cannot provide.
