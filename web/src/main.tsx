@@ -5,8 +5,9 @@ import { readEnv } from "./env";
 import { createRuntime } from "./state/runtime";
 import "./styles.css";
 
+const env = readEnv();
 const runtime = createRuntime({
-  env: readEnv(),
+  env,
   fetch: window.fetch.bind(window),
   EventSource: window.EventSource,
   rand: Math.random,
@@ -18,11 +19,13 @@ const runtime = createRuntime({
   },
 });
 
+void runtime.start();
+
 const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(
     <StrictMode>
-      <App runtime={runtime} />
+      <App runtime={runtime} repoUrl={env.repoUrl} />
     </StrictMode>,
   );
 }

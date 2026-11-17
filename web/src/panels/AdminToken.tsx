@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { clearToken, getToken, setToken } from "../state/admin";
 
-/** Collapsed Admin section. The token is never echoed, logged or put anywhere but sessionStorage. */
+/** Collapsed Admin section. The token is never echoed, logged or stored anywhere but by state/admin.ts. */
 export function AdminToken({ onChange }: { onChange?: (has: boolean) => void }) {
   const [draft, setDraft] = useState("");
   const [has, setHas] = useState(() => getToken() !== null);

@@ -1,5 +1,5 @@
-// The admin token lives in sessionStorage only: never localStorage, a cookie, the URL, the
-// console or the bundle. Every access is wrapped because storage can be unavailable or throw.
+// The admin token lives in this tab's session storage only: no persistent storage, cookie, URL,
+// console output or bundle ever holds it. Every access is wrapped because storage can be unavailable or throw.
 export const TOKEN_KEY = "raftkv.admin";
 
 export function getToken(): string | null {

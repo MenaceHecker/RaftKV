@@ -10,7 +10,7 @@ export interface PollerOptions {
   failuresToReplay?: number;
 }
 export interface Poller {
-  start(): void;
+  start(initialDelayMs?: number): void;
   stop(): void;
   refetch(): Promise<void>;
 }
@@ -67,12 +67,12 @@ export function createPoller(opts: PollerOptions): Poller {
   }
 
   return {
-    start() {
+    start(initialDelayMs = 0) {
       if (!stopped) return;
       stopped = false;
       closed = false;
       failures = 0;
-      schedule(0);
+      schedule(initialDelayMs);
     },
     stop() {
       stopped = true;

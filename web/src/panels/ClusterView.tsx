@@ -21,9 +21,9 @@ function NodeCard({ n }: { n: NodeView }) {
       className={`node role-${n.up ? n.role : "down"}${stale ? " is-stale" : ""}`}
       aria-label={`Node ${n.id}`}
     >
-      <h4>
+      <h3>
         <span aria-hidden="true">{roleIcon(n)}</span> Node {n.id}
-      </h4>
+      </h3>
       <p className="role">{n.up ? n.role : "down"}</p>
       {n.up ? (
         <p className="nums">

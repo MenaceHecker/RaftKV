@@ -33,7 +33,7 @@ function boot(env: Partial<Env> = {}, search = "") {
       return () => {};
     },
   });
-  render(<App runtime={runtime} />);
+  render(<App runtime={runtime} repoUrl="https://example.test/repo" />);
   return runtime.start();
 }
 const settle = (ms = 0) => tick(ms);

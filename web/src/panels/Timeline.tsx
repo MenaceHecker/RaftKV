@@ -27,18 +27,20 @@ export function Timeline({ rows }: { rows: TimelineRow[] }) {
       <p className="caption">
         Votes are not reported by the nodes, so an election shows as role changes only.
       </p>
-      <ol className="timeline" role="log" aria-live="polite" aria-relevant="additions">
-        {shown.length === 0 ? <li className="muted">No events yet.</li> : null}
-        {[...shown].reverse().map((r) => (
-          <li
-            key={r.key}
-            aria-live={r.kind === "commit" ? "off" : undefined}
-            className={`ev-${r.kind}`}
-          >
-            <time>{clock(r.at)}</time> <span>{r.text}</span>
-          </li>
-        ))}
-      </ol>
+      <div className="timeline" role="log" aria-live="polite" aria-relevant="additions">
+        <ol>
+          {shown.length === 0 ? <li className="muted">No events yet.</li> : null}
+          {[...shown].reverse().map((r) => (
+            <li
+              key={r.key}
+              aria-live={r.kind === "commit" ? "off" : undefined}
+              className={`ev-${r.kind}`}
+            >
+              <time>{clock(r.at)}</time> <span>{r.text}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
     </section>
   );
 }
