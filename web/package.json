@@ -16,7 +16,8 @@
     "format": "biome format --write .",
     "test": "vitest run",
     "test:contract": "vitest run --config vitest.contract.config.ts",
-    "check:no-go": "node scripts/check-no-go.mjs"
+    "check:no-go": "node scripts/check-no-go.mjs",
+    "check:dist": "node scripts/check-dist.mjs"
   },
   "dependencies": {
     "react": "19.3.1",

@@ -177,3 +177,61 @@ jobs:
           name: fuzz-failures
           path: "**/testdata/fuzz/**"
           if-no-files-found: ignore
+
+  web:
+    name: web dashboard
+    # D7. Runs on every push and PR rather than behind a path filter: it takes about a minute,
+    # needs no secrets, and a job that is skipped cannot be a required check that stays green.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install (lockfile only)
+        run: npm ci
+
+      - name: no Go files under node_modules
+        # gofmt -l ., go vet ./..., go list ./... and the README count walks all descend into
+        # web/node_modules. An npm package that ships a .go file (ESLint's flatted did) would
+        # change what they see. See docs/web.md.
+        run: npm run check:no-go
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: unit tests
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      - name: no secret-looking strings in the bundle
+        run: npm run check:dist
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: contract test against the real demo gateway
+        # The in-process mock behind `npm test` is checked against the real internal/gateway
+        # (in-memory fakecluster build, no AWS) so the two cannot drift apart unnoticed.
+        run: |
+          scripts/dev-gateway.sh http://localhost:5173 > "$RUNNER_TEMP/gateway.log" 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/healthz
+          CONTRACT_GATEWAY=http://127.0.0.1:8080 npm run test:contract
