@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 
 func runServer(t *testing.T, dir string, args ...string) (stdout string, code int) {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], append([]string{"--"}, args...)...)
+	cmd := exec.Command(os.Args[0], append([]string{"--"}, args...)...) //nolint:gosec // re-runs this test binary with test-controlled arguments
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "RAFTKV_TEST_AS_MAIN=1")
 	var out bytes.Buffer
