@@ -283,7 +283,13 @@ func TestCrashedNodeYieldsNodeDownThenUp(t *testing.T) {
 
 func TestPollerSynthesizesSnapshotAndCommitEvents(t *testing.T) {
 	e := newEnv(t)
-	e.start()
+	// No e.start(): Start runs the start-up heal, which ends in a PollOnce at an
+	// unpredictable moment. Landing between the first put and the clock advance
+	// below, that poll publishes a commit event at the old fake time and the
+	// test's own poll, two seconds later, is then legitimately due for another
+	// (seen in CI: "2 commit events for node 1 within one second"). This test
+	// drives every poll itself and needs neither the heal nor the upstream
+	// streams.
 	c := e.connect(ip(1))
 	e.pollAll()
 	e.fc.SetSnapshotIndex(7)
