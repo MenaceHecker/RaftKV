@@ -112,6 +112,11 @@ func TestLargeConcurrentWritesReplicate(t *testing.T) {
 	)
 	value := bytes.Repeat([]byte("x"), valueSize)
 
+	// Recorded for the failure message: a leader that loses leadership during
+	// the burst ("raft: node is not the leader" in CI) shows up as a higher term
+	// on some node in the dump.
+	before := leader.Status()
+
 	errs := make(chan error, writers)
 	gate := make(chan struct{})
 	for i := range writers {
@@ -129,7 +134,8 @@ func TestLargeConcurrentWritesReplicate(t *testing.T) {
 
 	for range writers {
 		if err := <-errs; err != nil {
-			t.Fatalf("concurrent large write: %v", err)
+			t.Fatalf("concurrent large write: %v\nbefore the burst: node %d %s at term %d (commit %d)\n%s",
+				err, before.ID, before.State, before.Term, before.Commit, c.dump())
 		}
 	}
 
