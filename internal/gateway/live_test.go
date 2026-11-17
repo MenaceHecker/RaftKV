@@ -403,6 +403,10 @@ func TestLiveOneUpstreamEventsStreamPerNodeRegardlessOfSubscribers(t *testing.T)
 	}
 	r.waitSubscribed(1, 1)
 	r.waitSubscribed(2, 1)
+	// Node 3 has no local subscriber, but the relay still opens its upstream
+	// stream, asynchronously; the final check below expects exactly one, so wait
+	// for it too (seen in CI: "node 3 saw 0 Events subscriptions").
+	r.waitSubscribed(3, 1)
 	t1, t2 := r.poke(1), r.poke(2)
 	for i, ch := range chans {
 		want := t1
