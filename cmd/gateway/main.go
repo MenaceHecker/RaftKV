@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MenaceHecker/raftkv/internal/buildinfo"
 	"github.com/MenaceHecker/raftkv/internal/gateway"
 )
 
@@ -119,6 +120,10 @@ func (systemRand) Uint64() uint64 {
 }
 
 func run(ctx context.Context, args []string, logger *slog.Logger) error {
+	// -version must work without token files or --state-dir, so it comes before loadSettings.
+	if buildinfo.HandleFlag("gateway", args, os.Stdout) {
+		return nil
+	}
 	s, err := loadSettings(args)
 	if err != nil {
 		return err
