@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"google.golang.org/grpc"
 
+	"github.com/MenaceHecker/raftkv/internal/buildinfo"
 	"github.com/MenaceHecker/raftkv/internal/metrics"
 	"github.com/MenaceHecker/raftkv/internal/node"
 	"github.com/MenaceHecker/raftkv/internal/raft"
@@ -130,6 +131,10 @@ func validateAdminOptions(opt options) (token string, err error) {
 }
 
 func run() error {
+	// -version must work with no other flag or file, so it comes before flag parsing.
+	if buildinfo.HandleFlag("raftkv-server", os.Args[1:], os.Stdout) {
+		return nil
+	}
 	var opt options
 
 	defineFlags(flag.CommandLine, &opt)

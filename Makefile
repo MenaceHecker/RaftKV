@@ -1,5 +1,5 @@
 # Gates from RUNBOOK 6.1, mapped to the real packages (see docs/STATUS.md).
-.PHONY: fmt vet lint test test-flaky cover proto chaos-smoke readme-counts readme-check sync-main
+.PHONY: fmt vet lint test test-flaky cover proto chaos-smoke readme-counts readme-check sync-main release release-upload
 
 # Generated protobuf code is excluded, as in .github/workflows/ci.yml.
 GOFILES = $(shell find . -name "*.go" -not -name "*.pb.go" -not -path "./.git/*")
@@ -46,3 +46,15 @@ readme-check:
 # merge commit when README.md is the only conflict.
 sync-main:
 	scripts/sync-main.sh
+
+# Reproducible linux/arm64 release build into dist/<version>/ (RUNBOOK 10.3 D3). BUILD ONLY: no AWS,
+# never uploads. Needs a clean tree (ALLOW_DIRTY=1 gives a -dirty build that can never be uploaded).
+release:
+	scripts/release.sh
+
+# Upload a verified dist/<version>/ to S3. Run by a human with an SSO profile, never in CI:
+#   RELEASE_AWS_PROFILE=<sso profile> RELEASE_BUCKET=<bucket> make release-upload RELEASE_DIR=dist/<version>
+# RELEASE_DIR has no default on purpose.
+release-upload:
+	@test -n "$(RELEASE_DIR)" || { echo "release-upload: RELEASE_DIR=dist/<version> is required"; exit 2; }
+	scripts/release-upload.sh "$(RELEASE_DIR)"

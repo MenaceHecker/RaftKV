@@ -25,3 +25,6 @@ coverage.html
 # Dashboard (web/)
 web/node_modules
 web/dist
+
+# Release output (make release)
+/dist/
