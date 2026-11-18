@@ -10,3 +10,4 @@ deploy/
 *.test
 *.out
 coverage.html
+web/
