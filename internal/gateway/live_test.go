@@ -234,8 +234,18 @@ func TestLivePartitionThenClearFaultsRestores(t *testing.T) {
 		}
 		return false
 	})
-	if st, _ := l.Status(ctx, uint64(old)); st.Role != "leader" || st.Term >= newTerm {
-		t.Fatalf("the isolated node %+v should still believe it leads its old term (new term %d)", st, newTerm)
+	// The isolated node has not seen the new term. Its role is not asserted:
+	// nodes run with CheckQuorum, so an isolated leader steps down (to follower,
+	// then pre-candidate, at its old term) within one election timeout, which is
+	// the same timescale as the majority electing a new leader. Whether it is
+	// still leader when this runs depends on scheduling (CI: Role:follower,
+	// Term:1, new term 4). A stale term is the stable proof of the partition.
+	st, err := l.Status(ctx, uint64(old))
+	if err != nil {
+		t.Fatalf("Status of the isolated node: %v", err)
+	}
+	if st.Term >= newTerm {
+		t.Fatalf("the isolated node %+v has seen the new term %d: the partition did not isolate it", st, newTerm)
 	}
 
 	if err := l.ClearFaults(ctx, uint64(old)); err != nil {
