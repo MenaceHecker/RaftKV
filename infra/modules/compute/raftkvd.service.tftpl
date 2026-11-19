@@ -1,0 +1,42 @@
+# RaftKV node ${node_id}. Rendered by Terraform, written by user-data. NO secret here: the two
+# token FILES are put on the node by a human (infra/scripts/push-node-tokens.sh) and only their
+# paths appear below.
+[Unit]
+Description=RaftKV node ${node_id}
+After=network-online.target
+Wants=network-online.target
+# The WAL lives on its own volume. Without the mount, do not start and write it to the root disk.
+RequiresMountsFor=/var/lib/raftkv
+# Fail closed: until both token files exist systemd skips this unit (no crash loop, no admin API
+# or membership change without a token). push-node-tokens.sh creates them and starts the unit.
+ConditionPathExists=/etc/raftkv/node-admin.token
+ConditionPathExists=/etc/raftkv/cluster.token
+
+[Service]
+User=raftkv
+Group=raftkv
+# Timing flags are left at the tested defaults (100 ms tick, 10 election ticks, 1 heartbeat tick:
+# elections after 1.0 to 1.9 s). --fsync is the default; it is written out so it is never off by accident.
+ExecStart=/usr/local/bin/raftkvd \
+  --id ${node_id} \
+  --peers ${peers} \
+  --listen :${raft_port} \
+  --data-dir /var/lib/raftkv \
+  --fsync=true \
+  --admin-listen :${admin_port} \
+  --admin-token-file /etc/raftkv/node-admin.token \
+  --admin-chaos \
+  --cluster-token-file /etc/raftkv/cluster.token \
+  --metrics-listen :${metrics_port}
+# Admin.Crash exits the process on purpose; the demo shows the node down for RestartSec.
+Restart=always
+RestartSec=8
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/raftkv
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

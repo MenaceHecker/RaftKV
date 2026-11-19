@@ -1,0 +1,47 @@
+#!/bin/bash
+# RaftKV node ${node_id}: first-boot setup. Everything here is NON-SECRET: user-data is readable
+# from the instance metadata service and the EC2 console. No token, no password, no SSM call.
+# The two token files are pushed later by a human over EC2 Instance Connect Endpoint
+# (infra/scripts/push-node-tokens.sh); until then the unit is enabled but skipped.
+set -euo pipefail
+export AWS_DEFAULT_REGION=${region}
+
+# --- the data volume (WAL and snapshots), attached to the instance by Terraform ------------------
+# The data volume is the one NVMe disk that is not the root disk. (Its volume id is unknown until
+# apply, so it cannot go into user-data: user-data must be fully known at plan time to be checked.)
+root_src=$(findmnt -n -o SOURCE /)
+root_disk=/dev/$(lsblk -no PKNAME "$root_src")
+dev=""
+for _ in $(seq 1 90); do
+  n=0
+  for d in /dev/nvme[0-9]*n1; do
+    if [ -b "$d" ] && [ "$d" != "$root_disk" ]; then dev=$d; n=$((n + 1)); fi
+  done
+  [ "$n" -ge 1 ] && break
+  sleep 2
+done
+[ "$n" = 1 ] || { echo "expected exactly one data disk besides $root_disk, found $n" >&2; exit 1; }
+blkid "$dev" >/dev/null 2>&1 || mkfs.xfs -L raftkv-data "$dev"
+uuid=$(blkid -s UUID -o value "$dev")
+mkdir -p /var/lib/raftkv
+grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /var/lib/raftkv xfs defaults,nofail 0 2" >> /etc/fstab
+mountpoint -q /var/lib/raftkv || mount /var/lib/raftkv
+
+# --- service user and directories -----------------------------------------------------------------
+id raftkv >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin raftkv
+install -d -m 0700 -o raftkv -g raftkv /var/lib/raftkv
+install -d -m 0750 -o root -g raftkv /etc/raftkv
+
+# --- the binary: S3 through the gateway endpoint, verified against a hash that lives in Terraform --
+work=$(mktemp -d)
+aws s3 cp --only-show-errors "s3://${bucket}/${binary_key}" "$work/raftkvd"
+echo "${sha256}  $work/raftkvd" | sha256sum -c -
+install -m 0755 -o root -g root "$work/raftkvd" /usr/local/bin/raftkvd
+rm -rf "$work"
+
+# --- the unit: enabled, not started (the tokens are not there yet) ---------------------------------
+cat > /etc/systemd/system/raftkvd.service <<'RAFTKV_UNIT'
+${unit}
+RAFTKV_UNIT
+systemctl daemon-reload
+systemctl enable raftkvd

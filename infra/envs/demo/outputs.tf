@@ -44,6 +44,26 @@ output "eice_id" {
 }
 
 output "domain" {
-  description = "Public domain for D6 (to be confirmed)."
+  description = "Public domain (placeholder, to be confirmed). The gateway is api.<domain>."
   value       = var.domain
+}
+
+output "node_instance_ids" {
+  description = "Node instance ids keyed by node id: the arguments of infra/scripts/push-node-tokens.sh, in order."
+  value       = module.compute.node_instance_ids
+}
+
+output "node_private_ips" {
+  description = "Fixed private addresses of the nodes keyed by node id."
+  value       = module.compute.node_private_ips
+}
+
+output "gateway_instance_id" {
+  description = "Gateway instance id."
+  value       = module.compute.gateway_instance_id
+}
+
+output "gateway_public_ip" {
+  description = "Elastic IP of the gateway: create the DNS A record for api.<domain> pointing here (a human does this)."
+  value       = module.compute.gateway_public_ip
 }

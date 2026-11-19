@@ -1,0 +1,56 @@
+#!/bin/bash
+# RaftKV gateway: first-boot setup. Everything here is NON-SECRET: user-data is readable from the
+# instance metadata service and the EC2 console. The two tokens are read from SSM Parameter Store
+# by fetch-gateway-tokens.sh each time the service starts, into a tmpfs, and are not in this file.
+set -euo pipefail
+export AWS_DEFAULT_REGION=${region}
+
+# --- the data volume: key registry (state/) and the autocert cache (autocert/) ------------------------
+# The data volume is the one NVMe disk that is not the root disk. (Its volume id is unknown until
+# apply, so it cannot go into user-data: user-data must be fully known at plan time to be checked.)
+root_src=$(findmnt -n -o SOURCE /)
+root_disk=/dev/$(lsblk -no PKNAME "$root_src")
+dev=""
+for _ in $(seq 1 90); do
+  n=0
+  for d in /dev/nvme[0-9]*n1; do
+    if [ -b "$d" ] && [ "$d" != "$root_disk" ]; then dev=$d; n=$((n + 1)); fi
+  done
+  [ "$n" -ge 1 ] && break
+  sleep 2
+done
+[ "$n" = 1 ] || { echo "expected exactly one data disk besides $root_disk, found $n" >&2; exit 1; }
+blkid "$dev" >/dev/null 2>&1 || mkfs.xfs -L raftkv-gateway "$dev"
+uuid=$(blkid -s UUID -o value "$dev")
+mkdir -p /var/lib/raftkv-gateway
+grep -q "$uuid" /etc/fstab || echo "UUID=$uuid /var/lib/raftkv-gateway xfs defaults,nofail 0 2" >> /etc/fstab
+mountpoint -q /var/lib/raftkv-gateway || mount /var/lib/raftkv-gateway
+
+id raftkv-gw >/dev/null 2>&1 || useradd --system --no-create-home --shell /sbin/nologin raftkv-gw
+install -d -m 0700 -o raftkv-gw -g raftkv-gw /var/lib/raftkv-gateway /var/lib/raftkv-gateway/state /var/lib/raftkv-gateway/autocert
+
+# --- the binary: the Elastic IP is associated a few seconds after launch, so retry the download ----
+work=$(mktemp -d)
+ok=0
+for _ in $(seq 1 30); do
+  if aws s3 cp --only-show-errors "s3://${bucket}/${binary_key}" "$work/gateway"; then ok=1; break; fi
+  sleep 10
+done
+[ "$ok" = 1 ] || { echo "download of the gateway binary failed" >&2; exit 1; }
+echo "${sha256}  $work/gateway" | sha256sum -c -
+install -m 0755 -o root -g root "$work/gateway" /usr/local/bin/gateway
+rm -rf "$work"
+
+# --- the token fetch script (ExecStartPre=+ of the unit) and the unit -------------------------------
+cat > /usr/local/sbin/fetch-gateway-tokens.sh <<'RAFTKV_FETCH'
+${fetch_script}
+RAFTKV_FETCH
+chmod 0750 /usr/local/sbin/fetch-gateway-tokens.sh
+chown root:root /usr/local/sbin/fetch-gateway-tokens.sh
+
+cat > /etc/systemd/system/gateway.service <<'RAFTKV_UNIT'
+${unit}
+RAFTKV_UNIT
+systemctl daemon-reload
+# Starts once the two SecureStrings exist; until then the pre-start script fails and systemd retries.
+systemctl enable --now gateway
