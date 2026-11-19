@@ -33,7 +33,7 @@ run "state_bucket_versioned_and_encrypted" {
     error_message = "expected a versioning resource for each of the two buckets"
   }
   assert {
-    condition     = alltrue([for e in aws_s3_bucket_server_side_encryption_configuration.this : e.rule[0].apply_server_side_encryption_by_default[0].sse_algorithm == "AES256"]) && length(aws_s3_bucket_server_side_encryption_configuration.this) == 2
+    condition     = alltrue([for e in aws_s3_bucket_server_side_encryption_configuration.this : one(one(e.rule).apply_server_side_encryption_by_default).sse_algorithm == "AES256"]) && length(aws_s3_bucket_server_side_encryption_configuration.this) == 2
     error_message = "both buckets need server-side encryption (SSE-S3)"
   }
   assert {
@@ -124,7 +124,7 @@ run "anomaly_monitor_exists" {
     error_message = "the anomaly subscription must email var.alert_email"
   }
   assert {
-    condition     = one(aws_ce_anomaly_subscription.email.threshold_expression).dimension[0].key == "ANOMALY_TOTAL_IMPACT_ABSOLUTE" && one(aws_ce_anomaly_subscription.email.threshold_expression).dimension[0].values == ["5"]
+    condition     = one(aws_ce_anomaly_subscription.email.threshold_expression).dimension[0].key == "ANOMALY_TOTAL_IMPACT_ABSOLUTE" && one(aws_ce_anomaly_subscription.email.threshold_expression).dimension[0].values == toset(["5"])
     error_message = "the default anomaly threshold is USD 5 of absolute total impact"
   }
 }
