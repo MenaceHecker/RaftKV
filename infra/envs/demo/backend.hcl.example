@@ -1,0 +1,4 @@
+# Copy to backend.hcl (gitignored) and fill in from `terraform output` in infra/bootstrap:
+#   cp backend.hcl.example backend.hcl
+bucket = "raftkv-tfstate-<account id>-us-east-1" # output state_bucket
+region = "us-east-1"
