@@ -103,7 +103,14 @@ func TestFollowerCatchesUpFromALargeBacklog(t *testing.T) {
 }
 
 func TestLargeConcurrentWritesReplicate(t *testing.T) {
-	c := newGRPCCluster(t, 3)
+	// This test pushes about 6 MiB through the leader in one burst. With the default
+	// 100 to 190 ms election timeout, a follower on a CPU-starved CI runner can
+	// time out while a 1 MiB append is still in flight, win an election, and depose
+	// the leader mid-burst: "raft: node is not the leader", with the dump showing
+	// the old leader a follower at a higher term and only the new leader's no-op
+	// committed. The test is about replication, not elections, so it runs with a
+	// 500 to 1000 ms timeout.
+	c := newGRPCClusterWithElection(t, 3, 50)
 	leader := c.awaitLeader()
 
 	const (

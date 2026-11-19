@@ -38,19 +38,38 @@ type grpcCluster struct {
 	servers    map[raft.NodeID]*grpc.Server
 
 	conns map[raft.NodeID]*grpc.ClientConn
+
+	// electionTick is the election timeout in 10 ms ticks (randomised to between
+	// one and two times this).
+	electionTick int
 }
+
+// defaultElectionTick gives the 100 to 190 ms election timeout most transport
+// tests run with.
+const defaultElectionTick = 10
 
 func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 	t.Helper()
+	return newGRPCClusterWithElection(t, size, defaultElectionTick)
+}
+
+// newGRPCClusterWithElection is newGRPCCluster with a chosen election timeout,
+// for tests that push megabytes through the leader: with the default 100 to
+// 190 ms timeout a follower can time out while one 1 MiB append is still in
+// flight on a CPU-starved runner, depose the leader, and fail a test that is
+// about replication, not elections.
+func newGRPCClusterWithElection(t *testing.T, size, electionTick int) *grpcCluster {
+	t.Helper()
 
 	c := &grpcCluster{
-		t:          t,
-		addrs:      make(map[raft.NodeID]string, size),
-		dataDirs:   make(map[raft.NodeID]string, size),
-		nodes:      make(map[raft.NodeID]*node.Node, size),
-		transports: make(map[raft.NodeID]*PeerTransport, size),
-		servers:    make(map[raft.NodeID]*grpc.Server, size),
-		conns:      make(map[raft.NodeID]*grpc.ClientConn, size),
+		t:            t,
+		electionTick: electionTick,
+		addrs:        make(map[raft.NodeID]string, size),
+		dataDirs:     make(map[raft.NodeID]string, size),
+		nodes:        make(map[raft.NodeID]*node.Node, size),
+		transports:   make(map[raft.NodeID]*PeerTransport, size),
+		servers:      make(map[raft.NodeID]*grpc.Server, size),
+		conns:        make(map[raft.NodeID]*grpc.ClientConn, size),
 	}
 	for i := range size {
 		c.ids = append(c.ids, raft.NodeID(i+1))
@@ -83,7 +102,7 @@ func newGRPCCluster(t *testing.T, size int) *grpcCluster {
 			DataDir:       c.dataDirs[id],
 			Transport:     tr,
 			TickInterval:  10 * time.Millisecond,
-			ElectionTick:  10,
+			ElectionTick:  c.electionTick,
 			HeartbeatTick: 1,
 			Sync:          storage.SyncNever,
 		})
