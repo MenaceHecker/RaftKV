@@ -2,7 +2,8 @@
 // a dashboard, with the abuse controls of RUNBOOK 10.6, in front of the
 // cluster behind the gateway.Cluster interface.
 //
-// It serves plain HTTP; TLS is D6. It talks to the real cluster named by
+// It serves plain HTTP by default (local use) and HTTPS through Let's Encrypt
+// autocert when --tls-domain is set (tls.go). It talks to the real cluster named by
 // --nodes through gateway.Live. An in-memory demo cluster (--fake-cluster)
 // exists only in binaries built with -tags fakecluster.
 package main
@@ -36,7 +37,8 @@ type settings struct {
 	stateDir        string
 	dashboardOrigin string
 	keyspaceReset   time.Duration
-	fakeCluster     bool // set only by a -tags fakecluster build
+	tls             tlsSettings // zero value: plain HTTP
+	fakeCluster     bool        // set only by a -tags fakecluster build
 }
 
 // loadSettings parses and validates the flags. It fails closed: both token
@@ -47,13 +49,14 @@ func loadSettings(args []string) (*settings, error) {
 	var adminFile, nodeFile, nodeList string
 	fs := flag.NewFlagSet("gateway", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	fs.StringVar(&s.listen, "listen", ":8080", "HTTP listen address (TLS is D6)")
+	fs.StringVar(&s.listen, "listen", ":8080", "listen address: plain HTTP, or HTTPS when --tls-domain is set")
 	fs.StringVar(&nodeList, "nodes", "", "the cluster as id=az=addr=adminaddr,... (addr: gRPC, adminaddr: admin API)")
 	fs.StringVar(&adminFile, "admin-token-file", "", "file holding the HTTP admin Bearer token (mode 0600)")
 	fs.StringVar(&nodeFile, "node-token-file", "", "file holding the machine token for node admin RPCs (mode 0600)")
 	fs.StringVar(&s.stateDir, "state-dir", "", "directory for the key registry")
 	fs.StringVar(&s.dashboardOrigin, "dashboard-origin", "", "the one origin allowed by CORS, e.g. https://dash.example.com")
 	fs.DurationVar(&s.keyspaceReset, "public-keyspace-reset", gateway.DefaultReset, "how often the public keyspace is wiped")
+	defineTLSFlags(fs, &s.tls)
 	defineDemoFlags(fs, &s) // only a -tags fakecluster build defines --fake-cluster
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -74,6 +77,9 @@ func loadSettings(args []string) (*settings, error) {
 	}
 	if err := os.MkdirAll(s.stateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("--state-dir: %w", err)
+	}
+	if err := validateTLS(fs, &s.tls, s.stateDir, s.listen); err != nil {
+		return nil, err
 	}
 	if s.dashboardOrigin, err = gateway.ParseOrigin(s.dashboardOrigin); err != nil {
 		return nil, fmt.Errorf("--dashboard-origin: %w", err)
@@ -164,7 +170,16 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	g.PollOnce(ctx)
 	g.Start(ctx) // safe-start heal and the upstream event streams
 
-	srv := newHTTPServer(s.listen, g.Handler())
+	return serve(ctx, logger, s, g.Handler())
+}
+
+// serve runs the HTTP front until ctx ends: plain HTTP as before, or HTTPS plus
+// the port 80 redirect when --tls-domain is set.
+func serve(ctx context.Context, logger *slog.Logger, s *settings, h http.Handler) error {
+	if s.tls.enabled() {
+		return serveTLSMode(ctx, logger, s, h)
+	}
+	srv := newHTTPServer(s.listen, h)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	logger.Info("listening", "addr", s.listen)
