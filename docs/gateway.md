@@ -52,7 +52,49 @@ flag and does not link the fake. CI vets and tests the tagged variant.
 
 Both token files must exist, be mode 0600, be non-empty and differ from each
 other; any missing flag exits non-zero. `--public-keyspace-reset` defaults to 6h.
-The server is plain HTTP; TLS is D6.
+Without `--tls-domain` the server is plain HTTP on `--listen` (default `:8080`); that is
+the mode for local use and tests. TLS is below.
+
+### TLS (D6)
+
+```
+gateway --listen :443 --tls-domain api.example.com --tls-http-listen :80 \
+  --state-dir /var/lib/raftkv-gateway/state --nodes ... --admin-token-file ... \
+  --node-token-file ... --dashboard-origin https://dash.example.com
+```
+
+`--tls-domain` turns on HTTPS for that one name with Let's Encrypt certificates
+(`golang.org/x/crypto/acme/autocert`). The gateway then serves:
+
+- `--listen` as HTTPS (h2 and HTTP/1.1, TLS 1.2 or newer). Certificates are obtained
+  by TLS-ALPN-01 on this same port, so it must be reachable from the internet on 443
+  (the CA connects to the domain, which therefore must already point at the host).
+  Every response carries `Strict-Transport-Security: max-age=31536000` (no
+  `includeSubDomains`, no `preload`).
+- `--tls-http-listen` (default `:80`) as a redirect only: every request gets `308` to
+  `https://<--tls-domain><path and query>`. The target comes from the flag, never from
+  the `Host` header, and the method is preserved. Nothing else is served there,
+  including no ACME HTTP-01 answer.
+
+| Flag | Meaning |
+|---|---|
+| `--tls-domain` | One fully qualified, lower-case ASCII host name. Empty means plain HTTP. A wildcard, IP address, port, scheme, path or single-label name is refused. The autocert host policy accepts only this name, in any letter case, and no other SNI name gets a certificate. |
+| `--tls-http-listen` | The redirect listener, default `:80`. Must differ from `--listen`. |
+| `--tls-cache-dir` | Where autocert keeps its account key, private keys and certificates. Default `<state-dir>/autocert`. Created mode 0700; an existing directory that group or others can access is refused. Keep it on persistent storage: a lost cache means a new order at every restart and Let's Encrypt rate limits. |
+| `--tls-staging` | Use the Let's Encrypt staging CA (browsers do not trust it) and the subdirectory `<cache dir>/staging`, so a staging certificate is never served once the flag is removed. Use it for the first start. |
+| `--tls-email` | Optional ACME account contact. |
+
+The `--tls-*` flags other than `--tls-domain` are refused without `--tls-domain`
+(fail closed: no silent fall back to plain HTTP). `--dashboard-origin` and its CORS
+rule are unchanged by TLS, and the same handler and timeouts serve both modes.
+Binding 80 and 443 needs `CAP_NET_BIND_SERVICE` (or a root-owned unit with
+`AmbientCapabilities`). The unit file, DNS record and instance are the Terraform half of
+D6, not this binary. Tests use a fake certificate source and never contact an ACME server;
+the first real issuance is a human step.
+
+What stays HTTP-only: running without `--tls-domain`, as in the example at the top, which
+is for `localhost` and the tests. Never expose that mode to the internet: the admin Bearer
+token would cross the network in clear text.
 
 ## Endpoints
 

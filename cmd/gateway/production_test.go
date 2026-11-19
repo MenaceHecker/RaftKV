@@ -35,3 +35,13 @@ func TestProductionBuildDoesNotLinkTheFakeCluster(t *testing.T) {
 		}
 	}
 }
+
+// Adding TLS must not add a way to the fake cluster: with every --tls-* flag in play the
+// untagged binary still refuses --fake-cluster as an undefined flag.
+func TestProductionBuildWithTLSFlagsStillHasNoFakeClusterFlag(t *testing.T) {
+	args, _ := baseArgs(t)
+	_, err := loadSettings(append(args, "--tls-domain=api.example.test", "--tls-staging", "--fake-cluster"))
+	if err == nil || !strings.Contains(err.Error(), "not defined") || !strings.Contains(err.Error(), "fake-cluster") {
+		t.Fatalf("--fake-cluster with TLS flags in an untagged build = %v, want flag provided but not defined", err)
+	}
+}

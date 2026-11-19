@@ -51,7 +51,8 @@ A test fails on any other `import.meta.env.*` read. The admin token is never an 
   `X-Frame-Options: DENY` and a CSP whose `connect-src` is `'self' https://api.raftkv.tushar25.com`
   (**to be confirmed**: change it together with `VITE_GATEWAY_URL` if the API host differs).
 - An https dashboard cannot call an http gateway (mixed content): live production needs the
-  gateway's TLS (D6). Until then the production page falls back to replay.
+  gateway's TLS (D6: `--tls-domain`, see `docs/gateway.md`). A gateway without it, or not yet
+  deployed, leaves the production page in replay.
 - Linking the Vercel project and DNS are the human's (RUNBOOK D7 row, Appendix E).
 
 ## Pinned toolchain
