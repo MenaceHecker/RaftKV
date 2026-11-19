@@ -45,9 +45,9 @@ Connect Endpoint are free.
    terraform init -backend-config=backend.hcl
    terraform plan -out=demo.plan
    ```
-   Read the plan (about 25 resources: VPC, 4 subnets, 4 route tables, 1 internet gateway, 1 S3
-   endpoint, 1 Instance Connect Endpoint, 3 security groups, 14 rules, and **no** `aws_nat_gateway`,
-   no route on the private route tables). Then `terraform apply demo.plan`. Cost: about $0 (no NAT,
+   Read the plan (33 resources: VPC, internet gateway, 4 subnets, 4 route tables with 4
+   associations, 1 route (public only), S3 endpoint, Instance Connect Endpoint, 3 security groups and
+   13 rules; **no** `aws_nat_gateway` and no route on the private route tables). Then `terraform apply demo.plan`. Cost: about $0 (no NAT,
    no compute; confirm in the AWS Pricing Calculator).
 5. **Upload a release** (task D3, `scripts/release-upload.sh`) into `s3://<artifacts bucket>/artifacts/raftkvd/<version>/`
    and `.../artifacts/gateway/<version>/`. Nothing reads them yet (D4).
@@ -156,7 +156,7 @@ tflint runs in CI only. checkov and tfsec are not used.
 ## Cost
 
 Network: about $0 (no NAT gateway, no public IPv4, free S3 gateway endpoint and Instance Connect
-Endpoint). Buckets and budgets: cents. AWS Budgets allow two budgets free per account. The ceiling
+Endpoint). Buckets and budgets: cents. Check current AWS Budgets and Cost Explorer pricing for your account. The ceiling
 and teardown policy for the whole demo is RUNBOOK 10.9: USD 40 per month gross; the budget alerts
 at 20, 30, 40 (actual) and at a 100 percent forecast, and excludes credits so it shows gross burn.
 Verify everything in the AWS Pricing Calculator before D4.
