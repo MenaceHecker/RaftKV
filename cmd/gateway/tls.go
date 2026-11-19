@@ -64,7 +64,7 @@ func validateTLS(fs *flag.FlagSet, t *tlsSettings, stateDir, listen string) erro
 	t.domain = strings.TrimSpace(t.domain)
 	if t.domain == "" {
 		if len(given) > 0 {
-			return fmt.Errorf("%s need --tls-domain: refusing to fall back to plain HTTP", strings.Join(given, ", "))
+			return fmt.Errorf("%s given without --tls-domain: refusing to fall back to plain HTTP", strings.Join(given, ", "))
 		}
 		return nil
 	}
