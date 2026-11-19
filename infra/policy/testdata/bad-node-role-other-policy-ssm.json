@@ -1,0 +1,19 @@
+{
+  "format_version": "1.2",
+  "_expect": "ssm permission is allowed only",
+  "resource_changes": [
+    {
+      "address": "aws_iam_role_policy.extra",
+      "type": "aws_iam_role_policy",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ssm:GetParameter\"],\"Resource\":[\"arn:aws:ssm:us-east-1:111111111111:parameter/raftkv/cluster-token\"]}]}\n"
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

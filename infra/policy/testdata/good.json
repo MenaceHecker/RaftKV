@@ -121,6 +121,151 @@
         },
         "after_unknown": {}
       }
+    },
+    {
+      "address": "aws_iam_role_policy.gateway",
+      "type": "aws_iam_role_policy",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],\"Resource\":[\"arn:aws:s3:::raftkv-artifacts-111111111111-us-east-1/artifacts/gateway/*\"]},{\"Effect\":\"Allow\",\"Action\":[\"ssm:GetParameter\"],\"Resource\":[\"arn:aws:ssm:us-east-1:111111111111:parameter/raftkv/admin-token\",\"arn:aws:ssm:us-east-1:111111111111:parameter/raftkv/node-admin-token\"]}]}\n"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_instance.node[\"0\"]",
+      "type": "aws_instance",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "instance_type": "t4g.micro",
+          "associate_public_ip_address": false,
+          "metadata_options": [
+            {
+              "http_endpoint": "enabled",
+              "http_tokens": "required",
+              "http_put_response_hop_limit": 1
+            }
+          ],
+          "credit_specification": [
+            {
+              "cpu_credits": "standard"
+            }
+          ],
+          "root_block_device": [
+            {
+              "encrypted": true,
+              "volume_type": "gp3",
+              "volume_size": 8
+            }
+          ],
+          "ebs_block_device": [],
+          "user_data": "#!/bin/bash\nset -euo pipefail\nexport AWS_DEFAULT_REGION=us-east-1\naws s3 cp s3://raftkv-artifacts-111111111111-us-east-1/artifacts/raftkvd/v1/raftkv-server-linux-arm64 /tmp/f\necho \"0000000000000000000000000000000000000000000000000000000000000000  /tmp/f\" | sha256sum -c -\n"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_instance.gateway",
+      "type": "aws_instance",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "instance_type": "t4g.micro",
+          "associate_public_ip_address": false,
+          "metadata_options": [
+            {
+              "http_endpoint": "enabled",
+              "http_tokens": "required",
+              "http_put_response_hop_limit": 1
+            }
+          ],
+          "credit_specification": [
+            {
+              "cpu_credits": "standard"
+            }
+          ],
+          "root_block_device": [
+            {
+              "encrypted": true,
+              "volume_type": "gp3",
+              "volume_size": 8
+            }
+          ],
+          "ebs_block_device": [],
+          "user_data": "#!/bin/bash\nset -euo pipefail\nexport AWS_DEFAULT_REGION=us-east-1\naws s3 cp s3://raftkv-artifacts-111111111111-us-east-1/artifacts/raftkvd/v1/raftkv-server-linux-arm64 /tmp/f\necho \"0000000000000000000000000000000000000000000000000000000000000000  /tmp/f\" | sha256sum -c -\n"
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.node[\"0\"]",
+      "type": "aws_ebs_volume",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "encrypted": true,
+          "type": "gp3",
+          "size": 8
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_ebs_volume.gateway",
+      "type": "aws_ebs_volume",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "encrypted": true,
+          "type": "gp3",
+          "size": 2
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_vpc_security_group_ingress_rule.nodes[\"ssh_from_eice\"]",
+      "type": "aws_vpc_security_group_ingress_rule",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "referenced_security_group_id": "sg-0abc",
+          "ip_protocol": "tcp",
+          "from_port": 22,
+          "to_port": 22
+        },
+        "after_unknown": {}
+      }
+    },
+    {
+      "address": "aws_vpc_security_group_ingress_rule.nodes[\"admin_from_gateway\"]",
+      "type": "aws_vpc_security_group_ingress_rule",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "referenced_security_group_id": "sg-0def",
+          "ip_protocol": "tcp",
+          "from_port": 9000,
+          "to_port": 9000
+        },
+        "after_unknown": {}
+      }
     }
   ]
 }

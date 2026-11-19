@@ -1,0 +1,19 @@
+{
+  "format_version": "1.2",
+  "_expect": "kms permission is not granted",
+  "resource_changes": [
+    {
+      "address": "aws_iam_role_policy.gateway",
+      "type": "aws_iam_role_policy",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"kms:Decrypt\"],\"Resource\":[\"arn:aws:kms:us-east-1:111111111111:key/1234abcd-12ab-34cd-56ef-1234567890ab\"]}]}\n"
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

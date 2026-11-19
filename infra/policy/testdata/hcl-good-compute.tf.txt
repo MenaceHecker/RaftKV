@@ -1,0 +1,12 @@
+# Must pass: the public AMI parameter is the only SSM data source allowed, and the node
+# instance never replaces itself on an AMI or user-data change.
+data "aws_ssm_parameter" "al2023_arm64" {
+  name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
+}
+
+resource "aws_instance" "node" {
+  for_each = {}
+  lifecycle {
+    ignore_changes = [ami, user_data]
+  }
+}

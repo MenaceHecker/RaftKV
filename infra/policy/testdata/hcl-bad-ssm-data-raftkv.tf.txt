@@ -1,0 +1,4 @@
+# expect: SSM parameters and secrets
+data "aws_ssm_parameter" "t" {
+  name = "/raftkv/node-admin-token"
+}

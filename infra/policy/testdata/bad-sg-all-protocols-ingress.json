@@ -1,0 +1,20 @@
+{
+  "format_version": "1.2",
+  "_expect": "ingress covering port 22 is allowed only from sg_eice",
+  "resource_changes": [
+    {
+      "address": "aws_vpc_security_group_ingress_rule.nodes[\"any\"]",
+      "type": "aws_vpc_security_group_ingress_rule",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "referenced_security_group_id": "sg-0abc",
+          "ip_protocol": "-1"
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}
