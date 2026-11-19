@@ -1,0 +1,5 @@
+resource "aws_nat_gateway" "x" {}
+resource "aws_iam_user" "u" {}
+resource "aws_iam_access_key" "k" {}
+locals { p = { Action = "*", Resource = "*" } }
+resource "aws_iam_role_policy" "r" { policy = jsonencode({ Statement = [{ Action = ["iam:*"], Resource = "arn:aws:s3:::b/k" }] }) }

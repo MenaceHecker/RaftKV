@@ -27,7 +27,17 @@ fi
 
 # A missing file or invalid JSON must not read as "clean".
 if ./check.sh testdata/does-not-exist.json >/dev/null 2>&1; then echo "FAIL missing file exited 0"; fail=1; else echo "ok   missing file refused"; fi
-echo '{not json' > "${TMPDIR:-/tmp}/policy-selftest-$$.json"
-if ./check.sh "${TMPDIR:-/tmp}/policy-selftest-$$.json" >/dev/null 2>&1; then echo "FAIL invalid json exited 0"; fail=1; else echo "ok   invalid json refused"; fi
+tmpjson=$(mktemp "${TMPDIR:-/tmp}/policy-selftest.XXXXXX")
+echo '{not json' > "$tmpjson"
+if ./check.sh "$tmpjson" >/dev/null 2>&1; then echo "FAIL invalid json exited 0"; fail=1; else echo "ok   invalid json refused"; fi
+rm -f "$tmpjson"
+
+# --hcl mode: forbidden resource types and literal wildcards in a copy of testdata/hcl-bad.tf.txt
+# must fail; the real infra tree must pass.
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/policy-selftest-hcl.XXXXXX")
+cp testdata/hcl-bad.tf.txt "$tmp/bad.tf"
+if ./check.sh --hcl "$tmp" >/dev/null 2>&1; then echo "FAIL --hcl accepted testdata/hcl-bad.tf.txt"; fail=1; else echo "ok   --hcl rejects testdata/hcl-bad.tf.txt"; fi
+rm -r "$tmp"
+if out=$(./check.sh --hcl .. 2>&1); then echo "ok   --hcl accepts the infra tree"; else echo "FAIL --hcl rejected the infra tree:"; echo "$out"; fail=1; fi
 
 exit "$fail"
