@@ -85,16 +85,19 @@ func (s *spyAdminNode) Pause(d time.Duration) time.Duration {
 	return s.Node.Pause(d)
 }
 
+// Subscribe counts an attempt and its outcome in ONE critical section, after the
+// real call returns. Counting the attempt first and the refusal later left a
+// window in which a poller (tryEventsOn) saw an attempt with no refusal yet and
+// took a stream that was about to be refused for an admitted one: "admitted past
+// the cap" in CI.
 func (s *spyAdminNode) Subscribe() (*node.Subscription, error) {
+	sub, err := s.Node.Subscribe()
 	s.mu.Lock()
 	s.subs++
-	s.mu.Unlock()
-	sub, err := s.Node.Subscribe()
 	if err != nil {
-		s.mu.Lock()
 		s.refused++
-		s.mu.Unlock()
 	}
+	s.mu.Unlock()
 	return sub, err
 }
 
