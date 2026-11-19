@@ -28,3 +28,15 @@ web/dist
 
 # Release output (make release)
 /dist/
+
+# Terraform (infra/): state, plans, local backend config and variable files never enter git.
+# .terraform.lock.hcl IS committed (provider pins).
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.plan
+crash.log
+*.tfvars
+*.tfvars.json
+.terraform/
+backend.hcl
