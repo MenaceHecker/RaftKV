@@ -1,0 +1,43 @@
+# RaftKV gateway. Rendered by Terraform, written by user-data. NO secret here: the two token files
+# are written to a tmpfs RuntimeDirectory by the ExecStartPre=+ script just before each start.
+[Unit]
+Description=RaftKV gateway
+After=network-online.target
+Wants=network-online.target
+# Registry and certificate cache live on their own volume; never start without it.
+RequiresMountsFor=/var/lib/raftkv-gateway
+
+[Service]
+User=raftkv-gw
+Group=raftkv-gw
+Environment=AWS_DEFAULT_REGION=${region}
+# /run/raftkv-gateway: tmpfs, created fresh and removed on stop, owner-only. The fetch script runs
+# as root (the + prefix), reads the two SecureStrings with the instance profile and writes the token
+# files with umask 077; nothing reaches disk, a command line or the journal.
+RuntimeDirectory=raftkv-gateway
+RuntimeDirectoryMode=0700
+ExecStartPre=+/usr/local/sbin/fetch-gateway-tokens.sh
+# Ports 80 and 443 need CAP_NET_BIND_SERVICE for a non-root user.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=/usr/local/bin/gateway \
+  --listen :443 \
+  --tls-domain ${domain} \
+  --tls-http-listen :80 \
+  --tls-cache-dir /var/lib/raftkv-gateway/autocert \
+  --state-dir /var/lib/raftkv-gateway/state \
+  --admin-token-file /run/raftkv-gateway/admin.token \
+  --node-token-file /run/raftkv-gateway/node.token \
+  --nodes ${nodes} \
+  %{ if tls_staging } --tls-staging %{ endif } \
+  --dashboard-origin ${origin}
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/raftkv-gateway
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

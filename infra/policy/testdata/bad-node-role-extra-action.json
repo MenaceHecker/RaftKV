@@ -1,0 +1,19 @@
+{
+  "format_version": "1.2",
+  "_expect": "node role may only allow s3:GetObject",
+  "resource_changes": [
+    {
+      "address": "aws_iam_role_policy.node",
+      "type": "aws_iam_role_policy",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::b/artifacts/raftkvd/*\"]}]}\n"
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

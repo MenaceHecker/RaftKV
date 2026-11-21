@@ -1,0 +1,6 @@
+# expect: SSM parameters and secrets
+resource "aws_ssm_parameter" "t" {
+  name  = "/raftkv/admin-token"
+  type  = "SecureString"
+  value = "x"
+}

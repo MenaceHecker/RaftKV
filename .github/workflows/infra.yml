@@ -1,4 +1,4 @@
-# Credential-free checks for infra/ (RUNBOOK 10.3 D1/D2). Nothing here talks to AWS: no
+# Credential-free checks for infra/ (RUNBOOK 10.3 D1, D2, D4). Nothing here talks to AWS: no
 # credentials, no secrets, no OIDC role, no `terraform plan`, no backend. Provider plugins come
 # from the public registry and are verified against the committed .terraform.lock.hcl files
 # (-lockfile=readonly), so a provider upgrade is always an explicit commit. Applying is a human
@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: [infra/bootstrap, infra/modules/network, infra/envs/demo]
+        dir: [infra/bootstrap, infra/modules/network, infra/modules/compute, infra/envs/demo]
     defaults:
       run:
         working-directory: ${{ matrix.dir }}
@@ -49,7 +49,7 @@ jobs:
         run: terraform validate
 
       - name: terraform test (mock provider)
-        # bootstrap and the network module have tests/; envs/demo has none.
+        # bootstrap, the network module and the compute module have tests/; envs/demo has none.
         run: |
           if [ -d tests ]; then
             terraform test
@@ -68,6 +68,20 @@ jobs:
 
       - name: forbidden resources and literal wildcards in the sources
         run: infra/policy/check.sh --hcl infra
+
+  scripts:
+    name: token scripts (stub aws and ssh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # The tests put STUB aws, ssh, sudo, chown and systemctl first on PATH: nothing reaches AWS or a
+      # host, and the assertions fail if any token value shows up in a logged command line or output.
+      - name: fetch-gateway-tokens.sh
+        run: bash infra/scripts/fetch-gateway-tokens_test.sh
+
+      - name: push-node-tokens.sh
+        run: bash infra/scripts/push-node-tokens_test.sh
 
   tflint:
     name: tflint

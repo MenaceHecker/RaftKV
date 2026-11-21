@@ -1,0 +1,20 @@
+{
+  "format_version": "1.2",
+  "_expect": "SSM parameters and secrets are created by the human",
+  "resource_changes": [
+    {
+      "address": "aws_ssm_parameter.admin_token",
+      "type": "aws_ssm_parameter",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "name": "/raftkv/admin-token",
+          "type": "SecureString"
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

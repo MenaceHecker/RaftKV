@@ -1,0 +1,23 @@
+{
+  "format_version": "1.2",
+  "_expect": "ingress covering port 22 is allowed only from sg_eice",
+  "resource_changes": [
+    {
+      "address": "aws_security_group_rule.nodes_ssh",
+      "type": "aws_security_group_rule",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "type": "ingress",
+          "source_security_group_id": "sg-0abc",
+          "protocol": "tcp",
+          "from_port": 22,
+          "to_port": 22
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

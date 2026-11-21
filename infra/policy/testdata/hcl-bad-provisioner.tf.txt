@@ -1,0 +1,6 @@
+# expect: provisioner
+resource "aws_instance" "x" {
+  provisioner "remote-exec" {
+    inline = ["echo hi"]
+  }
+}

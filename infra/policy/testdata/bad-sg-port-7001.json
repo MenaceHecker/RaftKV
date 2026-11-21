@@ -1,0 +1,22 @@
+{
+  "format_version": "1.2",
+  "_expect": "port 7001 is not used",
+  "resource_changes": [
+    {
+      "address": "aws_vpc_security_group_ingress_rule.nodes[\"client\"]",
+      "type": "aws_vpc_security_group_ingress_rule",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "referenced_security_group_id": "sg-0abc",
+          "ip_protocol": "tcp",
+          "from_port": 7001,
+          "to_port": 7001
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

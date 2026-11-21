@@ -1,0 +1,41 @@
+{
+  "format_version": "1.2",
+  "_expect": "cpu_credits must be standard",
+  "resource_changes": [
+    {
+      "address": "aws_instance.gateway",
+      "type": "aws_instance",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "after": {
+          "instance_type": "t4g.micro",
+          "associate_public_ip_address": false,
+          "metadata_options": [
+            {
+              "http_endpoint": "enabled",
+              "http_tokens": "required",
+              "http_put_response_hop_limit": 1
+            }
+          ],
+          "credit_specification": [
+            {
+              "cpu_credits": "unlimited"
+            }
+          ],
+          "root_block_device": [
+            {
+              "encrypted": true,
+              "volume_type": "gp3",
+              "volume_size": 8
+            }
+          ],
+          "ebs_block_device": [],
+          "user_data": "#!/bin/bash\nset -euo pipefail\necho hello\n"
+        },
+        "after_unknown": {}
+      }
+    }
+  ]
+}

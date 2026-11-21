@@ -1,0 +1,7 @@
+# expect: ignore_changes
+resource "aws_instance" "node" {
+  for_each = {}
+  lifecycle {
+    ignore_changes = [ami]
+  }
+}
