@@ -182,3 +182,19 @@ func TestIsTestName(t *testing.T) {
 		}
 	}
 }
+
+// Regression: an import block has no names, and a new file's hunk covers its imports. That must
+// select the tests of that file only, not every test of the package (found when one new test in
+// internal/transport selected all 110).
+func TestSelectNewFileSelectsOnlyItsOwnTests(t *testing.T) {
+	newFile := "package p\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {}\n"
+	files := memSource{"internal/x/x_test.go": sample, "internal/x/new_test.go": newFile}
+	c := change{files: []string{"internal/x/new_test.go"}, hunks: []hunk{{"internal/x/new_test.go", 1, 5}}}
+	s, err := Select(c, files, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Tests["./internal/x"]; !reflect.DeepEqual(got, []string{"TestNew"}) {
+		t.Fatalf("got %v", got)
+	}
+}
