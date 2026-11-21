@@ -11,8 +11,8 @@ ru() { run_script bash "$script" --bucket "$BUCKET" --dist "$dist" --timeout 10 
 b2s() { [ "$1" = 0 ] && echo true || echo false; }
 violations_empty() { [ ! -s "$sb/violations" ]; }
 all_at_target() { local n; for n in 1 2 3; do [ "$(cat "$sb/cluster/$n/sha")" = "$TARGET_SHA" ] || return 1; done; }
-no_remote_write_for() { # no write command went to slot $1
-  ! remote_log | grep -E "$write_re" | grep -q "i-0aaa1111bbbb2222$(echo c d e | cut -d' ' -f"$1")"
+no_remote_write_for() { # no CHANGE (swap, restart, rollback) went to slot $1; staging is allowed, it precedes any restart
+  ! remote_log | grep -E 'systemctl| mv |cp -p|install ' | grep -q "i-0aaa1111bbbb2222$(echo c d e | cut -d' ' -f"$1")"
 }
 
 # --- success: order, staging first, never two down ---------------------------------------------
