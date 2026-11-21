@@ -275,7 +275,7 @@ sections 11 to 15 are in card order (T3.9, T3.10, T3.18, T3.20, T4.7), 16 covers
   `maybeSnapshot` still ignores errors from `kv.Snapshot()` and `ConfStateAt`.
 - **Storage hardening is deferred, not done:** T3.12 (fsync in `roll()`), T3.13 (durable creation of data, wal and snap directories), T3.14 (oversize WAL entries and proposals), T3.15 (`SnapshotsKept`, snapshot vs purge race).
 - **Crash testing is a model.** `faultfs` is stricter than POSIX requires but has not been compared with a real kernel or a real power cut; no cross-file reordering, no mid-log bit rot.
-- **No real-time or multi-process chaos.** The simulator runs on virtual ticks in one process; the admin API exists to drive real clusters, but the gateway and the demo that would do so (D5, D5b) are not built.
+- **No real-time or multi-process chaos run has happened yet.** The simulator runs on virtual ticks in one process. The admin API, the gateway (core, live adapter, chaos controller, verify runner, TLS) and the Terraform to run them on AWS are built and tested against stubs and an in-memory cluster, but nothing has been applied or run on real infrastructure; the live verification run (D8) is the remaining step.
 - **Removed nodes** still answer vote requests and appends until they learn of their removal; non-member vote rejection (dissertation section 4.2.3) is not implemented (section 10).
 - **Election timeout** defaults to 1.0-1.9 s, not the RUNBOOK's 600-1200ms (section 4, item 16).
 
