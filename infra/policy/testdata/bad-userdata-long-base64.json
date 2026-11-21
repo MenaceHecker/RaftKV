@@ -32,7 +32,7 @@
             }
           ],
           "ebs_block_device": [],
-          "user_data": "#!/bin/bash\nTOKEN=Zm9vYmFyYmF6cXV4cXV1eHF1dXV6enp6enp6enp6enp6enp6enp6\n"
+          "user_data": "#!/bin/bash\nTOKEN=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
         },
         "after_unknown": {}
       }
