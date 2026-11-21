@@ -1,0 +1,24 @@
+package racy
+
+import (
+	"sync"
+	"testing"
+)
+
+// TestRacy has two goroutines write one int with no synchronisation. The race detector
+// reports it on the first run; a plain build usually passes, which is how real races hide.
+func TestRacy(t *testing.T) {
+	var x int
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				x++
+			}
+		}()
+	}
+	wg.Wait()
+	_ = x
+}

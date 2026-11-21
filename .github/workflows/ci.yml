@@ -67,7 +67,8 @@ jobs:
         run: go run ./cmd/readmecounts -check
 
       - name: test
-        run: go test ./...
+        # -count=1: a cached pass can hide a flake (T6.4).
+        run: go test -count=1 ./...
 
       - name: test on a single processor
         # Concurrency here is not incidental: group commit batches the writes
@@ -86,6 +87,60 @@ jobs:
         # goroutines, and the race detector is the only thing that checks the
         # boundary between them is respected.
         run: go test -race ./...
+
+  flake-guard:
+    name: flake guard (advisory, load=${{ matrix.load }})
+    # Re-runs the tests this PR adds or changes, many times, in the three CI modes
+    # (T6.4, docs/ci.md). A PR with no test changes finishes in seconds; the job is
+    # skipped-green on pushes, never absent, so it can be made required later.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # ADVISORY at launch: the human makes it required in branch protection after two
+    # weeks. A failure still shows as a red step, an ::error annotation and the step
+    # summary; nothing retries it and no label is set (this workflow has no
+    # pull-requests: write).
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # 0 = the three modes; 1 = plain and race beside cmd/cpuhog, only for
+        # internal/gateway and internal/transport selections (docs/ci.md).
+        load: ["0", "1"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # BASE...HEAD needs the merge base.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: flake-guard
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          LOAD: ${{ matrix.load }}
+        run: BASE="origin/$BASE_REF" scripts/flake-guard.sh
+
+  flaky-nightly:
+    name: nightly -count=20 (race)
+    # The scheduled run only: raft, storage and statemachine as `make test-flaky`, plus
+    # internal/gateway and internal/transport, where the CI-only races were.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: test-flaky-nightly
+        run: make test-flaky-nightly
 
   mutation:
     name: mutation suite

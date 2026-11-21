@@ -1,0 +1,30 @@
+package clean
+
+import (
+	"sync"
+	"testing"
+)
+
+// TestClean is TestRacy with the counter behind a mutex.
+func TestClean(t *testing.T) {
+	var (
+		mu sync.Mutex
+		x  int
+		wg sync.WaitGroup
+	)
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				mu.Lock()
+				x++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if x != 2000 {
+		t.Fatalf("x = %d", x)
+	}
+}

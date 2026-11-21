@@ -1,0 +1,19 @@
+package h
+
+import "testing"
+
+func newThing() int { return 1 }
+
+func wrapped() int { return newThing() }
+
+func TestOne(t *testing.T) {
+	if newThing() != 1 {
+		t.Fatal("one")
+	}
+}
+
+func TestTwo(t *testing.T) { _ = newThing() }
+
+func TestThree(t *testing.T) {}
+
+func TestFour(t *testing.T) { _ = wrapped() }
