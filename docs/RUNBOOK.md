@@ -145,7 +145,7 @@ raftkv/
     ├── RUNBOOK.md, STATUS.md, ARCHITECTURE.md, INVARIANTS.md, CHAOS_RESULTS.md, DEMO_SCRIPT.md
 ```
 
-**Ports:** Raft peer gRPC `:7000`, client gRPC `:7001`, admin gRPC `:9000` (gateway only), metrics HTTP `:2112`.
+**Ports:** Raft peer and client gRPC share one `--listen` (`:7000` in the demo; there is no separate client port), admin gRPC on `--admin-listen` (`:9000`, gateway only), metrics HTTP on `--metrics-listen` (`:2112`).
 
 ---
 
@@ -249,11 +249,17 @@ fmt:        ; gofmt -l -w .
 vet:        ; go vet ./...
 lint:       ; golangci-lint run
 test:       ; go test -race -count=1 -timeout 10m ./...
-test-flaky: ; go test -race -count=20 -timeout 30m ./internal/raft/... ./internal/wal/... ./internal/kv/...
+test-flaky: ; go test -race -count=20 -timeout 30m ./internal/raft/... ./internal/storage/... ./internal/statemachine/...
 cover:      ; go test -race -coverprofile=cover.out ./... && go tool cover -func=cover.out
 proto:      ; buf generate
-chaos-smoke:; go run ./cmd/chaosrun -sim -seeds 1-20 -duration 30s
-release:    ; scripts/release.sh   # cross-compiles linux/arm64, uploads to S3 (D3)
+chaos-smoke:; go run ./cmd/chaosrun -sim -seeds 1-20   # virtual ticks: there is no -duration
+release:    ; scripts/release.sh   # BUILD ONLY: reproducible linux/arm64 build into dist/<version>/, no AWS (D3)
+release-upload: ; scripts/release-upload.sh $(RELEASE_DIR)   # human only, SSO profile, never in CI
+readme-counts: ; go run ./cmd/readmecounts          # rewrite the README test/line counts (internal/determinism checks them)
+readme-check:  ; go run ./cmd/readmecounts -check
+sync-main:  ; scripts/sync-main.sh   # merge origin/main and refresh the README counts; never pushes
+flake-guard: ; scripts/flake-guard.sh   # re-run the tests a branch adds or changes (T6.4, docs/ci.md)
+test-flaky-nightly: ; go test -race -count=20 -timeout 90m ./internal/raft/... ./internal/storage/... ./internal/statemachine/... ./internal/gateway/... ./internal/transport/...
 ```
 
 ### 6.2 `.golangci.yml` enable
@@ -268,10 +274,12 @@ Jobs on every PR:
 - **terraform** (path filter `infra/**`): `terraform fmt -check`, `terraform init -backend=false`, `terraform validate`, `tflint`, `trivy config infra/`.
 - **web** (path filter `web/**`): `npm ci`, `npm run lint`, `npm run build`.
 
-`nightly.yml`: `go test -race -count=50 ./internal/raft/...` and `chaosrun -sim -seeds 1-200`; uploads failing seeds and histories as artifacts; opens an issue on failure.
+`nightly.yml`: `go test -race -count=50 ./internal/raft/...` and `chaosrun -sim -seeds 1-200`; uploads failing seeds and histories as artifacts; opens an issue on failure. (As built: the scheduled run at 04:17 inside `ci.yml` runs `make test-flaky-nightly`, which adds `internal/gateway` and `internal/transport`; there is no separate `nightly.yml`.)
+
+As built, `ci.yml` also runs the suite three ways on every PR (plain with `-count=1`, `GOMAXPROCS=1`, and `-race`) and an advisory `flake-guard` job (T6.4, `docs/ci.md`) that re-runs the tests a PR adds or changes `-count=20` in all three modes. It becomes a required check after about two advisory weeks, which is a branch-protection setting.
 
 ### 6.4 Flakiness policy
-A test that fails once in `-count=20` is a P0 bug. Reproduce with the failing seed, find the root cause, fix, and add a regression test. Log the root cause in the PR.
+A test that fails once in `-count=20` is a P0 bug. Reproduce with the failing seed, find the root cause, fix, and add a regression test. Log the root cause in the PR. Never retry to green and never loosen a timeout to make a flake disappear; a timing change needs evidence of the mechanism (a failure dump or a deterministic reproduction).
 
 ---
 
@@ -310,7 +318,7 @@ A test that fails once in `-count=20` is a P0 bug. Reproduce with the failing se
 
 ### 7.4 Client semantics
 - [ ] Every client request carries `(clientID, seq)`. The state machine dedupes by session and returns the cached result for replays, which gives exactly-once effect under retries. The session table is part of the snapshot.
-- [ ] **Linearizable reads:** either (a) route reads through the log, or (b) **ReadIndex**: the leader must have committed an entry in its current term, records `readIndex = commitIndex`, confirms leadership with a heartbeat quorum round, then waits for `lastApplied >= readIndex`. Config `read_mode: log | readindex`, default `log` until ReadIndex passes the verifier. Leader leases are out of scope (they rely on clocks).
+- [ ] **Linearizable reads:** either (a) route reads through the log, or (b) **ReadIndex**: the leader must have committed an entry in its current term, records `readIndex = commitIndex`, confirms leadership with a heartbeat quorum round, then waits for `lastApplied >= readIndex`. As built, ReadIndex is the only read path and there is no `read_mode` switch; it is checked by the linearizability checker and by the mutation suite (the deposed-leader local-read bug). Leader leases are out of scope (they rely on clocks).
 - [ ] A deposed leader must never answer a read from local state.
 - [ ] Non-leaders return `NOT_LEADER` with a leader hint; the client library follows hints and retries with backoff.
 
@@ -390,11 +398,11 @@ Each task: **agent / branch / acceptance**. Acceptance always includes all gates
 |---|---|---|---|
 | T4.1 | KV state machine: protobuf command encoding; `Put/Get/Delete/CAS`; deterministic apply | Claude (executor) | Same log yields byte-identical state on all nodes (test) |
 | T4.2 | Client sessions and dedupe `(clientID, seq)` | Claude (executor) | Retried CAS applies once; session table has bounded size with expiry policy documented |
-| T4.3 | Read path: log reads first, then ReadIndex behind `read_mode` | Claude (executor) | Deposed-leader read test; ReadIndex only becomes default after passing the verifier (T5.x) |
+| T4.3 | Read path: log reads first, then ReadIndex (as built, ReadIndex is the only read path; there is no `read_mode` switch) | Claude (executor) | Deposed-leader read test; ReadIndex only becomes default after passing the verifier (T5.x) |
 | T4.4 | Snapshot create/restore, size or index trigger, WAL prefix truncation | Claude (executor) | Restart from snapshot + WAL equals full replay (property test) |
 | T4.5 | InstallSnapshot RPC, chunked, both follower branches | Claude (executor) | Lagging follower and fresh follower both catch up in sim; crash mid-install recovers |
 | T4.6 | Client library (leader hints, backoff, same-seq retry) and `raftkvctl` | Claude (executor) | Integration test: kill leader mid-workload, client completes |
-| T4.7 | **Admin service, metrics, event stream** (needed by the demo): `Status`, `Crash(restartDelay)`, `Pause(d)`, `SetPartition(blockedPeers)`, `SetNetem(dropPct, delayMs)`, `Events` (server stream: role changes, term, commit/applied index, snapshot events, elections). Faults are applied in a wrapper around `Transport`. | Claude (executor) | Admin RPCs callable only on `:9000`; fault wrapper unit-tested; events monotonic and complete |
+| T4.7 | **Admin service, metrics, event stream** (needed by the demo): `Status`, `Crash()` (replies, then exits with status 137 about 50 ms later; the supervisor restarts the process; there is no restart delay parameter), `Pause(d)` (clamped to 60 s), `SetPartition(blockedPeers)`, `SetNetem(dropPct, delayMs)`, `Events` (server stream of observed term/role/leader transitions with a gap-free `seq`; no per-vote or election-start detail). Faults are applied in a wrapper around `Transport` and expire at the node after 120 s. | Claude (executor) | Admin RPCs served only on `--admin-listen`, bearer-token protected, fault RPCs also need `--admin-chaos`; fault wrapper unit-tested; events monotonic |
 | T4.8 | Stretch: PreVote and CheckQuorum | Claude (executor) | Rejoining partitioned node does not disrupt a healthy leader (sim test) |
 
 ### Phase 5: chaos and linearizability
@@ -431,7 +439,7 @@ Internet
    │ HTTPS 443
    ▼
 [ Gateway  t4g.micro, public subnet, Elastic IP, api.<domain> ]
-   │  gRPC client :7001 and admin :9000 (private)
+   │  gRPC raft+client :7000 and admin :9000 (private)
    ├───────────────┬───────────────┐
    ▼               ▼               ▼
 [node1 AZ-a]   [node2 AZ-b]   [node3 AZ-c]   private subnets, no public IP, no NAT
@@ -460,33 +468,35 @@ Set `credit_specification { cpu_credits = "standard" }` on every t4g instance. T
 | **D0** | Account hygiene: root MFA, SSO/IAM Identity Center profile for daily use, no long-lived keys, set region `us-east-1`, check **credit balance and expiry date** under Billing, create AWS Budgets (see D1) | **[HUMAN]** |
 | **D1** | `infra/bootstrap`: S3 state bucket (versioning, encryption, public access blocked), backend with native locking (`use_lockfile`, Terraform >= 1.10). Budgets: monthly cost budget with credits **excluded** (so you see gross burn) alerting at $20/$30/$40 actual and 100% forecast to your email; Cost Anomaly Detection. | Claude (executor) writes, **[HUMAN]** applies |
 | **D2** | Network module: VPC `10.20.0.0/16`; public subnet `10.20.0.0/24` (AZ-a, IGW route) for the gateway; three private subnets `10.20.1.0/24`, `10.20.2.0/24`, `10.20.3.0/24` in three distinct AZs (use `data.aws_availability_zones`), **no NAT, no IGW route**; S3 gateway endpoint on private route tables; EC2 Instance Connect Endpoint in one private subnet. | Claude (executor), **[HUMAN]** reviews SGs |
-| **D3** | `make release`: cross-compile `GOOS=linux GOARCH=arm64 CGO_ENABLED=0`, embed version via `-ldflags`, upload `raftkvd` and `gateway` to a versioned S3 artifacts bucket with sha256 files. | Claude (executor) |
+| **D3** | `make release`: reproducible `GOOS=linux GOARCH=arm64 CGO_ENABLED=0` build into `dist/<version>/` (version embedded via `-ldflags`, `-version` flag, sha256 files and MANIFEST). BUILD ONLY: no AWS. `make release-upload` (a human, SSO profile, never CI) copies it to the versioned S3 artifacts bucket: node binary `raftkv-server-linux-arm64` under `artifacts/raftkvd/<version>/`, `gateway-linux-arm64` under `artifacts/gateway/<version>/`. | Claude (executor) writes, **[HUMAN]** uploads |
 | **D4** | Node compute: one instance per AZ with **fixed private IPs** (`.10` in each subnet), AL2023 arm64, instance profile limited to `s3:GetObject` on the artifacts prefix, encrypted gp3, IMDSv2 required, user-data that fetches binary, verifies sha256, installs config and systemd unit, starts service. | Claude (executor), **[HUMAN]** applies |
-| **D5** | Gateway: Go service in `cmd/gateway`, spec in §10.5; instance profile can read its own SSM parameter and the artifacts prefix only. | Claude (executor) |
+| **D5** | Gateway: Go service in `cmd/gateway`, spec in §10.6; instance profile can read its two SSM parameters (`/raftkv/admin-token`, `/raftkv/node-admin-token`) and its artifacts prefix only. | Claude (executor) |
 | **D6** | DNS and TLS: Elastic IP to `api.raftkv.tushar25.com` (A record at your DNS provider **[HUMAN]**); TLS via `golang.org/x/crypto/acme/autocert` in the gateway (80 for redirect, 443 for TLS-ALPN). | Claude (executor) + **[HUMAN]** |
 | **D7** | Dashboard in `web/` (§10.6), deployed to Vercel at `raftkv.tushar25.com` **[HUMAN]** links the project. | Claude (executor) |
 | **D8** | Verification run on the live cluster, record video, capture the report into the README. | **[HUMAN]** + agents |
-| **D9** | Ops: `scripts/rolling-update.sh`, `demo-down.sh` (terraform destroy), `demo-pause.sh` (stop instances), incident notes in `docs/OPS.md`. | Claude (executor) |
+| **D9** | Ops: `scripts/rolling-update.sh`, `demo-pause.sh` (stop instances), `demo-down.sh` (PRINT-ONLY: checks preconditions and prints the teardown order; the human runs `terraform destroy`), incident notes in `docs/OPS.md`. | Claude (executor) |
 
 ### 10.4 Security groups and IAM (human must read these before apply)
-- `sg_nodes` ingress: 7000/tcp from `sg_nodes` and `sg_gateway`; 7001 and 9000 only from `sg_gateway`; 22 only from `sg_eice`; 2112 only from `sg_gateway`. Egress: VPC CIDR and S3 prefix list.
-- `sg_gateway` ingress: 80 and 443 from `0.0.0.0/0`; no SSH. Egress: all (needs ACME, SSM).
-- `sg_eice` egress: 22 to `sg_nodes` and `sg_gateway` only.
-- Node role: `s3:GetObject` on `artifacts/raftkvd/*` only. Gateway role: same for `gateway/*` plus `ssm:GetParameter` on `/raftkv/admin-token`. No `*` actions or resources anywhere.
+- `sg_nodes` ingress: ONE shared node port, 7000/tcp (Raft and clients: the server has a single `--listen`; there is no 7001) from `sg_nodes` and `sg_gateway`; 9000 (admin) only from `sg_gateway`; 22 only from `sg_eice`; 2112 (metrics, nothing scrapes it yet) only from `sg_gateway`. Egress: VPC CIDR and tcp 443 to the S3 prefix list.
+- `sg_gateway` ingress: 80 and 443 from `0.0.0.0/0`; no SSH. Egress: tcp 443 and 80 to `0.0.0.0/0` (ACME, SSM, S3) plus everything inside the VPC CIDR (not "all").
+- `sg_eice` egress: 22 to `sg_nodes` only (the gateway has no SSH).
+- Node role: `s3:GetObject` on `artifacts/raftkvd/*` only; NO SSM and no secrets (the two node-side tokens are pushed by the human over the Instance Connect Endpoint, `infra/scripts/push-node-tokens.sh`). Gateway role: `s3:GetObject` on `artifacts/gateway/*` plus `ssm:GetParameter` on exactly `/raftkv/admin-token` and `/raftkv/node-admin-token`; no instance can read `/raftkv/cluster-token`. No `*` actions or resources anywhere.
 - Instances: IMDSv2 required, hop limit 1, EBS encrypted.
-- Admin token: SSM Parameter Store `SecureString` `/raftkv/admin-token`, created by the human, never in Terraform state (reference by name; use a data source with care or create out of band).
+- Tokens: three SSM Parameter Store `SecureString`s, created by the human out of band (from a 0600 temp file, never an inline `--value`), never in Terraform state or user-data: `/raftkv/admin-token` (gateway HTTP admin bearer), `/raftkv/node-admin-token` (machine token shared by the gateway `--node-token-file` and every node `--admin-token-file`), `/raftkv/cluster-token` (node `--cluster-token-file`, protects `AddNode`/`RemoveNode`).
 
 ### 10.5 Node runtime
-`/etc/raftkv/config.yaml` (written by user-data from Terraform templatefile): `id`, `peers` (static list of 3 ids and `10.20.x.10:7000`), `client_addr :7001`, `admin_addr :9000`, `data_dir /var/lib/raftkv`, `heartbeat_ms 100`, `election_ms [600,1200]`, `snapshot_threshold` entries, `read_mode`, `log_level`.
+The node binary is `raftkv-server` (installed as `/usr/local/bin/raftkvd`). It takes FLAGS only: there is no config file, no `--config`, no `client_addr` and no `read_mode`. One `--listen` serves Raft and client traffic; admin is a separate `--admin-listen`. The unit is rendered by Terraform from `infra/modules/compute/raftkvd.service.tftpl`; the flags are `--id`, `--peers` (three fixed `10.20.x.10:7000` addresses), `--listen :7000`, `--data-dir /var/lib/raftkv`, `--fsync=true`, `--admin-listen :9000`, `--admin-token-file`, `--admin-chaos`, `--cluster-token-file`, `--metrics-listen :2112`. Timing flags are left at the tested defaults (100 ms tick, 10 election ticks, 1 heartbeat tick: elections after 1.0 to 1.9 s, heartbeat 100 ms); the earlier 600 to 1200 ms target needs a retuned chaos suite first.
 
-`/etc/systemd/system/raftkvd.service`:
 ```ini
 [Unit]
 Description=RaftKV node
 After=network-online.target
+RequiresMountsFor=/var/lib/raftkv
+ConditionPathExists=/etc/raftkv/node-admin.token
+ConditionPathExists=/etc/raftkv/cluster.token
 [Service]
 User=raftkv
-ExecStart=/usr/local/bin/raftkvd --config /etc/raftkv/config.yaml
+ExecStart=/usr/local/bin/raftkvd --id N --peers ... --listen :7000 --data-dir /var/lib/raftkv --fsync=true --admin-listen :9000 --admin-token-file /etc/raftkv/node-admin.token --admin-chaos --cluster-token-file /etc/raftkv/cluster.token --metrics-listen :2112
 Restart=always
 RestartSec=8
 LimitNOFILE=65536
@@ -496,14 +506,14 @@ ReadWritePaths=/var/lib/raftkv
 [Install]
 WantedBy=multi-user.target
 ```
-`RestartSec=8` makes a crashed node visibly down for 8s in the demo. `Admin.Crash` performs a real `os.Exit` so recovery exercises the genuine WAL path. Partition, delay, and drop are applied in the transport wrapper (application level), and docs must say so honestly.
+Until the human has pushed both token files, systemd skips the unit (it fails closed; no crash loop). `RestartSec=8` makes a crashed node visibly down for 8 s in the demo. `Admin.Crash` replies and then exits with status 137 (no restart delay parameter), so recovery exercises the genuine WAL path; D8 must confirm that `Restart=always` restarts after 137. Partition, delay, and drop are applied in the transport wrapper (application level), and docs must say so honestly. The gateway unit (`gateway.service`) runs as a non-root user with `AmbientCapabilities=CAP_NET_BIND_SERVICE` to serve TLS on 443 and the redirect on 80 (autocert, `--tls-domain`).
 
 ### 10.6 Gateway spec (`cmd/gateway`)
 Endpoints (JSON over HTTPS, CORS allowed only for the dashboard origin):
 - `GET /healthz`
 - `GET /v1/cluster`: per node `{id, az, up, role, term, commitIndex, lastApplied, logLen, snapshotIndex, lastContactMs}`
-- `GET /v1/events`: Server-Sent Events: elections, role changes, commits, snapshots, chaos actions
-- `GET|PUT|DELETE /v1/kv/{key}`, `POST /v1/kv/{key}/cas`
+- `GET /v1/events`: Server-Sent Events: observed term/role/leader transitions, node down/up, snapshot events, polled commit progress (at most one per node per second), chaos actions and verify progress. There are no vote-granted, election-start or per-entry commit events: the nodes do not emit them (a raft observer hook is backlog).
+- `GET|PUT|DELETE /v1/kv/{key}`. `POST /v1/kv/{key}/cas` answers 501: the cluster has no compare-and-swap (no wire op, no state-machine op, no checker model); adding it is a separate raft-adjacent card.
 - `POST /v1/chaos/{kill-leader|kill/{id}|pause/{id}|partition|delay|heal}`
 - `POST /v1/verify/run` and `GET /v1/verify/last`: runs a bounded (60s) workload plus nemesis against the live cluster, checks the history, stores the report.
 
@@ -517,18 +527,18 @@ Abuse controls (all required, tested):
 ### 10.7 Dashboard spec (`web/`)
 Vite, React, TypeScript, no heavy UI kit. Panels:
 1. **Cluster view:** three AZ lanes, leader highlighted, term, commit/applied, up/down state.
-2. **Log view:** per-node log strip colored by term, commit marker, snapshot boundary.
-3. **Event timeline:** SSE-driven (election started, vote granted, leader elected, node down/up, catch-up, snapshot installed).
+2. **Log view:** per-node positions on the log index axis (`snapshotIndex`, `lastApplied`, `commitIndex`, `logLen`) and the lag behind the leader. The API exposes no log tail and no per-entry terms, so per-entry term colouring is not shown (it would need a new node RPC).
+3. **Event timeline:** SSE-driven (term/role/leader changes, node down/up, catch-up derived from polled indices and labelled as derived, snapshot events, chaos and verify events). No vote or election-start rows.
 4. **Controls:** Kill leader, Kill random, Isolate leader, Heal. Show cooldown and rate-limit state.
-5. **KV playground:** put/get/cas with latency display.
+5. **KV playground:** put/get/delete with latency display; CAS is shown disabled with the gateway's reason (501).
 6. **Verifier panel:** run, progress, verdict, counterexample viewer, link to latest report.
 7. **Replay mode:** if the gateway is unreachable (or credits have run out), play back `public/recording.jsonl` (a captured session) with a visible "REPLAY" badge. The demo link must keep working after the AWS infra is torn down.
 
 ### 10.8 Rolling update (`scripts/rolling-update.sh`)
-For each node in turn: SSH through EICE; download new binary and verify sha256; `systemctl restart raftkvd`; **wait until `Status` shows the node as follower or leader with `lastApplied` within N of the leader** before touching the next node. Never take down two nodes. Update followers first, the leader last.
+For each node in turn: SSH through EICE; download the new binary from S3 (node-local, through the gateway endpoint) and verify sha256 against the release MANIFEST; `systemctl restart raftkvd`; **wait until the node-local `/health` (metrics port) shows the node as follower or leader with `applied` within N of the leader** before touching the next node (`Status` over the admin port is not reachable from the EICE, and `raftkvctl` is not in the release). Never take down two nodes. Update followers first, the leader last. All three nodes are staged and verified before any restart; only the node in flight is rolled back on failure. Details, exit codes and the gateway update path are in `docs/OPS.md`; Terraform ignores node AMI and user-data changes, so binary and config changes go through this script.
 
 ### 10.9 Cost ceiling and teardown
-Ceiling: $40/month gross. If the $30 alarm fires: run `demo-pause.sh` (stops instances; the Elastic IP and EBS still bill a few dollars) and investigate. When the credits near expiry, run `demo-down.sh` (full destroy) and leave the dashboard in replay mode. Update README to say so.
+Ceiling: $40/month gross. If the $30 alarm fires: run `demo-pause.sh` (stops instances; the Elastic IP and EBS still bill a few dollars) and investigate. When the credits near expiry, run `demo-down.sh`, which checks preconditions and PRINTS the teardown order (destroy the demo env, empty both buckets including versions, destroy bootstrap, delete the three SSM parameters, remove the DNS record); the human runs the destroys. Then leave the dashboard in replay mode and update the README to say so. See `docs/OPS.md`.
 
 ### 10.10 Three-minute demo script
 1. (0:00) One sentence: what RaftKV is. Show the healthy 3-AZ cluster.

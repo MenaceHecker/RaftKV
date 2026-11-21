@@ -38,8 +38,11 @@ If no role is given, ask which one.
 cmd/{raftkv-server,raftkv-bench}  chaos/  internal/{raft,storage,statemachine,node,transport,metrics,determinism}
 deploy/ (kubernetes, compose, grafana, prometheus)  docs/  Dockerfile  docker-compose.yml  buf.yaml  buf.gen.yaml
 Protobuf source and generated code: internal/transport/raftkv/v1. The server takes one `--listen` gRPC address plus `--metrics-listen`.
-There is no Makefile, scripts/, .golangci.yml or .githooks/ yet (task T0.1 creates them). Until then `make ...` commands
-above fail; run the underlying `go build|vet|test` and `gofmt -l .` directly.
+The Makefile, scripts/, .golangci.yml and .githooks/ exist (T0.1). Also in the tree: cmd/{gateway,chaosrun,raftkvctl,readmecounts,flakeselect,cpuhog},
+internal/{client,gateway,faultinject,buildinfo,readmecounts,infradrift}, web/ (dashboard), infra/ (Terraform, human-applied), docs/tasks/.
 
 ## Project-specific gotchas (update as you learn)
-- TODO after Task 0: the real phase status, any deviations from the layout above.
+- Run the Go tests in all three CI modes before declaring a change done: `go test ./...`, `GOMAXPROCS=1 go test -count=1 ./...` and `go test -race ./...`. The pre-commit hook runs only `-race -short`, and most recent CI failures were timing races visible only in the other modes on the 2-core runner.
+- The hook cannot take red commits, so tests-first means: write the tests, run them red against a stub, save the output, then commit code first and tests in a separate commit.
+- Never use a nested git worktree inside the repo directory (the README test walks every .go file); create worktrees outside it.
+- Real phase status: docs/STATUS.md. Deployment steps and what D8 must verify: infra/README.md. Operations: docs/OPS.md.

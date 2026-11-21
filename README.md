@@ -2,7 +2,7 @@
 
 A distributed key-value store built on the Raft consensus algorithm, written from scratch. No `etcd/raft`, no `hashicorp/raft`, no consensus library underneath.
 
-**Status: complete.** All six phases are done. Everything described here exists and passes tests today, and the one thing that is still unfinished has a section of its own near the bottom.
+**Status: code complete; live deployment not yet verified.** All six build phases are done. Everything described here exists and passes tests today. The AWS demo (three-node cluster, gateway with TLS, dashboard) is written, policy-checked and tested against stubs and an in-memory cluster, but it has not been applied or run on real infrastructure: that live verification run is the remaining step, and what it must check is listed in `infra/README.md`. What is honestly not done is in the section of that name near the bottom and in `docs/STATUS.md`.
 
 ```
 go test ./...
@@ -227,6 +227,17 @@ Snapshots are still materialized in memory at both ends, though far less wastefu
 Storage failures are tested at the filesystem level, within limits. `internal/storage/faultfs` is an in-memory `storage.FS` that keeps file bytes, directory entries and directory creation durable separately, injects fsync, short-write, ENOSPC, rename and directory-fsync failures, and simulates power loss with dropped, torn, garbage or zeroed tails. The crash tests stop before and after every filesystem operation of an append, a conflicting suffix rewrite, a snapshot write, a compaction, an `ApplySnapshot` and a tail repair (including a second crash during the repair), and check that nothing acknowledged is lost and that the recovered log is contiguous and rebuilds the same state machine. The `SyncNever` loss contract and 200 seeds of random workloads with crashes are covered too.
 
 What this does not show. The model is deliberately conservative: everything it does is allowed by POSIX and it is stricter than ext4 in practice, but it has not been checked against a real kernel or a real power cut. It does not model reordering of unsynced writes across files, bit rot in the middle of the log, or a rename across directories. These cases are not covered by these tests and are planned as red-first task cards in `docs/tasks/` (T3.9 to T3.13): retrying after a failed write or fsync, losing the data directory on first start because its parent entry was never synced, an unsynced segment roll followed by `WAL.Sync`, `SyncNever` rolling back the hard state through compaction, and stale entries after `ApplySnapshot`.
+
+Known limitations of the system as built (the full list with evidence is `docs/STATUS.md` section 17):
+
+- The shared listener is open. Raft peer traffic, `KVService` and `ListMembers` have no authentication and there is no TLS on it; `AddNode` and `RemoveNode` are protected only when the node runs with `--cluster-token-file`. Run it on a trusted network (the AWS design keeps nodes in private subnets reachable only from the gateway).
+- The admin faults (partition, delay, drop, pause, crash) are application-level: they act inside the process and say nothing about the kernel, the network card or the scheduler.
+- The chaos monitor checks election safety, committed term per index, apply not past commit, log not shorter than commit and leader completeness. It does not check Log Matching or Leader Append-Only directly. The mutation suite's detections for two of the nine injected bugs depend on seeds.
+- Storage hardening is deferred, not done: an fsync in segment roll (T3.12), durable creation of the data directories on first start (T3.13), oversize WAL entries and proposals (T3.14), and snapshot retention versus purge (T3.15). Any `CreateSnapshot` error stops the node.
+- A removed node still answers vote requests and appends until it learns it was removed.
+- The default election timeout is 1.0 to 1.9 s. Failover on the demo cluster is correspondingly slow; shortening it needs a retuned chaos suite.
+- Compare-and-swap is not implemented (the gateway answers 501), and the dashboard cannot show per-entry terms or vote events because the nodes do not emit them.
+- Nothing has run on real AWS yet. Unverified: the token push over EC2 Instance Connect, the KMS decrypt path for the gateway's SSM read, systemd restarting a node after `Admin.Crash` (exit 137), CPU credits under sustained chaos, and certificate issuance.
 
 ---
 
