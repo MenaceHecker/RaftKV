@@ -67,7 +67,8 @@ jobs:
         run: go run ./cmd/readmecounts -check
 
       - name: test
-        run: go test ./...
+        # -count=1: a cached pass can hide a flake (T6.4).
+        run: go test -count=1 ./...
 
       - name: test on a single processor
         # Concurrency here is not incidental: group commit batches the writes
