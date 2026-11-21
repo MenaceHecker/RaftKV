@@ -148,6 +148,8 @@ type decl struct {
 	file       string
 	idents     map[string]bool
 	changed    bool
+	isMain     bool // TestMain: changing it can affect every test of the package
+	isImport   bool // an import block: changing it selects the tests of its file
 }
 
 func selectDir(dir string, hunksBy map[string][]hunk, src source) ([]string, error) {
@@ -184,10 +186,12 @@ func selectDir(dir string, hunksBy map[string][]hunk, src source) ([]string, err
 					dd.names = append(dd.names, recvName(x.Recv.List[0].Type))
 				}
 				dd.isTest = x.Recv == nil && isTestName(x.Name.Name) && x.Name.Name != "TestMain"
-				if x.Recv == nil && x.Name.Name == "TestMain" {
+				dd.isMain = x.Recv == nil && x.Name.Name == "TestMain"
+				if dd.isMain {
 					dd.names = nil
 				}
 			case *ast.GenDecl:
+				dd.isImport = x.Tok == token.IMPORT
 				if x.Doc != nil {
 					dd.start = fset.Position(x.Doc.Pos()).Line
 				}
@@ -223,8 +227,11 @@ func selectDir(dir string, hunksBy map[string][]hunk, src source) ([]string, err
 				if h.start <= dd.end && h.end >= dd.start {
 					dd.changed = true
 					hit = true
-					if len(dd.names) == 0 { // TestMain
+					if dd.isMain {
 						selectAll = true
+					}
+					if dd.isImport {
+						hit = false
 					}
 				}
 			}
