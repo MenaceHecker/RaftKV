@@ -95,7 +95,8 @@ Connect Endpoint are free; the compute stack is not (see Cost).
    It reads `/raftkv/node-admin-token` and `/raftkv/cluster-token` with your profile, writes
    `/etc/raftkv/node-admin.token` and `/etc/raftkv/cluster.token` (mode 0600, owner `raftkv`) on each
    node through ssh's stdin, and starts `raftkvd`. A token is never on a command line, never echoed,
-   never in a temp file. It needs the AWS CLI v2 (`aws ec2-instance-connect ssh --connection-type eice`).
+   never in a temp file. Your own SSO role needs `ssm:GetParameter` (with decrypt) on the two names and
+   `ec2-instance-connect:SendSSHPublicKey` and `ec2-instance-connect:OpenTunnel`. It needs the AWS CLI v2 (`aws ec2-instance-connect ssh --connection-type eice`).
    **Unverified:** whether that command forwards a remote command and stdin the way the script uses it;
    the stub tests cannot show it. If the first real run fails there, stop and tell the planner.
 10. **The gateway needs no push.** It reads `/raftkv/admin-token` and `/raftkv/node-admin-token` itself
