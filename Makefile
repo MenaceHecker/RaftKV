@@ -1,5 +1,5 @@
 # Gates from RUNBOOK 6.1, mapped to the real packages (see docs/STATUS.md).
-.PHONY: fmt vet lint test test-flaky cover proto chaos-smoke readme-counts readme-check sync-main release release-upload
+.PHONY: fmt vet lint test test-flaky test-flaky-nightly flake-guard cover proto chaos-smoke readme-counts readme-check sync-main release release-upload
 
 # Generated protobuf code is excluded, as in .github/workflows/ci.yml.
 GOFILES = $(shell find . -name "*.go" -not -name "*.pb.go" -not -path "./.git/*")
@@ -19,6 +19,15 @@ test:
 
 test-flaky:
 	go test -race -count=20 -timeout 30m ./internal/raft/... ./internal/storage/... ./internal/statemachine/...
+
+# The nightly (ci.yml, schedule) adds the two packages where the recent CI-only races were.
+test-flaky-nightly:
+	go test -race -count=20 -timeout 90m ./internal/raft/... ./internal/storage/... ./internal/statemachine/... ./internal/gateway/... ./internal/transport/...
+
+# Re-runs the tests this branch adds or changes (vs BASE) many times in the three CI modes. Same
+# command CI runs (docs/ci.md). Env: BASE (origin/main) COUNT (20) PKG_COUNT (3) MODES LOAD (0|1).
+flake-guard:
+	scripts/flake-guard.sh
 
 cover:
 	go test -race -coverprofile=cover.out ./... && go tool cover -func=cover.out
