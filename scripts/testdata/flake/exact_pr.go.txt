@@ -1,0 +1,9 @@
+package e
+
+import "testing"
+
+func TestA(t *testing.T) {
+	t.Run("B", func(t *testing.T) { _ = 1 })
+}
+
+func TestAB(t *testing.T) {}

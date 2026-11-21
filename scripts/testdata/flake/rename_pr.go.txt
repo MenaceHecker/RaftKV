@@ -1,0 +1,5 @@
+package r
+
+import "testing"
+
+func TestNew(t *testing.T) {}
