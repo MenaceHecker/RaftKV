@@ -10,10 +10,18 @@ on:
     branches: [main]
     paths:
       - "infra/**"
+      - "scripts/rolling-update*"
+      - "scripts/demo-*"
+      - "scripts/ops*"
+      - "docs/OPS.md"
       - ".github/workflows/infra.yml"
   pull_request:
     paths:
       - "infra/**"
+      - "scripts/rolling-update*"
+      - "scripts/demo-*"
+      - "scripts/ops*"
+      - "docs/OPS.md"
       - ".github/workflows/infra.yml"
 
 permissions:
@@ -82,6 +90,18 @@ jobs:
 
       - name: push-node-tokens.sh
         run: bash infra/scripts/push-node-tokens_test.sh
+
+      # D9 ops scripts: STUB aws that models the cluster; no terraform, ssh or scp is ever reachable.
+      - name: rolling-update.sh
+        run: bash scripts/rolling-update_test.sh
+
+      - name: demo-pause.sh and demo-down.sh
+        run: |
+          bash scripts/demo-pause_test.sh
+          bash scripts/demo-down_test.sh
+
+      - name: docs/OPS.md
+        run: bash scripts/ops-doc_test.sh
 
   tflint:
     name: tflint
